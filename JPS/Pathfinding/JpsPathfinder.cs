@@ -37,178 +37,273 @@ public sealed class JpsPathfinder
 
     public JumpCache? Cache { get; private set; }
 
+    // ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ----
+    private int _w, _h, _size;
+    private long[] _g = [];
+    private int[] _parent = [];
+    private sbyte[] _parentDir = [];
+    private int[] _seenGen = [];     // 节点是否已被生成（算过 g）
+    private int[] _closedGen = [];   // 节点是否已出队展开
+    private int[] _scanGen = [];     // 可视化：是否已记录为“扫描跳过”
+    private int _gen;
+    private readonly PriorityQueue<int, long> _open = new();
+    private readonly int[] _dirBuf = new int[JpsDirections.Count];
+
+    // 可视化用的收集列表（仅在 collectDebug 时填充）
+    private readonly List<int> _expandedIds = [];
+    private readonly List<int> _generatedIds = [];
+    private readonly List<int> _scannedIds = [];
+
     public void RebuildCache(GridMap map) => Cache = _precomputer.Build(map);
 
-    public PathResult FindPath(GridMap map)
+    public PathResult FindPath(GridMap map, bool collectDebug = true)
     {
         if (!map.HasStart || !map.HasEnd)
-        {
             return new PathResult { Message = "请先设置起点和终点。" };
-        }
 
         if (!map.IsWalkable(map.StartX, map.StartY) || !map.IsWalkable(map.EndX, map.EndY))
-        {
             return new PathResult { Message = "起点或终点位于阻挡上。" };
-        }
 
         if (!map.IsPrecomputeValid || Cache == null)
             RebuildCache(map);
 
         var cache = Cache!;
-        var open = new PriorityQueue<(int X, int Y), long>();
-        var gScore = new Dictionary<(int X, int Y), long>();
-        var parent = new Dictionary<(int X, int Y), (int X, int Y)>();
-        var parentDir = new Dictionary<(int X, int Y), (int Dx, int Dy)>();
-        var expandedSet = new HashSet<(int X, int Y)>();
-        var scanned = new HashSet<(int X, int Y)>();
-        var closed = new HashSet<(int X, int Y)>();
+        EnsureBuffers(map);
+        NextGeneration();
 
-        var start = (X: map.StartX, Y: map.StartY);
-        var goal = (X: map.EndX, Y: map.EndY);
-
-        gScore[start] = 0;
-        open.Enqueue(start, JpsDirections.OctileHeuristic(start.X, start.Y, goal.X, goal.Y));
-
-        int expanded = 0;
-
-        while (open.Count > 0)
+        if (collectDebug)
         {
-            var current = open.Dequeue();
-            if (closed.Contains(current))
+            _expandedIds.Clear();
+            _generatedIds.Clear();
+            _scannedIds.Clear();
+        }
+
+        int gx = map.EndX, gy = map.EndY;
+        int startId = Id(map.StartX, map.StartY);
+        int goalId = Id(gx, gy);
+
+        _open.Clear();
+        _g[startId] = 0;
+        _seenGen[startId] = _gen;
+        _parent[startId] = -1;
+        _parentDir[startId] = -1;
+        _open.Enqueue(startId, JpsDirections.OctileHeuristic(map.StartX, map.StartY, gx, gy));
+
+        int expandedCount = 0;
+
+        while (_open.TryDequeue(out int current, out _))
+        {
+            if (_closedGen[current] == _gen)
                 continue;
 
-            closed.Add(current);
-            expandedSet.Add(current);
-            expanded++;
+            _closedGen[current] = _gen;
+            expandedCount++;
+            if (collectDebug)
+                _expandedIds.Add(current);
 
-            if (current == goal)
+            if (current == goalId)
+                return Success(map, startId, goalId, expandedCount, collectDebug);
+
+            int cx = current % _w;
+            int cy = current / _w;
+            int baseIdx = cache.Base(cx, cy);
+
+            int dirCount = FillDirections(map, cx, cy, _parentDir[current]);
+
+            for (int i = 0; i < dirCount; i++)
             {
-                var path = ReconstructPath(parent, start, goal);
-                var frontier = Frontier(gScore, expandedSet);
-                return BuildResult(true, path, expandedSet, frontier, scanned,
-                    $"JPS：扩展 {expandedSet.Count}，入队未扩展 {frontier.Count}，扫描跳过 {scanned.Count} 格，路径 {path.Count} 格。");
-            }
+                int idx = _dirBuf[i];
+                var (dx, dy) = JpsDirections.All[idx];
+                int dist = cache.GetAt(baseIdx, idx);
 
-            IEnumerable<(int Dx, int Dy)> directions;
-            if (parentDir.TryGetValue(current, out var pd))
-                directions = GetPrunedDirections(map, current.X, current.Y, pd.Dx, pd.Dy);
-            else
-                directions = JpsDirections.All;
-
-            foreach (var (dx, dy) in directions)
-            {
-                var jump = Jump(map, cache, current.X, current.Y, dx, dy, goal.X, goal.Y);
+                JumpEntry jump = JpsDirections.IsDiagonal(dx, dy)
+                    ? DiagonalJump(cache, cx, cy, dx, dy, gx, gy, dist)
+                    : CardinalJump(cx, cy, dx, dy, gx, gy, dist);
 
                 if (!jump.HasJump)
                 {
-                    // 该方向没有跳点：射线一路扫到撞墙/越界，扫过的格子未进 open
-                    CollectFailedRay(map, scanned, current.X, current.Y, dx, dy);
+                    if (collectDebug)
+                        CollectFailedRay(map, cx, cy, dx, dy);
                     continue;
                 }
 
-                // 成功跳跃：起点与跳点之间被射线扫过、未进 open 的格子
-                CollectSkippedRay(scanned, current.X, current.Y, jump.X, jump.Y);
+                if (collectDebug)
+                    CollectSkippedRay(cx, cy, jump.X, jump.Y);
 
-                var neighbor = (jump.X, jump.Y);
-                if (closed.Contains(neighbor))
+                int nbId = Id(jump.X, jump.Y);
+                if (_closedGen[nbId] == _gen)
                     continue;
 
                 long moveCost = (long)jump.Steps *
                     (JpsDirections.IsDiagonal(dx, dy) ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost);
+                long tentative = _g[current] + moveCost;
 
-                long tentative = gScore[current] + moveCost;
-                if (gScore.TryGetValue(neighbor, out var known) && tentative >= known)
+                bool firstSeen = _seenGen[nbId] != _gen;
+                if (!firstSeen && tentative >= _g[nbId])
                     continue;
 
-                gScore[neighbor] = tentative;
-                parent[neighbor] = current;
-                parentDir[neighbor] = (dx, dy);
+                _g[nbId] = tentative;
+                _seenGen[nbId] = _gen;
+                _parent[nbId] = current;
+                _parentDir[nbId] = (sbyte)idx;
 
-                long f = tentative + JpsDirections.OctileHeuristic(neighbor.X, neighbor.Y, goal.X, goal.Y);
-                open.Enqueue(neighbor, f);
+                if (collectDebug && firstSeen)
+                    _generatedIds.Add(nbId);
+
+                long f = tentative + JpsDirections.OctileHeuristic(jump.X, jump.Y, gx, gy);
+                _open.Enqueue(nbId, f);
             }
         }
 
-        var frontierFail = Frontier(gScore, expandedSet);
-        return BuildResult(false, [], expandedSet, frontierFail, scanned,
-            $"JPS：未找到路径（扩展 {expandedSet.Count}，扫描跳过 {scanned.Count} 格）。");
+        return Failure(expandedCount, collectDebug);
     }
 
-    // open 列表里"已入队但从未出队展开"的跳点：所有算过 g 的节点减去已扩展的
-    private static List<(int X, int Y)> Frontier(
-        Dictionary<(int X, int Y), long> gScore,
-        HashSet<(int X, int Y)> expandedSet)
-    {
-        var frontier = new List<(int X, int Y)>();
-        foreach (var node in gScore.Keys)
-            if (!expandedSet.Contains(node))
-                frontier.Add(node);
-        return frontier;
-    }
+    // ---------------- 结果构造 ----------------
 
-    private static PathResult BuildResult(
-        bool success,
-        List<(int X, int Y)> path,
-        HashSet<(int X, int Y)> expandedSet,
-        List<(int X, int Y)> frontier,
-        HashSet<(int X, int Y)> scanned,
-        string message)
+    private PathResult Success(GridMap map, int startId, int goalId, int expandedCount, bool collectDebug)
     {
+        var path = ReconstructPath(startId, goalId);
+
+        if (!collectDebug)
+        {
+            return new PathResult
+            {
+                Success = true,
+                Path = path,
+                ExpandedNodes = expandedCount,
+                Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 格。"
+            };
+        }
+
+        var expanded = ToPoints(_expandedIds);
+        var frontier = FrontierPoints();
+        var scanned = ToPoints(_scannedIds);
         return new PathResult
         {
-            Success = success,
+            Success = true,
             Path = path,
-            Expanded = [.. expandedSet],
+            Expanded = expanded,
             Frontier = frontier,
-            Scanned = [.. scanned],
-            ExpandedNodes = expandedSet.Count,
-            Message = message
+            Scanned = scanned,
+            ExpandedNodes = expandedCount,
+            Message = $"JPS：扩展 {expanded.Count}，入队未扩展 {frontier.Count}，扫描跳过 {scanned.Count} 格，路径 {path.Count} 格。"
         };
     }
 
-    private static void CollectFailedRay(GridMap map, HashSet<(int X, int Y)> failed, int x, int y, int dx, int dy)
+    private PathResult Failure(int expandedCount, bool collectDebug)
     {
-        int cx = x;
-        int cy = y;
+        if (!collectDebug)
+            return new PathResult { ExpandedNodes = expandedCount, Message = $"JPS：未找到路径（扩展 {expandedCount}）。" };
 
-        while (true)
+        var expanded = ToPoints(_expandedIds);
+        var frontier = FrontierPoints();
+        var scanned = ToPoints(_scannedIds);
+        return new PathResult
         {
-            cx += dx;
-            cy += dy;
-
-            if (!map.IsWalkable(cx, cy))
-                return;
-
-            failed.Add((cx, cy));
-        }
+            Expanded = expanded,
+            Frontier = frontier,
+            Scanned = scanned,
+            ExpandedNodes = expandedCount,
+            Message = $"JPS：未找到路径（扩展 {expanded.Count}，扫描跳过 {scanned.Count} 格）。"
+        };
     }
 
-    private static void CollectSkippedRay(HashSet<(int X, int Y)> skipped, int x1, int y1, int x2, int y2)
+    private List<(int X, int Y)> FrontierPoints()
     {
-        int dx = Math.Sign(x2 - x1);
-        int dy = Math.Sign(y2 - y1);
-        int x = x1;
-        int y = y1;
+        var frontier = new List<(int X, int Y)>();
+        foreach (int id in _generatedIds)
+            if (_closedGen[id] != _gen)
+                frontier.Add((id % _w, id / _w));
+        return frontier;
+    }
 
-        while (x != x2 || y != y2)
+    private List<(int X, int Y)> ToPoints(List<int> ids)
+    {
+        var pts = new List<(int X, int Y)>(ids.Count);
+        foreach (int id in ids)
+            pts.Add((id % _w, id / _w));
+        return pts;
+    }
+
+    // ---------------- 缓冲区与代次 ----------------
+
+    private void EnsureBuffers(GridMap map)
+    {
+        if (_w == map.Width && _size == map.Width * map.Height)
+            return;
+
+        _w = map.Width;
+        _h = map.Height;
+        _size = _w * _h;
+        _g = new long[_size];
+        _parent = new int[_size];
+        _parentDir = new sbyte[_size];
+        _seenGen = new int[_size];
+        _closedGen = new int[_size];
+        _scanGen = new int[_size];
+        _gen = 0;
+    }
+
+    private void NextGeneration()
+    {
+        _gen++;
+        if (_gen != int.MaxValue)
+            return;
+
+        // 代次号溢出（极罕见）：清零重来
+        Array.Clear(_seenGen);
+        Array.Clear(_closedGen);
+        Array.Clear(_scanGen);
+        _gen = 1;
+    }
+
+    private int Id(int x, int y) => y * _w + x;
+
+    // ---------------- 方向剪枝（零分配，写入 _dirBuf，返回数量）----------------
+
+    private int FillDirections(GridMap map, int x, int y, sbyte parentDir)
+    {
+        if (parentDir < 0)
         {
-            x += dx;
-            y += dy;
-            skipped.Add((x, y));
+            for (int i = 0; i < JpsDirections.Count; i++)
+                _dirBuf[i] = i;
+            return JpsDirections.Count;
         }
+
+        var (pdx, pdy) = JpsDirections.All[parentDir];
+        int n = 0;
+
+        if (JpsDirections.IsDiagonal(pdx, pdy))
+        {
+            _dirBuf[n++] = parentDir;
+            _dirBuf[n++] = JpsDirections.IndexOf(pdx, 0);
+            _dirBuf[n++] = JpsDirections.IndexOf(0, pdy);
+
+            if (!map.IsWalkable(x - pdx, y))
+                _dirBuf[n++] = JpsDirections.IndexOf(-pdx, pdy);
+            if (!map.IsWalkable(x, y - pdy))
+                _dirBuf[n++] = JpsDirections.IndexOf(pdx, -pdy);
+
+            return n;
+        }
+
+        _dirBuf[n++] = parentDir;
+
+        if (pdx != 0)
+        {
+            if (!map.IsWalkable(x, y + 1)) _dirBuf[n++] = JpsDirections.IndexOf(pdx, 1);
+            if (!map.IsWalkable(x, y - 1)) _dirBuf[n++] = JpsDirections.IndexOf(pdx, -1);
+        }
+        else
+        {
+            if (!map.IsWalkable(x + 1, y)) _dirBuf[n++] = JpsDirections.IndexOf(1, pdy);
+            if (!map.IsWalkable(x - 1, y)) _dirBuf[n++] = JpsDirections.IndexOf(-1, pdy);
+        }
+
+        return n;
     }
 
-    // JPS+ 目标导向跳跃：在查预计算表的同时，把终点当作动态跳点处理，
-    // 这样即使地图上没有任何静态跳点（例如完全空白地图）也能找到终点。
-    private static JumpEntry Jump(GridMap map, JumpCache cache, int x, int y, int dx, int dy, int gx, int gy)
-    {
-        int dir = JpsDirections.IndexOf(dx, dy);
-        int dist = cache.Get(x, y, dir);
-
-        return JpsDirections.IsDiagonal(dx, dy)
-            ? DiagonalJump(cache, x, y, dx, dy, gx, gy, dist)
-            : CardinalJump(x, y, dx, dy, gx, gy, dist);
-    }
+    // ---------------- 目标导向跳跃 ----------------
 
     private static JumpEntry CardinalJump(int x, int y, int dx, int dy, int gx, int gy, int dist)
     {
@@ -234,24 +329,20 @@ public sealed class JpsPathfinder
     {
         int maxDiag = dist > 0 ? dist : -dist;
 
-        // 终点位于该对角方向所在的象限时，尝试拦截
         if (Math.Sign(gx - x) == dx && Math.Sign(gy - y) == dy)
         {
             int absDx = Math.Abs(gx - x);
             int absDy = Math.Abs(gy - y);
             int minDiff = Math.Min(absDx, absDy);
 
-            // 若在对齐拐点之前已存在真正的对角跳点，则先返回它
             if (dist > 0 && dist < minDiff)
                 return new JumpEntry(x + dx * dist, y + dy * dist, dist);
 
             if (minDiff <= maxDiag)
             {
-                // 终点恰好落在纯对角线上
                 if (absDx == absDy)
                     return new JumpEntry(gx, gy, minDiff);
 
-                // 走 minDiff 步对角到达“拐点”，从这里终点变成纯正交方向
                 int ax = x + dx * minDiff;
                 int ay = y + dy * minDiff;
                 int remaining = Math.Abs(absDx - absDy);
@@ -261,7 +352,6 @@ public sealed class JpsPathfinder
                 int cardDist = cache.Get(ax, ay, cardDir);
                 int cardTravel = cardDist > 0 ? cardDist : -cardDist;
 
-                // 从拐点到终点的正交路径畅通，则把拐点作为中间跳点入队
                 if (remaining <= cardTravel)
                     return new JumpEntry(ax, ay, minDiff);
             }
@@ -272,81 +362,76 @@ public sealed class JpsPathfinder
             : JumpEntry.None;
     }
 
-    private static IEnumerable<(int Dx, int Dy)> GetPrunedDirections(GridMap map, int x, int y, int pdx, int pdy)
+    // ---------------- 可视化采集 ----------------
+
+    private void CollectFailedRay(GridMap map, int x, int y, int dx, int dy)
     {
-        if (JpsDirections.IsDiagonal(pdx, pdy))
+        int cx = x, cy = y;
+        while (true)
         {
-            yield return (pdx, pdy);
-            yield return (pdx, 0);
-            yield return (0, pdy);
-
-            if (!map.IsWalkable(x - pdx, y))
-                yield return (-pdx, pdy);
-
-            if (!map.IsWalkable(x, y - pdy))
-                yield return (pdx, -pdy);
-
-            yield break;
-        }
-
-        yield return (pdx, pdy);
-
-        if (pdx != 0)
-        {
-            if (!map.IsWalkable(x, y + 1))
-                yield return (pdx, 1);
-
-            if (!map.IsWalkable(x, y - 1))
-                yield return (pdx, -1);
-        }
-        else
-        {
-            if (!map.IsWalkable(x + 1, y))
-                yield return (1, pdy);
-
-            if (!map.IsWalkable(x - 1, y))
-                yield return (-1, pdy);
+            cx += dx;
+            cy += dy;
+            if (!map.IsWalkable(cx, cy))
+                return;
+            AddScanned(cx, cy);
         }
     }
 
-    private static List<(int X, int Y)> ReconstructPath(
-        Dictionary<(int X, int Y), (int X, int Y)> parent,
-        (int X, int Y) start,
-        (int X, int Y) goal)
+    private void CollectSkippedRay(int x1, int y1, int x2, int y2)
     {
-        var nodes = new List<(int X, int Y)> { goal };
-        var current = goal;
-
-        while (current != start)
+        int dx = Math.Sign(x2 - x1);
+        int dy = Math.Sign(y2 - y1);
+        int x = x1, y = y1;
+        while (x != x2 || y != y2)
         {
-            current = parent[current];
+            x += dx;
+            y += dy;
+            AddScanned(x, y);
+        }
+    }
+
+    private void AddScanned(int x, int y)
+    {
+        int id = Id(x, y);
+        if (_scanGen[id] == _gen)
+            return;
+        _scanGen[id] = _gen;
+        _scannedIds.Add(id);
+    }
+
+    // ---------------- 路径重建 ----------------
+
+    private List<(int X, int Y)> ReconstructPath(int startId, int goalId)
+    {
+        var nodes = new List<int> { goalId };
+        int current = goalId;
+        while (current != startId)
+        {
+            current = _parent[current];
             nodes.Add(current);
         }
-
         nodes.Reverse();
 
         var path = new List<(int X, int Y)>();
         for (int i = 0; i < nodes.Count - 1; i++)
         {
-            var from = nodes[i];
-            var to = nodes[i + 1];
-            AppendSegment(path, from, to);
+            int fromId = nodes[i];
+            int toId = nodes[i + 1];
+            AppendSegment(path, fromId % _w, fromId / _w, toId % _w, toId / _w);
         }
-
         return path;
     }
 
-    private static void AppendSegment(List<(int X, int Y)> path, (int X, int Y) from, (int X, int Y) to)
+    private static void AppendSegment(List<(int X, int Y)> path, int fx, int fy, int tx, int ty)
     {
-        int dx = Math.Sign(to.X - from.X);
-        int dy = Math.Sign(to.Y - from.Y);
-        int x = from.X;
-        int y = from.Y;
+        int dx = Math.Sign(tx - fx);
+        int dy = Math.Sign(ty - fy);
+        int x = fx, y = fy;
 
-        if (path.Count == 0 || path[^1] != from)
-            path.Add(from);
+        if (path.Count == 0 || path[^1] != (fx, fy))
+            path.Add((fx, fy));
 
-        while (x != to.X || y != to.Y)
+        while (x != tx || y != ty)
         {
             x += dx;
             y += dy;

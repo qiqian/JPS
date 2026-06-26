@@ -16,6 +16,11 @@ public sealed class JumpCache
         _dist = new int[width * height * JpsDirections.Count];
     }
 
+    // 同一格批量访问 8 个方向时，先取基址再用 GetAt，省去重复乘法。
+    public int Base(int x, int y) => (y * _width + x) * JpsDirections.Count;
+
+    public int GetAt(int baseIndex, int direction) => _dist[baseIndex + direction];
+
     public int Get(int x, int y, int direction) =>
         _dist[(y * _width + x) * JpsDirections.Count + direction];
 
