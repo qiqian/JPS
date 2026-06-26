@@ -22,6 +22,7 @@ public sealed class GridControl : Control
     // 公开的配色，供图例复用，保证图例与网格颜色一致
     public static readonly Color WalkableColor = Color.FromArgb(112, 112, 118);
     public static readonly Color ObstacleColor = Color.FromArgb(32, 32, 36);
+    public static readonly Color DynamicObstacleColor = Color.FromArgb(150, 85, 35);
     public static readonly Color ExpandedColor = Color.FromArgb(30, 158, 70);
     public static readonly Color FrontierColor = Color.FromArgb(168, 84, 224);
     public static readonly Color ScannedColor = Color.FromArgb(70, 104, 168);
@@ -76,8 +77,12 @@ public sealed class GridControl : Control
 
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
+            {
                 if (_map.IsBlocked(x, y))
                     data.Obstacles.Add(new PointData { X = x, Y = y });
+                else if (_map.IsDynamic(x, y))
+                    data.DynamicObstacles.Add(new PointData { X = x, Y = y });
+            }
 
         return data;
     }
@@ -95,22 +100,18 @@ public sealed class GridControl : Control
         if (data.End != null)
             _map.SetEnd(data.End.X, data.End.Y);
 
-        Invalidate();
-    }
+        // 动态阻挡在静态/起终点之后恢复：ToggleDynamic 会自动跳过非法格
+        foreach (var d in data.DynamicObstacles)
+            _map.ToggleDynamic(d.X, d.Y);
 
-    public void RebuildJumpCache()
-    {
-        EnsureGrid();
-        var sw = Stopwatch.StartNew();
-        _jps.RebuildCache(_map);
-        sw.Stop();
-        NotifyStatus($"JPS 8 方向跳点表已预计算（{_map.Width}x{_map.Height}，用时 {sw.Elapsed.TotalMilliseconds:F1} ms）。");
+        Invalidate();
     }
 
     public PathResult RunJps()
     {
         EnsureGrid();
-        if (!_map.IsPrecomputeValid)
+        // 有动态阻挡时走经典逐格跳跃，不需要预计算表；仅静态场景下预先建表（与寻路计时分开）
+        if (!_map.HasDynamicObstacles && !_map.IsPrecomputeValid)
             _jps.RebuildCache(_map);
 
         var sw = Stopwatch.StartNew();
@@ -176,10 +177,7 @@ public sealed class GridControl : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-
-        if (_isPainting && _mode == EditMode.BrushObstacle)
-            RebuildJumpCache();
-
+        // 预计算已变为内部惰性行为：寻路时若无动态阻挡且表失效，会自动重建。
         _isPainting = false;
     }
 
@@ -198,7 +196,10 @@ public sealed class GridControl : Control
             for (int x = 0; x < _map.Width; x++)
             {
                 var rect = new Rectangle(x * cs, y * cs, cs, cs);
-                g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleBrush : WalkableBrush, rect);
+                Brush cellBrush = _map.IsBlocked(x, y) ? ObstacleBrush
+                    : _map.IsDynamic(x, y) ? DynamicObstacleBrush
+                    : WalkableBrush;
+                g.FillRectangle(cellBrush, rect);
             }
         }
 
@@ -209,6 +210,7 @@ public sealed class GridControl : Control
 
     private static readonly SolidBrush WalkableBrush = new(WalkableColor);
     private static readonly SolidBrush ObstacleBrush = new(ObstacleColor);
+    private static readonly SolidBrush DynamicObstacleBrush = new(DynamicObstacleColor);
 
     private void EnsureGrid()
     {
@@ -272,6 +274,15 @@ public sealed class GridControl : Control
                 _map.SetEnd(x, y);
                 Invalidate();
                 NotifyStatus($"终点：({x}, {y})");
+                break;
+
+            case EditMode.DynamicObstacle:
+                // 单格点击切换：有则销毁、无则新增。不重建跳点表（动态阻挡不参与预计算）。
+                _map.ToggleDynamic(x, y);
+                Invalidate();
+                NotifyStatus(_map.IsDynamic(x, y)
+                    ? $"动态阻挡 +({x}, {y})"
+                    : $"动态阻挡 -({x}, {y})");
                 break;
         }
     }

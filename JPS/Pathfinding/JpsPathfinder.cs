@@ -108,11 +108,15 @@ public sealed class JpsPathfinder
         if (!map.IsWalkable(map.StartX, map.StartY) || !map.IsWalkable(map.EndX, map.EndY))
             return new PathResult { Message = "起点或终点位于阻挡上。" };
 
-        // 跳点表失效（阻挡改过）或尚未构建时，重建一次
-        if (!map.IsPrecomputeValid || Cache == null)
+        // 存在动态阻挡时改走经典逐格跳跃，不需要（也不能用）只含静态阻挡的跳点表，
+        // 因此此时跳过预计算重建，避免浪费。
+        bool useClassic = map.HasDynamicObstacles;
+
+        // 仅在使用查表快路径时，才在跳点表失效/未建时重建
+        if (!useClassic && (!map.IsPrecomputeValid || Cache == null))
             RebuildCache(map);
 
-        var cache = Cache!;
+        var cache = Cache;   // 经典模式下可能为 null（未用到）
         EnsureBuffers(map);   // 按地图尺寸准备/复用缓冲区
         NextGeneration();     // 代次自增，使上一次查询的所有标记自动失效（无需清零）
 
@@ -126,6 +130,9 @@ public sealed class JpsPathfinder
         int gx = map.EndX, gy = map.EndY;
         int startId = Id(map.StartX, map.StartY);
         int goalId = Id(gx, gy);
+
+        // 经典逐格跳跃用的完整可走判定（含动态阻挡）
+        Func<int, int, bool> walk = map.IsWalkable;
 
         // 起点入队：g=0，优先级 f = g + 启发值
         _open.Clear();
@@ -155,7 +162,7 @@ public sealed class JpsPathfinder
 
             int cx = current % _w;   // 由 id 还原坐标
             int cy = current / _w;
-            int baseIdx = cache.Base(cx, cy);   // 该格在跳点表中的基址（8 个方向连续存放）
+            int baseIdx = useClassic ? 0 : cache!.Base(cx, cy);   // 该格在跳点表中的基址（经典模式不用）
 
             // 按 JPS 剪枝规则，只在“必要的方向”上尝试跳跃（来向不同则方向集不同）
             int dirCount = FillDirections(map, cx, cy, _parentDir[current]);
@@ -164,12 +171,20 @@ public sealed class JpsPathfinder
             {
                 int idx = _dirBuf[i];
                 var (dx, dy) = JpsDirections.All[idx];
-                int dist = cache.GetAt(baseIdx, idx);   // 该方向到下一个跳点(正)/到墙(负)的预计算距离
 
-                // 沿该方向跳跃，同时把终点当作动态跳点尝试拦截
-                JumpEntry jump = JpsDirections.IsDiagonal(dx, dy)
-                    ? DiagonalJump(cache, cx, cy, dx, dy, gx, gy, dist)
-                    : CardinalJump(cx, cy, dx, dy, gx, gy, dist);
+                // 沿该方向跳跃。无动态阻挡时查预计算表 O(1)；有动态阻挡时逐格扫描。
+                JumpEntry jump;
+                if (useClassic)
+                {
+                    jump = ClassicJump(walk, cx, cy, dx, dy, gx, gy);
+                }
+                else
+                {
+                    int dist = cache!.GetAt(baseIdx, idx);   // 该方向到下一个跳点(正)/到墙(负)的预计算距离
+                    jump = JpsDirections.IsDiagonal(dx, dy)
+                        ? DiagonalJump(cache!, cx, cy, dx, dy, gx, gy, dist)
+                        : CardinalJump(cx, cy, dx, dy, gx, gy, dist);
+                }
 
                 if (!jump.HasJump)
                 {
@@ -454,6 +469,58 @@ public sealed class JpsPathfinder
         return dist > 0
             ? new JumpEntry(x + dx * dist, y + dy * dist, dist)
             : JumpEntry.None;
+    }
+
+    // ---------------- 经典逐格跳跃（动态阻挡回退路径）----------------
+    // 不用预计算表，逐格扫描并实时检测跳点；walkable 含动态阻挡。
+    // 终点在此处通过“到达即返回”自然处理，无需额外的目标导向。
+
+    private static JumpEntry ClassicJump(Func<int, int, bool> w, int x, int y, int dx, int dy, int gx, int gy)
+    {
+        return JpsDirections.IsDiagonal(dx, dy)
+            ? ClassicJumpDiagonal(w, x, y, dx, dy, gx, gy)
+            : ClassicJumpCardinal(w, x, y, dx, dy, gx, gy);
+    }
+
+    private static JumpEntry ClassicJumpCardinal(Func<int, int, bool> w, int x, int y, int dx, int dy, int gx, int gy)
+    {
+        int cx = x, cy = y, steps = 0;
+        while (true)
+        {
+            cx += dx;
+            cy += dy;
+            steps++;
+
+            if (!w(cx, cy))
+                return JumpEntry.None;                       // 撞墙/动态阻挡
+            if (cx == gx && cy == gy)
+                return new JumpEntry(cx, cy, steps);         // 到达终点
+            if (JpsRules.HasCardinalForcedNeighbor(w, cx, cy, dx, dy))
+                return new JumpEntry(cx, cy, steps);         // 出现强迫邻居 → 跳点
+        }
+    }
+
+    private static JumpEntry ClassicJumpDiagonal(Func<int, int, bool> w, int x, int y, int dx, int dy, int gx, int gy)
+    {
+        int cx = x, cy = y, steps = 0;
+        while (true)
+        {
+            cx += dx;
+            cy += dy;
+            steps++;
+
+            if (!w(cx, cy))
+                return JumpEntry.None;
+            if (cx == gx && cy == gy)
+                return new JumpEntry(cx, cy, steps);
+            if (JpsRules.HasDiagonalForcedNeighbor(w, cx, cy, dx, dy))
+                return new JumpEntry(cx, cy, steps);
+
+            // 对角途中：若沿两个正交分量能找到跳点，则此格也是对角跳点
+            if (ClassicJumpCardinal(w, cx, cy, dx, 0, gx, gy).HasJump ||
+                ClassicJumpCardinal(w, cx, cy, 0, dy, gx, gy).HasJump)
+                return new JumpEntry(cx, cy, steps);
+        }
     }
 
     // ---------------- 可视化采集（不影响算法结果，仅供界面展示）----------------

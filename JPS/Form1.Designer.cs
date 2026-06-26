@@ -5,10 +5,10 @@
         private System.ComponentModel.IContainer components = null;
         private ToolStrip toolStrip1;
         private ToolStripButton btnBrush;
+        private ToolStripButton btnDynamic;
         private ToolStripButton btnStart;
         private ToolStripButton btnEnd;
         private ToolStripButton btnClear;
-        private ToolStripButton btnPrecompute;
         private ToolStripButton btnFindPath;
         private ToolStripButton btnFindPathAStar;
         private ToolStripButton btnSave;
@@ -35,11 +35,11 @@
             components = new System.ComponentModel.Container();
             toolStrip1 = new ToolStrip();
             btnBrush = new ToolStripButton();
+            btnDynamic = new ToolStripButton();
             btnStart = new ToolStripButton();
             btnEnd = new ToolStripButton();
             btnClear = new ToolStripButton();
             toolStripSeparator1 = new ToolStripSeparator();
-            btnPrecompute = new ToolStripButton();
             btnFindPath = new ToolStripButton();
             btnFindPathAStar = new ToolStripButton();
             toolStripSeparator2 = new ToolStripSeparator();
@@ -61,7 +61,7 @@
             toolStrip1.ImageScalingSize = new Size(20, 20);
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
-                btnBrush, btnStart, btnEnd, btnClear, toolStripSeparator1, btnPrecompute, btnFindPath, btnFindPathAStar,
+                btnBrush, btnDynamic, btnStart, btnEnd, btnClear, toolStripSeparator1, btnFindPath, btnFindPathAStar,
                 toolStripSeparator2, btnSave, btnLoad
             });
             toolStrip1.Location = new Point(0, 0);
@@ -78,6 +78,16 @@
             btnBrush.Text = "刷阻挡";
             btnBrush.ToolTipText = "左键绘制阻挡，右键擦除";
             btnBrush.Click += BtnBrush_Click;
+            // 
+            // btnDynamic
+            // 
+            btnDynamic.CheckOnClick = true;
+            btnDynamic.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            btnDynamic.Name = "btnDynamic";
+            btnDynamic.Size = new Size(80, 28);
+            btnDynamic.Text = "动态阻挡";
+            btnDynamic.ToolTipText = "点一下加动态阻挡，再点一下销毁；不参与 JPS 预计算";
+            btnDynamic.Click += BtnDynamic_Click;
             // 
             // btnStart
             // 
@@ -104,15 +114,6 @@
             btnClear.Size = new Size(60, 28);
             btnClear.Text = "清除";
             btnClear.Click += BtnClear_Click;
-            // 
-            // btnPrecompute
-            // 
-            btnPrecompute.DisplayStyle = ToolStripItemDisplayStyle.Text;
-            btnPrecompute.Name = "btnPrecompute";
-            btnPrecompute.Size = new Size(88, 28);
-            btnPrecompute.Text = "预计算JPS";
-            btnPrecompute.ToolTipText = "阻挡编辑后预计算 8 方向跳点表";
-            btnPrecompute.Click += BtnPrecompute_Click;
             // 
             // btnFindPath
             // 

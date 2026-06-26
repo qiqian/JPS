@@ -13,4 +13,5 @@ public sealed class MapData
     public PointData? Start { get; set; }
     public PointData? End { get; set; }
     public List<PointData> Obstacles { get; set; } = [];
+    public List<PointData> DynamicObstacles { get; set; } = [];
 }
