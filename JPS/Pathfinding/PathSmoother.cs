@@ -1,38 +1,46 @@
+using System.Numerics;
 using JPS.Models;
 
 namespace JPS.Pathfinding;
 
 /// <summary>
-/// 视线拉直（string-pulling）路径平滑：在保证连线不穿过阻挡的前提下，
-/// 贪心地把路径上能直连的点之间的拐点去掉，得到更短更顺的折线。
+/// 前向增量视线拉直（forward-incremental string pulling）路径平滑。
+/// 从当前锚点出发不断向前延伸，直到与某点失去视线，就把上一个可见点定为新锚点。
+/// 每个路径点只做一次视线检测，最坏复杂度 O(n·L)，比"从末端找最远点"的贪心(O(n^3))更快，
+/// 且视线检测针对整张地图的自由空间，开阔区域能大幅抄近道。
+/// 输出为连续格坐标（格中心 = cx+0.5），仅用于显示，不参与整数寻路。
 /// </summary>
 public static class PathSmoother
 {
-    public static List<(int X, int Y)> Smooth(GridMap map, List<(int X, int Y)> path)
+    public static List<Vector2> Smooth(GridMap map, List<(int X, int Y)> path)
     {
-        var result = new List<(int X, int Y)>();
+        var result = new List<Vector2>();
         if (path.Count == 0)
             return result;
 
-        result.Add(path[0]);
+        result.Add(Center(path[0]));
+        if (path.Count == 1)
+            return result;
 
-        int i = 0;
-        while (i < path.Count - 1)
+        int anchor = 0;
+        for (int i = 2; i < path.Count; i++)
         {
-            // 从当前锚点出发，找能直视到的最远点
-            int j = path.Count - 1;
-            while (j > i + 1 && !LineOfSight(map, path[i].X, path[i].Y, path[j].X, path[j].Y))
-                j--;
-
-            result.Add(path[j]);
-            i = j;
+            // 锚点到 path[i] 失去视线：把上一个可见点 path[i-1] 固定为新锚点
+            if (!LineOfSight(map, path[anchor].X, path[anchor].Y, path[i].X, path[i].Y))
+            {
+                result.Add(Center(path[i - 1]));
+                anchor = i - 1;
+            }
         }
 
+        result.Add(Center(path[^1]));
         return result;
     }
 
+    private static Vector2 Center((int X, int Y) c) => new(c.X + 0.5f, c.Y + 0.5f);
+
     // 超覆盖(supercover)直线视线检测：遍历线段经过的每一个格子，全部可走才算通视。
-    // 正好穿过格点时按对角通过（与本项目允许斜穿拐角的移动规则一致）。
+    // 正好穿过格点时按对角通过（与本项目允许斜穿拐角的移动规则一致）。整数运算。
     public static bool LineOfSight(GridMap map, int x0, int y0, int x1, int y1)
     {
         if (!map.IsWalkable(x0, y0))

@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace JPS.Models;
 
 public enum EditMode
@@ -18,7 +20,7 @@ public sealed class GridMap
     private readonly HashSet<int> _frontier = [];
     private readonly HashSet<int> _scanned = [];
     private readonly List<(int X, int Y)> _path = [];
-    private readonly List<(int X, int Y)> _smoothPath = [];
+    private readonly List<Vector2> _smoothPath = [];
 
     public int StartX { get; private set; } = -1;
     public int StartY { get; private set; } = -1;
@@ -115,13 +117,13 @@ public sealed class GridMap
         _path.AddRange(cells);
     }
 
-    public void SetSmoothPath(IEnumerable<(int X, int Y)> waypoints)
+    public void SetSmoothPath(IEnumerable<Vector2> waypoints)
     {
         _smoothPath.Clear();
         _smoothPath.AddRange(waypoints);
     }
 
-    public IReadOnlyList<(int X, int Y)> SmoothPath => _smoothPath;
+    public IReadOnlyList<Vector2> SmoothPath => _smoothPath;
 
     public void ClearSearchOverlay()
     {

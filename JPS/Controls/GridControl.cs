@@ -324,7 +324,7 @@ public sealed class GridControl : Control
             using var nodeBrush = new SolidBrush(SmoothPathColor);
 
             var points = _map.SmoothPath
-                .Select(p => new PointF(p.X * cs + cs / 2f, p.Y * cs + cs / 2f))
+                .Select(p => new PointF(p.X * cs, p.Y * cs))
                 .ToArray();
 
             var prevMode = g.SmoothingMode;
