@@ -26,6 +26,7 @@ public sealed class GridControl : Control
     public static readonly Color FrontierColor = Color.FromArgb(168, 84, 224);
     public static readonly Color ScannedColor = Color.FromArgb(70, 104, 168);
     public static readonly Color PathColor = Color.FromArgb(255, 196, 0);
+    public static readonly Color SmoothPathColor = Color.FromArgb(255, 60, 60);
     public static readonly Color StartColor = Color.FromArgb(0, 224, 224);
     public static readonly Color EndColor = Color.FromArgb(255, 0, 170);
 
@@ -118,6 +119,7 @@ public sealed class GridControl : Control
 
         _map.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
         _map.SetPath(result.Path);
+        _map.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
         NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
         return result;
@@ -132,6 +134,7 @@ public sealed class GridControl : Control
 
         _map.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
         _map.SetPath(result.Path);
+        _map.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
         NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
         return result;
@@ -307,6 +310,32 @@ public sealed class GridControl : Control
                 .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
                 .ToArray();
             g.DrawLines(pathPen, points);
+        }
+
+        // 平滑后的路径（视线拉直）用红色折线叠加显示
+        if (_map.SmoothPath.Count >= 2)
+        {
+            using var smoothPen = new Pen(SmoothPathColor, Math.Max(2f, cs / 4f))
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+            using var nodeBrush = new SolidBrush(SmoothPathColor);
+
+            var points = _map.SmoothPath
+                .Select(p => new PointF(p.X * cs + cs / 2f, p.Y * cs + cs / 2f))
+                .ToArray();
+
+            var prevMode = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.DrawLines(smoothPen, points);
+
+            float r = Math.Max(2f, cs / 5f);
+            foreach (var p in points)
+                g.FillEllipse(nodeBrush, p.X - r, p.Y - r, r * 2, r * 2);
+
+            g.SmoothingMode = prevMode;
         }
     }
 

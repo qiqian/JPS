@@ -13,6 +13,7 @@ namespace JPS
             (() => GridControl.StartColor, "起点 S"),
             (() => GridControl.EndColor, "终点 G"),
             (() => GridControl.PathColor, "路径"),
+            (() => GridControl.SmoothPathColor, "平滑路径"),
             (() => GridControl.ExpandedColor, "已扩展"),
             (() => GridControl.FrontierColor, "已入队未扩展"),
             (() => GridControl.ScannedColor, "扫描跳过"),

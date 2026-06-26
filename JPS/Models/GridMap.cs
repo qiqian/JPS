@@ -18,6 +18,7 @@ public sealed class GridMap
     private readonly HashSet<int> _frontier = [];
     private readonly HashSet<int> _scanned = [];
     private readonly List<(int X, int Y)> _path = [];
+    private readonly List<(int X, int Y)> _smoothPath = [];
 
     public int StartX { get; private set; } = -1;
     public int StartY { get; private set; } = -1;
@@ -114,12 +115,21 @@ public sealed class GridMap
         _path.AddRange(cells);
     }
 
+    public void SetSmoothPath(IEnumerable<(int X, int Y)> waypoints)
+    {
+        _smoothPath.Clear();
+        _smoothPath.AddRange(waypoints);
+    }
+
+    public IReadOnlyList<(int X, int Y)> SmoothPath => _smoothPath;
+
     public void ClearSearchOverlay()
     {
         _expanded.Clear();
         _frontier.Clear();
         _scanned.Clear();
         _path.Clear();
+        _smoothPath.Clear();
     }
 
     public bool IsExpanded(int x, int y) => _expanded.Contains(Index(x, y));
