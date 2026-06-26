@@ -16,16 +16,18 @@ internal static class JpsDirections
         (-1, -1)
     ];
 
-    public static int IndexOf(int dx, int dy)
+    public static int IndexOf(int dx, int dy) => (dx, dy) switch
     {
-        for (int i = 0; i < Count; i++)
-        {
-            if (All[i].Dx == dx && All[i].Dy == dy)
-                return i;
-        }
-
-        return -1;
-    }
+        (1, 0) => 0,
+        (-1, 0) => 1,
+        (0, 1) => 2,
+        (0, -1) => 3,
+        (1, 1) => 4,
+        (-1, 1) => 5,
+        (1, -1) => 6,
+        (-1, -1) => 7,
+        _ => -1
+    };
 
     // 整数距离：横向 1000，斜向 1414
     public const int CardinalCost = 1000;
