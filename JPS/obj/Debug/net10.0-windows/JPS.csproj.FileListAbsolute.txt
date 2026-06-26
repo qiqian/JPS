@@ -1,0 +1,16 @@
+G:\GitHub\JPS\JPS\bin\Debug\net10.0-windows\JPS.exe
+G:\GitHub\JPS\JPS\bin\Debug\net10.0-windows\JPS.deps.json
+G:\GitHub\JPS\JPS\bin\Debug\net10.0-windows\JPS.runtimeconfig.json
+G:\GitHub\JPS\JPS\bin\Debug\net10.0-windows\JPS.dll
+G:\GitHub\JPS\JPS\bin\Debug\net10.0-windows\JPS.pdb
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.Form1.resources
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.csproj.GenerateResource.cache
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.GeneratedMSBuildEditorConfig.editorconfig
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.AssemblyInfoInputs.cache
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.AssemblyInfo.cs
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.csproj.CoreCompileInputs.cache
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.dll
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\refint\JPS.dll
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.pdb
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\JPS.genruntimeconfig.cache
+G:\GitHub\JPS\JPS\obj\Debug\net10.0-windows\ref\JPS.dll
