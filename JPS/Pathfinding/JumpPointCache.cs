@@ -82,6 +82,11 @@ namespace JPS.Pathfinding
     ///  - 障碍变化（Version 改变）→ 全局世代 +1，O(1) 整体置脏。
     ///  - clean 命中 → O(1) 读。
     ///  - dirty → 沿该方向扫一次到跳点/墙，并把整段 run 一起洗白。
+    ///
+    /// 多线程：定义条件编译符号 <c>JPS_CONCURRENT_CACHE</c> 时，在惰性补写处插入全屏障
+    /// （写 dist → release → 发布 gen；读 gen → acquire → 读 dist），使多个 JpsPathfinder
+    /// 可在并行寻路中**只读/惰性补写同一份缓存**（前提：并行前单线程 Sync 一次、并行期间地图不变；
+    /// 因补写值是固定地图的纯函数，重复计算结果一致）。不定义该符号时屏障消失，退回单线程极速模式。
     /// </summary>
     public sealed class JumpPointCache
     {
@@ -143,7 +148,12 @@ namespace JPS.Pathfinding
         {
             int idx0 = y * _w + x;
             if (_cells[idx0].Gen[dir] == _validGen)
+            {
+#if JPS_CONCURRENT_CACHE
+                System.Threading.Thread.MemoryBarrier();   // acquire：看到 clean 后再读 dist
+#endif
                 return _cells[idx0].Dist[dir];
+            }
 
             // 扫描：从 (x,y) 沿方向找最近跳点或墙
             int s = 0, rx = x, ry = y;
@@ -158,17 +168,28 @@ namespace JPS.Pathfinding
             }
 
             // 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ short.MaxValue，安全转 short。
+            // 并发模式下分两遍：先写完所有 dist，一次 release 屏障，再发布所有 gen。
             int fx = x, fy = y;
             for (int k = 0; k <= s - 1; k++)
             {
-                int ci = fy * _w + fx;
-                _cells[ci].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
-                _cells[ci].Gen.Set(dir, _validGen);   // _validGen 为 byte
+                _cells[fy * _w + fx].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
                 fx += dx;
                 fy += dy;
             }
 
-            return _cells[idx0].Dist[dir];
+#if JPS_CONCURRENT_CACHE
+            System.Threading.Thread.MemoryBarrier();   // release：所有 dist 写完后再发布 gen
+#endif
+
+            fx = x; fy = y;
+            for (int k = 0; k <= s - 1; k++)
+            {
+                _cells[fy * _w + fx].Gen.Set(dir, _validGen);   // 发布 clean（_validGen 为 byte）
+                fx += dx;
+                fy += dy;
+            }
+
+            return _cells[idx0].Dist[dir];   // 本线程自己刚写的值，程序序可见，无需屏障
         }
     }
 }
