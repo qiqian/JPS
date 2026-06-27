@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    地图数据 I/O 库：JSON 存档模型（MapData）+ MovingAI .map 解析（MovingAiMap）。
+    与 Core 同样锁定 netstandard2.1 + C# 9，可一并拷入 Unity；依赖 Core（解析输出 GridMap）。
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>JPS.Data</RootNamespace>
+    <AssemblyName>JPS.Data</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
+  </ItemGroup>
+
+</Project>

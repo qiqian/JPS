@@ -12,6 +12,7 @@
         private ToolStripButton btnFindPathAStar;
         private ToolStripButton btnSave;
         private ToolStripButton btnLoad;
+        private ToolStripButton btnOpenMap;
         private ToolStripSeparator toolStripSeparator1;
         private ToolStripSeparator toolStripSeparator2;
         private StatusStrip statusStrip1;
@@ -43,6 +44,7 @@
             toolStripSeparator2 = new ToolStripSeparator();
             btnSave = new ToolStripButton();
             btnLoad = new ToolStripButton();
+            btnOpenMap = new ToolStripButton();
             statusStrip1 = new StatusStrip();
             statusLabel = new ToolStripStatusLabel();
             scrollPanel = new Panel();
@@ -60,7 +62,7 @@
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
                 btnBrush, btnStart, btnEnd, btnClear, toolStripSeparator1, btnFindPath, btnFindPathAStar,
-                toolStripSeparator2, btnSave, btnLoad
+                toolStripSeparator2, btnSave, btnLoad, btnOpenMap
             });
             toolStrip1.Location = new Point(0, 0);
             toolStrip1.Name = "toolStrip1";
@@ -137,6 +139,15 @@
             btnLoad.ToolTipText = "从 JSON 载入阻挡、起点、终点";
             btnLoad.Click += BtnLoad_Click;
             // 
+            // btnOpenMap
+            // 
+            btnOpenMap.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            btnOpenMap.Name = "btnOpenMap";
+            btnOpenMap.Size = new Size(80, 28);
+            btnOpenMap.Text = "打开地图";
+            btnOpenMap.ToolTipText = "打开 MovingAI .map 基准地图";
+            btnOpenMap.Click += BtnOpenMap_Click;
+            // 
             // statusStrip1
             // 
             statusStrip1.ImageScalingSize = new Size(20, 20);
@@ -164,7 +175,7 @@
             // 
             // scrollPanel
             // 
-            scrollPanel.AutoScroll = false;
+            scrollPanel.AutoScroll = false;   // 滚动由 GridControl 自身处理（定尺地图）
             scrollPanel.Controls.Add(gridControl);
             scrollPanel.Dock = DockStyle.Fill;
             scrollPanel.Location = new Point(0, 61);

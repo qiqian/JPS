@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
+    <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
   </ItemGroup>
 
 </Project>

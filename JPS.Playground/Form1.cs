@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JPS.Controls;
+using JPS.Data;
 using JPS.Models;
 
 namespace JPS
@@ -47,6 +48,9 @@ namespace JPS
             btnLoad.Text = Loc.T("载入", "Load");
             btnLoad.ToolTipText = Loc.T("从 JSON 载入阻挡、起点、终点",
                 "Load obstacles, start and goal from JSON");
+            btnOpenMap.Text = Loc.T("地图", "Map");
+            btnOpenMap.ToolTipText = Loc.T("打开 MovingAI .map 基准地图",
+                "Open a MovingAI .map benchmark map");
 
             statusLabel.Text = Loc.T("左键刷阻挡，右键擦除阻挡",
                 "Left-click to paint walls, right-click to erase");
@@ -156,6 +160,31 @@ namespace JPS
             catch (Exception ex)
             {
                 MessageBox.Show(this, ex.Message, Loc.T("载入失败", "Load failed"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnOpenMap_Click(object? sender, EventArgs e)
+        {
+            using var dlg = new OpenFileDialog
+            {
+                Filter = Loc.T("MovingAI 地图|*.map", "MovingAI map|*.map")
+            };
+
+            if (dlg.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            try
+            {
+                var map = MovingAiMap.Parse(File.ReadAllText(dlg.FileName));
+                gridControl.LoadFixedMap(map);
+                string name = Path.GetFileName(dlg.FileName);
+                statusLabel.Text = Loc.Zh
+                    ? $"已打开 {name}（{map.Width}×{map.Height}）。设起点/终点后寻路。"
+                    : $"Opened {name} ({map.Width}×{map.Height}). Set start/goal, then run.";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, Loc.T("打开失败", "Open failed"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 

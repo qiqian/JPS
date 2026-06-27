@@ -398,10 +398,13 @@ dotnet run --project JPS.Playground
 | **A\*寻路** · A* Path | 运行 A\*（对照）以作比较 |
 | **保存** · Save | 把阻挡 + 起终点保存为 JSON |
 | **载入** · Load | 从 JSON 载入地图 |
+| **打开地图** · Open .map | 打开 **MovingAI** `.map` 基准地图（保持格子原始大小，超出窗口用滚动条查看） |
 
 典型流程：**刷阻挡** 画障碍 → **起点** / **终点** 标记 → **JPS寻路** 或 **A\*寻路** 对比 → **保存** / **载入** 复现场景。
 
 图例（工具栏与网格之间）把每种叠加色映射到含义，同样会本地化。
+
+**MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。也可在命令行自检解析/寻路：`dotnet run --project JPS.Benchmark -- map movingai/den520d.map`。
 
 ---
 
@@ -412,16 +415,16 @@ dotnet run --project JPS.Playground
 | 工程 | 类型 / 目标框架 | 职责 |
 |---|---|---|
 | **JPS.Core** | 类库 · `netstandard2.1` / C# 9 | 纯算法核心，UI 无关、可直接拷入 **Unity 2022** |
-| **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core |
-| **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core |
+| **JPS.Data** | 类库 · `netstandard2.1` / C# 9 | 地图数据 I/O：JSON 存档 + MovingAI `.map` 解析，引用 Core |
+| **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core/Data |
+| **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core/Data |
 
 ```
 JPS.slnx                         # 解决方案
 │
 ├── JPS.Core/                    # ① 算法核心（netstandard2.1 / C# 9，整数寻路，无 UI 依赖）
 │   ├── Models/
-│   │   ├── GridMap.cs           # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
-│   │   └── MapData.cs           # JSON 存档模型（阻挡 + 起终点）
+│   │   └── GridMap.cs           # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
 │   └── Pathfinding/
 │       ├── JpsDirections.cs     # 8 方向、整数代价(横1000/斜1414)、octile 启发
 │       ├── JpsRules.cs          # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
@@ -432,7 +435,11 @@ JPS.slnx                         # 解决方案
 │       ├── PathSmoother.cs      # 前向增量视线拉直平滑（Vector2 按构建条件编译）
 │       └── MinHeap.cs           # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
 │
-├── JPS.Playground/              # ② WinForms 演示界面（引用 Core）
+├── JPS.Data/                    # ② 地图数据 I/O（netstandard2.1 / C# 9，引用 Core）
+│   ├── MapData.cs               # JSON 存档模型（阻挡 + 起终点）
+│   └── MovingAiMap.cs           # MovingAI .map 基准地图解析器（octile → GridMap）
+│
+├── JPS.Playground/              # ③ WinForms 演示界面（引用 Core/Data）
 │   ├── Controls/
 │   │   ├── GridControl.cs       # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
 │   │   ├── SearchOverlay.cs     # 寻路可视化叠加（与模型分离的视图状态）
@@ -441,11 +448,11 @@ JPS.slnx                         # 解决方案
 │   ├── Form1.cs / Form1.Designer.cs   # 工具栏、图例、存档对话框
 │   └── Program.cs               # WinForms 入口
 │
-└── JPS.Benchmark/               # ③ 命令行基准 / 压测（引用 Core）
-    └── Program.cs               # `-- bench` JPS/A* 性能基准；`-- mt` 多线程并发正确性压测
+└── JPS.Benchmark/               # ④ 命令行基准 / 压测（引用 Core/Data）
+    └── Program.cs               # `-- bench` 性能基准；`-- mt` 并发正确性压测；`-- map <path>` MovingAI 地图自检
 ```
 
-> **可移植性**：**JPS.Core** 锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
+> **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
 >
 > **并发**：[无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)**默认开启**（`JPS.Core` 已定义 `JPS_CONCURRENT_CACHE`），多个 `JpsPathfinder` 可共享同一 `JpsSystem` 并行寻路；移除该符号则退回单线程极速模式。
 
@@ -803,10 +810,13 @@ Toolbar buttons (English label · Chinese label):
 | **A\* Path** · A*寻路 | Run A\* (baseline) for comparison |
 | **Save** · 保存 | Save obstacles + start/goal to JSON |
 | **Load** · 载入 | Load a map from JSON |
+| **Open .map** · 打开地图 | Open a **MovingAI** `.map` benchmark map (keeps the native cell size; scroll to view maps larger than the window) |
 
 Typical flow: **Wall** to draw obstacles → **Start** / **Goal** to mark → **JPS Path** or **A\* Path** to compare → **Save** / **Load** to reproduce a scene.
 
 The legend (between the toolbar and the grid) maps every overlay color to its meaning; it is localized too.
+
+**MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked). You can also sanity-check parsing/pathfinding from the CLI: `dotnet run --project JPS.Benchmark -- map movingai/den520d.map`.
 
 ## Project Structure
 
@@ -815,16 +825,16 @@ The `JPS.slnx` solution splits into **three clearly-scoped projects**:
 | Project | Type / TFM | Responsibility |
 |---|---|---|
 | **JPS.Core** | class library · `netstandard2.1` / C# 9 | pure algorithm core, UI-agnostic, drops straight into **Unity 2022** |
-| **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core |
-| **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core |
+| **JPS.Data** | class library · `netstandard2.1` / C# 9 | map data I/O: JSON save + MovingAI `.map` parsing, references Core |
+| **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core/Data |
+| **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core/Data |
 
 ```
 JPS.slnx                         # solution
 │
 ├── JPS.Core/                    # ① algorithm core (netstandard2.1 / C# 9, integer pathfinding, no UI deps)
 │   ├── Models/
-│   │   ├── GridMap.cs           # Pure terrain: size + bit-packed obstacles (ulong[]) + version
-│   │   └── MapData.cs           # JSON save model (obstacles + start/goal)
+│   │   └── GridMap.cs           # Pure terrain: size + bit-packed obstacles (ulong[]) + version
 │   └── Pathfinding/
 │       ├── JpsDirections.cs     # 8 directions, integer cost (1000/1414), octile heuristic
 │       ├── JpsRules.cs          # Jump-point / forced-neighbor rules
@@ -835,7 +845,11 @@ JPS.slnx                         # solution
 │       ├── PathSmoother.cs      # Forward-incremental LOS smoothing (Vector2 chosen by build conditional)
 │       └── MinHeap.cs           # Binary min-heap (replaces PriorityQueue, Unity-compatible)
 │
-├── JPS.Playground/              # ② WinForms demo UI (references Core)
+├── JPS.Data/                    # ② map data I/O (netstandard2.1 / C# 9, references Core)
+│   ├── MapData.cs               # JSON save model (obstacles + start/goal)
+│   └── MovingAiMap.cs           # MovingAI .map benchmark parser (octile → GridMap)
+│
+├── JPS.Playground/              # ③ WinForms demo UI (references Core/Data)
 │   ├── Controls/
 │   │   ├── GridControl.cs       # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
 │   │   ├── SearchOverlay.cs     # Search visualization overlay (view state separated from the model)
@@ -844,11 +858,11 @@ JPS.slnx                         # solution
 │   ├── Form1.cs / Form1.Designer.cs   # Toolbar, legend, save/load dialogs
 │   └── Program.cs               # WinForms entry
 │
-└── JPS.Benchmark/               # ③ CLI benchmark / stress test (references Core)
-    └── Program.cs               # `-- bench` JPS/A* benchmark; `-- mt` multithread correctness stress test
+└── JPS.Benchmark/               # ④ CLI benchmark / stress test (references Core/Data)
+    └── Program.cs               # `-- bench` benchmark; `-- mt` concurrency stress test; `-- map <path>` MovingAI map self-check
 ```
 
-> **Portability:** **JPS.Core** is pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only uses `System` / `System.Collections.Generic` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so it drops into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
+> **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
 >
 > **Concurrency:** [lock-free multithreading](#4-lock-free-multithreading) is **on by default** (`JPS.Core` defines `JPS_CONCURRENT_CACHE`), so multiple `JpsPathfinder`s can share one `JpsSystem` in parallel; remove the symbol to fall back to single-thread max-speed mode.
 

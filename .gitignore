@@ -7,3 +7,5 @@ JPS/bin
 /JPS.Benchmark/bin
 /JPS.Playground/bin
 /JPS.Core/bin
+/JPS.Data/obj
+/JPS.Data/bin

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using JPS.Data;
 using JPS.Models;
 using JPS.Pathfinding;
 
@@ -8,8 +9,9 @@ namespace JPS.Benchmark
 {
     /// <summary>
     /// 命令行工具：
-    ///   dotnet run -- bench   单线程 JPS / A* 性能基准（test2.json）
-    ///   dotnet run -- mt      多线程共享缓存正确性压测（需在 JPS.Core 定义 JPS_CONCURRENT_CACHE）
+    ///   dotnet run -- bench         单线程 JPS / A* 性能基准（test2.json）
+    ///   dotnet run -- mt            多线程共享缓存正确性压测（JPS.Core 默认已开启 JPS_CONCURRENT_CACHE）
+    ///   dotnet run -- map &lt;path&gt;    加载一张 MovingAI .map 并做一次 JPS 寻路（解析/寻路自检）
     /// </summary>
     internal static class Program
     {
@@ -20,8 +22,9 @@ namespace JPS.Benchmark
             {
                 case "bench": Bench(); return 0;
                 case "mt": MtTest(); return 0;
+                case "map": MapTest(args.Length >= 2 ? args[1] : FindFile("movingai/maze-32-32-2.map")); return 0;
                 default:
-                    Console.WriteLine("用法: dotnet run -- [bench|mt]");
+                    Console.WriteLine("用法: dotnet run -- [bench|mt|map <path.map>]");
                     return 1;
             }
         }
@@ -108,6 +111,25 @@ namespace JPS.Benchmark
             sb.AppendLine($"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
             sb.AppendLine($"  缓存无复用/复用:  无复用={jColdMs / Q * 1000:F1}us  复用={jWarmMs / Q * 1000:F1}us  (加速={jColdMs / Math.Max(0.001, jWarmMs):F2}x)");
             Console.WriteLine(sb.ToString());
+        }
+
+        // 加载一张 MovingAI .map，做一次 JPS 寻路，验证解析与寻路是否正常。
+        private static void MapTest(string path)
+        {
+            var map = MovingAiMap.Parse(File.ReadAllText(path));
+            int walk = 0;
+            (int X, int Y) first = (-1, -1), last = (-1, -1);
+            for (int y = 0; y < map.Height; y++)
+                for (int x = 0; x < map.Width; x++)
+                    if (map.IsWalkable(x, y)) { walk++; if (first.X < 0) first = (x, y); last = (x, y); }
+
+            var system = new JpsSystem(map);
+            system.Sync();
+            var jps = new JpsPathfinder();
+            var r = jps.FindPath(system, first, last, false);
+
+            Console.WriteLine($"{Path.GetFileName(path)}  {map.Width}x{map.Height}, 可走 {walk} 格");
+            Console.WriteLine($"  JPS {first} -> {last}: success={r.Success}, expanded={r.ExpandedNodes}, path={r.Path.Count}");
         }
 
         private static void MtTest()

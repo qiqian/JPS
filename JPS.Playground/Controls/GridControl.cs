@@ -1,14 +1,20 @@
 using System.Diagnostics;
+using JPS.Data;
 using JPS.Models;
 using JPS.Pathfinding;
 
 namespace JPS.Controls;
 
-public sealed class GridControl : Control
+public sealed class GridControl : ScrollableControl
 {
     private const int BrushSize = 2;
 
-    private readonly int _cellSize;
+    private int _cellSize;               // 当前格像素尺寸
+    private readonly int _baseCellSize;  // 沙盒模式的默认格尺寸
+    private bool _fixedSize;             // true=载入了定尺地图（如 MovingAI），网格不再随窗口自适应
+
+    private const int MinCell = 2;       // Ctrl+滚轮缩放下限
+    private const int MaxCell = 64;      // Ctrl+滚轮缩放上限
     private readonly JpsPathfinder _jps = new();
     private readonly AStarPathfinder _astar = new();
     private readonly SearchOverlay _overlay = new();   // 视图层的可视化叠加，与模型分离
@@ -48,6 +54,7 @@ public sealed class GridControl : Control
     public GridControl(int cellSize)
     {
         _cellSize = cellSize;
+        _baseCellSize = cellSize;
 
         SetStyle(ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint |
@@ -99,8 +106,34 @@ public sealed class GridControl : Control
         return data;
     }
 
+    /// <summary>
+    /// 载入一张“定尺”地图（如 MovingAI .map）：网格设为地图的精确宽高，**保持原始格子尺寸不缩小**，
+    /// 通过控件自身的滚动条查看超出视口的部分。此后网格不再随窗口大小自动重排。
+    /// </summary>
+    public void LoadFixedMap(GridMap map)
+    {
+        _fixedSize = true;
+        _system = new JpsSystem(map);
+        _map = map;
+        _startX = _startY = _endX = _endY = -1;
+        _overlay.SetWidth(_map.Width);
+        _overlay.Clear();
+
+        _cellSize = _baseCellSize;   // 固定格子尺寸，不缩小
+        AutoScroll = true;
+        AutoScrollMinSize = new Size(_map.Width * _cellSize, _map.Height * _cellSize);
+        AutoScrollPosition = new Point(0, 0);
+        Invalidate();
+    }
+
     public void Import(MapData data)
     {
+        // JSON 走沙盒模式：随窗口自适应（关闭滚动，恢复默认格尺寸）
+        _fixedSize = false;
+        _cellSize = _baseCellSize;
+        AutoScroll = false;
+        AutoScrollMinSize = Size.Empty;
+
         EnsureGrid();
         _map.ClearAll();
 
@@ -229,6 +262,59 @@ public sealed class GridControl : Control
         _isPainting = false;
     }
 
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        base.OnMouseEnter(e);
+        if (!Focused)
+            Focus();   // 让滚轮（滚动 / Ctrl 缩放）悬停即生效，无需先点击
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if ((ModifierKeys & Keys.Control) == Keys.Control)
+        {
+            int dir = Math.Sign(e.Delta);
+            if (dir != 0)
+                ZoomAt(e.Location, dir);   // Ctrl+滚轮：缩放格子
+            return;                        // 吞掉滚轮事件，不再滚动
+        }
+
+        base.OnMouseWheel(e);              // 普通滚轮：定尺地图下滚动查看
+    }
+
+    /// <summary>以鼠标位置为锚点缩放格子像素尺寸（Ctrl+滚轮）。</summary>
+    private void ZoomAt(Point mouse, int dir)
+    {
+        int old = _cellSize;
+        int next = dir > 0 ? (int)Math.Ceiling(old * 1.25) : (int)Math.Floor(old / 1.25);
+        if (next == old) next = old + dir;                       // 保证至少变化 1px
+        next = Math.Min(MaxCell, Math.Max(MinCell, next));
+        if (next == old) return;
+
+        if (_fixedSize)
+        {
+            // 记录鼠标处对应的“浮点格坐标”，缩放后把它重新对回鼠标位置，做到锚点缩放
+            var ap = AutoScrollPosition;                         // <= 0
+            double fx = (mouse.X - ap.X) / (double)old;
+            double fy = (mouse.Y - ap.Y) / (double)old;
+
+            _cellSize = next;
+            AutoScrollMinSize = new Size(_map.Width * next, _map.Height * next);
+
+            int targetX = (int)Math.Round(fx * next) - mouse.X;
+            int targetY = (int)Math.Round(fy * next) - mouse.Y;
+            AutoScrollPosition = new Point(Math.Max(0, targetX), Math.Max(0, targetY));
+        }
+        else
+        {
+            _cellSize = next;
+            EnsureGrid();   // 沙盒模式：按新格尺寸重排网格密度
+        }
+
+        Invalidate();
+        NotifyStatus(Loc.Zh ? $"缩放：{next}px / 格" : $"Zoom: {next}px/cell");
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
@@ -239,19 +325,30 @@ public sealed class GridControl : Control
 
         int cs = _cellSize;
 
-        for (int y = 0; y < _map.Height; y++)
+        // 按滚动位置平移，之后所有绘制都用“世界坐标”(x*cs)。沙盒模式 AutoScroll=false 时偏移为 0。
+        var ap = AutoScrollPosition;            // x,y <= 0
+        g.TranslateTransform(ap.X, ap.Y);
+
+        // 仅绘制当前视口覆盖的格子（大图必须裁剪，否则遍历百万格会卡）
+        int viewX = -ap.X, viewY = -ap.Y;
+        int sx = Math.Max(0, viewX / cs);
+        int sy = Math.Max(0, viewY / cs);
+        int ex = Math.Min(_map.Width, (viewX + ClientSize.Width) / cs + 1);
+        int ey = Math.Min(_map.Height, (viewY + ClientSize.Height) / cs + 1);
+
+        for (int y = sy; y < ey; y++)
         {
-            for (int x = 0; x < _map.Width; x++)
+            for (int x = sx; x < ex; x++)
             {
                 var rect = new Rectangle(x * cs, y * cs, cs, cs);
                 g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleBrush : WalkableBrush, rect);
             }
         }
 
-        DrawSearchOverlay(g, cs);
-        DrawGridLines(g, cs);
+        DrawSearchOverlay(g, cs, sx, sy, ex, ey);
+        DrawGridLines(g, cs, sx, sy, ex, ey);
         DrawMarkers(g, cs);
-        DrawDirtyDots(g, cs);
+        DrawDirtyDots(g, cs, sx, sy, ex, ey);
     }
 
     private static readonly SolidBrush WalkableBrush = new(WalkableColor);
@@ -259,6 +356,9 @@ public sealed class GridControl : Control
 
     private void EnsureGrid()
     {
+        if (_fixedSize)
+            return;   // 定尺地图：网格固定为地图尺寸，不随窗口重排
+
         int w = ClientSize.Width;
         int h = ClientSize.Height;
 
@@ -351,7 +451,7 @@ public sealed class GridControl : Control
         }
     }
 
-    private void DrawSearchOverlay(Graphics g, int cs)
+    private void DrawSearchOverlay(Graphics g, int cs, int sx, int sy, int ex, int ey)
     {
         // 绿=已扩展，紫=已入队未扩展（前沿），蓝灰=扫描跳过（未进 open）
         using var scannedBrush = new SolidBrush(ScannedColor);
@@ -360,9 +460,9 @@ public sealed class GridControl : Control
         using var pathBrush = new SolidBrush(PathColor);
         using var pathPen = new Pen(Color.FromArgb(255, 255, 140, 0), Math.Max(2f, cs / 3f));
 
-        for (int y = 0; y < _map.Height; y++)
+        for (int y = sy; y < ey; y++)
         {
-            for (int x = 0; x < _map.Width; x++)
+            for (int x = sx; x < ex; x++)
             {
                 if (_overlay.IsOnPath(x, y))
                     continue;
@@ -439,7 +539,7 @@ public sealed class GridControl : Control
                     _cleanBefore[((y * _map.Width + x) * 4) + dir] = _system.Cache.IsClean(_map, x, y, dir);
     }
 
-    private void DrawDirtyDots(Graphics g, int cs)
+    private void DrawDirtyDots(Graphics g, int cs, int sx, int sy, int ex, int ey)
     {
         if (cs < 14)
             return;
@@ -455,9 +555,9 @@ public sealed class GridControl : Control
         var prev = g.SmoothingMode;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-        for (int y = 0; y < _map.Height; y++)
+        for (int y = sy; y < ey; y++)
         {
-            for (int x = 0; x < _map.Width; x++)
+            for (int x = sx; x < ex; x++)
             {
                 if (!_map.IsWalkable(x, y))
                     continue;
@@ -488,15 +588,20 @@ public sealed class GridControl : Control
         g.SmoothingMode = prev;
     }
 
-    private void DrawGridLines(Graphics g, int cs)
+    private void DrawGridLines(Graphics g, int cs, int sx, int sy, int ex, int ey)
     {
+        if (cs < 4)
+            return;   // 格太小：画网格线会糊成一片且拖慢大图渲染
+
         using var pen = new Pen(GridLineColor);
 
-        for (int x = 0; x <= _map.Width; x++)
-            g.DrawLine(pen, x * cs, 0, x * cs, _map.Height * cs);
+        int y0 = sy * cs, y1 = ey * cs;
+        for (int x = sx; x <= ex; x++)
+            g.DrawLine(pen, x * cs, y0, x * cs, y1);
 
-        for (int y = 0; y <= _map.Height; y++)
-            g.DrawLine(pen, 0, y * cs, _map.Width * cs, y * cs);
+        int x0 = sx * cs, x1 = ex * cs;
+        for (int y = sy; y <= ey; y++)
+            g.DrawLine(pen, x0, y * cs, x1, y * cs);
     }
 
     private void DrawMarkers(Graphics g, int cs)
@@ -532,8 +637,10 @@ public sealed class GridControl : Control
 
     private bool TryGetCell(Point location, out int x, out int y)
     {
-        x = location.X / _cellSize;
-        y = location.Y / _cellSize;
+        // 视口坐标 → 世界坐标（AutoScrollPosition 为 <=0，减去等于加回滚动量）
+        var ap = AutoScrollPosition;
+        x = (location.X - ap.X) / _cellSize;
+        y = (location.Y - ap.Y) / _cellSize;
         return _map.InBounds(x, y);
     }
 

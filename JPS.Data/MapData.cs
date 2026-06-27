@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace JPS.Models
+namespace JPS.Data
 {
     public sealed class PointData
     {

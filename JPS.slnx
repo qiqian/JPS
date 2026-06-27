@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="JPS.Benchmark/JPS.Benchmark.csproj" />
   <Project Path="JPS.Core/JPS.Core.csproj" />
+  <Project Path="JPS.Data/JPS.Data.csproj" />
   <Project Path="JPS.Playground/JPS.Playground.csproj" />
 </Solution>
