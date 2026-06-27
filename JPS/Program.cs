@@ -9,6 +9,7 @@ namespace JPS
         static void Main(string[] args)
         {
             if (args.Length >= 1 && args[0] == "mt") { MtTest(); return; }
+            if (args.Length >= 1 && args[0] == "bench") { Bench(); return; }
 
             ApplicationConfiguration.Initialize();
             Application.Run(new Form1());
@@ -23,6 +24,57 @@ namespace JPS
                 c += (dx != 0 && dy != 0) ? JPS.Pathfinding.JpsDirections.DiagonalCost : JPS.Pathfinding.JpsDirections.CardinalCost;
             }
             return c;
+        }
+
+        private static void Bench()
+        {
+            var sb = new System.Text.StringBuilder();
+            void Run(string name, double fill)
+            {
+                var rng = new Random(123);
+                int w = 200, h = 200;
+                var map = new JPS.Models.GridMap(w, h);
+                for (int i = 0; i < w * h * fill; i++) map.SetBlocked(rng.Next(w), rng.Next(h), true);
+                var system = new JPS.Pathfinding.JpsSystem(map);
+                system.Sync();
+                var jps = new JPS.Pathfinding.JpsPathfinder();
+                var astar = new JPS.Pathfinding.AStarPathfinder();
+                (int X, int Y) Free() { for (int k = 0; k < 999; k++) { int x = rng.Next(w), y = rng.Next(h); if (map.IsWalkable(x, y)) return (x, y); } return (-1, -1); }
+
+                const int Q = 2000;
+                var qs = new ((int X, int Y) s, (int X, int Y) g)[Q];
+                for (int i = 0; i < Q; i++) qs[i] = (Free(), Free());
+
+                // 充分预热（JIT + 跳点缓存洗白）：整批跑几遍
+                for (int rep = 0; rep < 3; rep++)
+                    for (int i = 0; i < Q; i++) { jps.FindPath(system, qs[i].s, qs[i].g, false); astar.FindPath(map, qs[i].s, qs[i].g, false); }
+
+                long jExp = 0, aExp = 0; int solved = 0;
+                double jMs = double.MaxValue, aMs = double.MaxValue;
+                var sw = new System.Diagnostics.Stopwatch();
+                for (int rep = 0; rep < 5; rep++)   // 取多轮最小值，抑制 GC/调度噪声
+                {
+                    GC.Collect(); GC.WaitForPendingFinalizers();
+                    sw.Restart();
+                    for (int i = 0; i < Q; i++) { var r = jps.FindPath(system, qs[i].s, qs[i].g, false); if (rep == 0) { jExp += r.ExpandedNodes; if (r.Success) solved++; } }
+                    sw.Stop(); jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
+
+                    GC.Collect(); GC.WaitForPendingFinalizers();
+                    sw.Restart();
+                    for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g, false); if (rep == 0) aExp += r.ExpandedNodes; }
+                    sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
+                }
+
+                sb.AppendLine($"[{name}] 200x200, 阻挡 {fill:P0}, {Q} 查询, 可解 {solved}");
+                sb.AppendLine($"  扩展节点 平均/次: JPS={jExp / (double)Q:F0}  A*={aExp / (double)Q:F0}  (A*/JPS={aExp / (double)Math.Max(1, jExp):F1}x)");
+                sb.AppendLine($"  耗时 平均/次:   JPS={jMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jMs):F1}x)");
+            }
+
+            Run("开阔", 0.0);
+            Run("稀疏", 0.10);
+            Run("中密", 0.20);
+            Console.WriteLine(sb.ToString());
+            System.IO.File.WriteAllText("bench_result.txt", sb.ToString());
         }
 
         private static void MtTest()

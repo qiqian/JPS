@@ -22,6 +22,7 @@
   - [1. Jump Table Lazy Update（惰性跳点表）](#1-jump-table-lazy-update惰性跳点表)
   - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计)
   - [3. 平滑方案的选择](#3-平滑方案的选择)
+  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路)
 - [三、可视化说明](#三可视化说明)
 - [四、工程与性能要点](#四工程与性能要点)
 - [运行](#运行)
@@ -209,6 +210,64 @@ flowchart TD
 > 实现见 [`PathSmoother`](JPS/Pathfinding/PathSmoother.cs)。
 > 注：JPS 与 A\* 即便代价相同，也可能走不同的等价最优栅格路；平滑是依赖输入的贪心算法，所以两者平滑结果可能不同——这是正常现象，非 bug。
 
+### 4. 无锁多线程：共享惰性缓存的并行寻路
+
+很多场景（如服务器同时为成百上千个单位寻路）希望**多个线程在同一张地图上并行寻路**。本项目的结构天然适合这件事，且做到了**无锁（lock-free）**。
+
+#### 设计思路
+
+**1) 拆分"共享只读态"与"线程私有态"。**
+[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs) 持有 `GridMap` + `JumpPointCache`（**共享**）；每个 [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs) 只持有自己的逐节点搜索状态（`g / mark / open / parent …`，**线程私有**）。于是并行寻路 = 多个私有 pathfinder 各跑各的，唯一的交汇点就是那份共享缓存。
+
+```mermaid
+flowchart TD
+    Sys["JpsSystem（共享）<br/>GridMap + JumpPointCache"]
+    T1["线程1: JpsPathfinder #1<br/>私有 g/mark/open"] -->|只读 / 惰性补写| Sys
+    T2["线程2: JpsPathfinder #2<br/>私有 g/mark/open"] -->|只读 / 惰性补写| Sys
+    T3["线程N: JpsPathfinder #N<br/>私有 g/mark/open"] -->|只读 / 惰性补写| Sys
+```
+
+**2) 让共享缓存无需锁。** 关键观察：并行期间地图不变，所以缓存里每一项的**正确值是固定地图的纯函数**——不同线程对同一格同方向算出的 dist 必然相同。因此即使两个线程同时给同一格补写，也只是把**同一个值**写两遍，结果一致。剩下的唯一风险是**可见性与写入次序**：读者可能先看到"已 clean"的世代戳、却还没看到对应的 dist。
+
+**3) 用全屏障保证发布次序（而非加锁）。** 在惰性补写处用 `Thread.MemoryBarrier()` 建立 release/acquire 配对：
+
+- **写者**：先写完整段 run 的所有 `dist` → **release 屏障** → 再发布所有世代戳 `gen`。保证"看得到 gen 就一定看得到 dist"。
+- **读者**：命中 clean（`gen == 有效世代`）后 → **acquire 屏障** → 再读 `dist`。
+- 每条 run 只插一次屏障（先写完一串 dist 再统一发布 gen），把屏障开销压在 dirty 慢路径上；clean 命中只多一次屏障、无锁无竞争。
+
+这样既不需要互斥锁、也不会让缓存的**单格内存占用变大**（屏障只约束次序，不增字段）。
+
+> ⚠️ 前提：并行寻路**之前**必须由**单线程**调用一次 `JpsSystem.Sync()`（确定缓存版本），且并行期间**不得修改地图**。要改地图就先 join 掉所有寻路线程，改完再 Sync、再并行。
+
+#### 使用指南
+
+| 模式 | 如何启用 | 适用 |
+|---|---|---|
+| **单线程极速**（默认） | 不定义任何符号 | 工具演示 / 单线程调用，屏障完全消失，零额外开销 |
+| **无锁多线程** | 定义条件编译符号 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路 |
+
+开启多线程安全模式——在 `JPS/JPS.csproj` 的 `<PropertyGroup>` 中加入：
+
+```xml
+<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
+```
+
+并行调用范式：
+
+```csharp
+var system = new JpsSystem(map);
+system.Sync();                       // ① 并行前，单线程同步一次
+
+Parallel.For(0, threads, _ =>
+{
+    var jps = new JpsPathfinder();   // ② 每个线程一个私有 pathfinder
+    foreach (var (s, g) in queries)  //    共享同一个 system（只读 / 惰性补写缓存）
+        jps.FindPath(system, s, g);
+});                                  // ③ 并行期间不修改 map
+```
+
+> **正确性验证**：开启 `JPS_CONCURRENT_CACHE` 后，用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。命令行 `dotnet run -- mt` 可复现该压测（见 [`Program.cs`](JPS/Program.cs) 的 `MtTest`）。
+
 ---
 
 ## 三、可视化说明
@@ -242,6 +301,51 @@ flowchart TD
 - **零分配方向剪枝**：剪枝方向写入复用缓冲，无迭代器分配。
 - **正确性验证**：600+ 组随机地图（含障碍中途变更）对照 A\*，路径代价与成败完全一致。
 
+### JPS vs A\* 内存开销对比
+
+两者的逐节点状态都是"按地图尺寸一次性分配、跨查询复用"的扁平数组（`N = 宽 × 高`）。逐格字节数精确如下：
+
+| 数据 | 字段 | A\* | JPS | 归属 |
+|---|---|---|---|---|
+| g 值 | `long` | 8 | 8 | 每实例（线程私有） |
+| 父信息 | A\*: 来向 `sbyte`；JPS: 来向 `sbyte` + 步数 `short` | 1 | 3 | 每实例（线程私有） |
+| 访问状态 | `int`（`2·gen` / `2·gen+1` 合并 seen/closed） | 4 | 4 | 每实例（线程私有） |
+| **搜索态小计** | | **13 B/格** | **15 B/格** | 每实例 |
+| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **每地图共享**（[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs)） |
+| **合计** | | **13 B/格** | **27 B/格** | |
+
+- **单实例**：JPS 约为 A\* 的 **~2.1×**（多出的 14 B/格几乎全是那张 12 B/格的正交跳点缓存——这是用空间换"跳跃 O(1)"的核心代价）。
+- **多线程共享**：跳点缓存按地图只存一份、被所有线程共享，只有 15 B/格的搜索态随线程数线性增长。`T` 线程在 200×200（4 万格）地图上：
+
+  | 线程数 | A\* | JPS |
+  |---|---|---|
+  | 1 | 0.52 MB | 1.08 MB（0.60 MB 搜索态 + 0.48 MB 共享缓存） |
+  | 8 | 4.16 MB | 5.28 MB（4.80 MB 搜索态 + 0.48 MB 共享缓存） |
+
+- 地图本身（[`GridMap._blocked`](JPS/Models/GridMap.cs)）位压缩到 1 bit/格（≈0.125 B/格），两者共享，可忽略。
+- 开放列表（[`MinHeap`](JPS/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
+- 可视化用的 `_scanGen`（4 B/格）仅在开启调试可视化（`collectDebug`）时才分配，纯算法运行不占用。
+
+### JPS vs A\* 性能开销对比（估算）
+
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release -- bench`（200×200、每场景 2000 组随机起终点、取多轮最小值）的实测：
+
+| 场景 | 扩展节点 JPS | 扩展节点 A\* | 节点比 | 耗时 JPS | 耗时 A\* | 加速比 |
+|---|---|---|---|---|---|---|
+| 开阔（0% 障碍） | ~3 | ~1043 | **~349×** | 4.3 µs | 97 µs | **~22.8×** |
+| 稀疏（10% 随机散点） | ~382 | ~948 | ~2.5× | 70 µs | 113 µs | ~1.6× |
+| 中密（20% 随机散点） | ~476 | ~894 | ~1.9× | 85 µs | 121 µs | ~1.4× |
+
+解读与估算要点：
+
+- **扩展节点数 = JPS 的硬优势**：开阔地图上 JPS 几乎"直奔终点"（只在拐点入队），A\* 却要把整片可达区都塞进堆，差出**两个数量级**。这部分优势与实现无关、稳定可估。
+- **墙体形态决定差距**：**随机散点是 JPS 的不利场景**——遍地强迫邻居 → 跳点密集 → 对角扫描频繁，所以 10%/20% 行的加速比偏保守。真实游戏地图（房间 + 走廊 + 开阔区，墙是连续的）跳点稀疏，加速比通常远高于此表，更接近"开阔"那行。
+- **地图越大越占便宜**：A\* 的工作量 ≈ 可达面积（∝ N），JPS ≈ 跳点数（增长慢得多）。本表只是 200×200 的小图；放大到上千边长时 JPS 的相对优势进一步拉开。
+- **单次扩展 JPS 更贵但值得**：每次 JPS 扩展要做方向剪枝 + 跳跃扫描，单步成本高于 A\* 的"看 8 邻居"；但[惰性正交缓存](#1-jump-table-lazy-update惰性跳点表)把正交跳跃摊销到 O(1)、对角降到接近 O(L)，且同一地图上反复寻路会越跑越快（缓存持续洗白）。综合下来扩展次数的锐减远盖过单步变贵。
+- **堆操作更少**：A\* 的入队次数 ≈ 扩展数 × 邻居数，堆的 sift 抖动大；JPS 入队的只有跳点，堆几乎"清爽"，这也是开阔场景 22× 墙钟加速的重要来源。
+
+> 复现：`dotnet run -c Release -- bench`（见 [`Program.cs`](JPS/Program.cs) 的 `Bench`）。绝对耗时随硬件/地图而变，但**节点比**与**趋势**是稳定可估的。
+
 ---
 
 ## 运行
@@ -269,8 +373,9 @@ JPS/
 ├── Pathfinding/                 # 算法核心（C# 9 / Unity 2022 友好，整数寻路）
 │   ├── JpsDirections.cs         # 8 方向、整数代价(横1000/斜1414)、octile 启发
 │   ├── JpsRules.cs              # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
-│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；Dir4 内联值类型）
-│   ├── JpsPathfinder.cs         # JPS：查/更新惰性正交缓存 + 经典对角扫描
+│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控全屏障）
+│   ├── JpsSystem.cs             # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
+│   ├── JpsPathfinder.cs         # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
 │   ├── AStarPathfinder.cs       # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
 │   ├── PathSmoother.cs          # 前向增量视线拉直平滑（Vector2 按构建条件编译）
 │   └── MinHeap.cs               # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
@@ -281,10 +386,12 @@ JPS/
 │   └── EditMode.cs              # 编辑模式枚举（刷阻挡 / 起点 / 终点）
 │
 ├── Form1.cs / Form1.Designer.cs # 工具栏、图例、存档对话框
-└── Program.cs                   # 入口
+└── Program.cs                   # 入口（含命令行工具：`-- mt` 多线程并发压测；`-- bench` JPS/A* 性能基准）
 ```
 
 > **可移植性**：`Models/` + `Pathfinding/` 不依赖 WinForms（仅用 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`），可整体拷入 Unity 2022 使用；`Controls/` + `Form1` 是桌面演示界面，不进 Unity。
+>
+> **并发**：多线程共享同一 `JpsSystem` 并行寻路时，定义符号 `JPS_CONCURRENT_CACHE` 即开启 [无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)；不定义则为单线程极速模式（默认）。
 
 ---
 
