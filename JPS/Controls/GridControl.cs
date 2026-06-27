@@ -11,6 +11,7 @@ public sealed class GridControl : Control
     private readonly int _cellSize;
     private readonly JpsPathfinder _jps = new();
     private readonly AStarPathfinder _astar = new();
+    private readonly SearchOverlay _overlay = new();   // 视图层的可视化叠加，与模型分离
 
     private GridMap _map;
     private EditMode _mode = EditMode.BrushObstacle;
@@ -49,6 +50,7 @@ public sealed class GridControl : Control
 
         BackColor = Color.FromArgb(60, 60, 64);
         _map = new GridMap(80, 50, _cellSize);
+        _overlay.SetWidth(_map.Width);
     }
 
     public GridMap Map
@@ -66,6 +68,7 @@ public sealed class GridControl : Control
     {
         EnsureGrid();
         _map.ClearAll();
+        _overlay.Clear();
         Invalidate();
         NotifyStatus("地图已清除。");
     }
@@ -101,6 +104,7 @@ public sealed class GridControl : Control
         if (data.End != null)
             _map.SetEnd(data.End.X, data.End.Y);
 
+        _overlay.Clear();
         Invalidate();
     }
 
@@ -112,9 +116,9 @@ public sealed class GridControl : Control
         var result = _jps.FindPath(_map);
         sw.Stop();
 
-        _map.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
-        _map.SetPath(result.Path);
-        _map.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
+        _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
+        _overlay.SetPath(result.Path);
+        _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
         NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
         return result;
@@ -127,9 +131,9 @@ public sealed class GridControl : Control
         var result = _astar.FindPath(_map);
         sw.Stop();
 
-        _map.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
-        _map.SetPath(result.Path);
-        _map.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
+        _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
+        _overlay.SetPath(result.Path);
+        _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
         NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
         return result;
@@ -233,6 +237,8 @@ public sealed class GridControl : Control
             next.SetEnd(_map.EndX, _map.EndY);
 
         _map = next;
+        _overlay.SetWidth(_map.Width);
+        _overlay.Clear();   // 网格尺寸变化，旧的搜索结果失效
     }
 
     private void PaintObstacleBlock(int cx, int cy)
@@ -249,6 +255,9 @@ public sealed class GridControl : Control
 
     private void ApplyEdit(int x, int y)
     {
+        // 任何编辑都会让上一次的搜索结果失效，清掉可视化叠加
+        _overlay.Clear();
+
         switch (_mode)
         {
             case EditMode.BrushObstacle:
@@ -286,31 +295,31 @@ public sealed class GridControl : Control
         {
             for (int x = 0; x < _map.Width; x++)
             {
-                if (_map.IsOnPath(x, y))
+                if (_overlay.IsOnPath(x, y))
                     continue;
 
-                if (_map.IsExpanded(x, y))
+                if (_overlay.IsExpanded(x, y))
                     g.FillRectangle(expandedBrush, new Rectangle(x * cs, y * cs, cs, cs));
-                else if (_map.IsFrontier(x, y))
+                else if (_overlay.IsFrontier(x, y))
                     g.FillRectangle(frontierBrush, new Rectangle(x * cs, y * cs, cs, cs));
-                else if (_map.IsScanned(x, y))
+                else if (_overlay.IsScanned(x, y))
                     g.FillRectangle(scannedBrush, new Rectangle(x * cs, y * cs, cs, cs));
             }
         }
 
-        foreach (var (x, y) in _map.Path)
+        foreach (var (x, y) in _overlay.Path)
             g.FillRectangle(pathBrush, new Rectangle(x * cs, y * cs, cs, cs));
 
-        if (_map.Path.Count >= 2)
+        if (_overlay.Path.Count >= 2)
         {
-            var points = _map.Path
+            var points = _overlay.Path
                 .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
                 .ToArray();
             g.DrawLines(pathPen, points);
         }
 
         // 平滑后的路径（视线拉直）用红色折线叠加显示
-        if (_map.SmoothPath.Count >= 2)
+        if (_overlay.SmoothPath.Count >= 2)
         {
             using var smoothPen = new Pen(SmoothPathColor, Math.Max(2f, cs / 4f))
             {
@@ -320,7 +329,7 @@ public sealed class GridControl : Control
             };
             using var nodeBrush = new SolidBrush(SmoothPathColor);
 
-            var points = _map.SmoothPath
+            var points = _overlay.SmoothPath
                 .Select(p => new PointF(p.X * cs, p.Y * cs))
                 .ToArray();
 

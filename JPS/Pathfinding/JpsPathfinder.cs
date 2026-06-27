@@ -64,10 +64,12 @@ public sealed class JpsPathfinder
     private sbyte[] _parentDir = [];
     private int[] _seenGen = [];
     private int[] _closedGen = [];
-    private int[] _scanGen = [];
     private int _gen;
     private readonly PriorityQueue<int, long> _open = new();
     private readonly int[] _dirBuf = new int[JpsDirections.Count];
+
+    // ---- 仅可视化用，按需惰性分配（collectDebug=false 时完全不占用）----
+    private int[] _scanGen = [];
 
     // ---- 惰性正交跳点 memo（4 个正交方向：E=0,W=1,S=2,N=3）----
     private int[] _cardDist = [];   // 带符号距离
@@ -123,6 +125,8 @@ public sealed class JpsPathfinder
 
         if (collectDebug)
         {
+            if (_scanGen.Length != _size)   // 首次需要可视化时才分配
+                _scanGen = new int[_size];
             _expandedIds.Clear();
             _generatedIds.Clear();
             _scannedIds.Clear();
@@ -373,7 +377,7 @@ public sealed class JpsPathfinder
         _parentDir = new sbyte[_size];
         _seenGen = new int[_size];
         _closedGen = new int[_size];
-        _scanGen = new int[_size];
+        _scanGen = [];   // 可视化用，按需在 collectDebug 时分配
         _gen = 0;
 
         _cardDist = new int[_size * 4];

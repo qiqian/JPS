@@ -1,5 +1,3 @@
-using System.Numerics;
-
 namespace JPS.Models;
 
 public enum EditMode
@@ -9,6 +7,10 @@ public enum EditMode
     SetEnd
 }
 
+/// <summary>
+/// 纯网格模型：只承载“地图本身”（尺寸、阻挡、起终点、版本号）。
+/// 不含任何可视化/搜索叠加状态——那部分由视图层的 SearchOverlay 持有，保持模型与视图分离。
+/// </summary>
 public sealed class GridMap
 {
     public int Width { get; }
@@ -16,11 +18,6 @@ public sealed class GridMap
     public int CellSize { get; }
 
     private readonly bool[] _blocked;
-    private readonly HashSet<int> _expanded = [];
-    private readonly HashSet<int> _frontier = [];
-    private readonly HashSet<int> _scanned = [];
-    private readonly List<(int X, int Y)> _path = [];
-    private readonly List<Vector2> _smoothPath = [];
 
     public int StartX { get; private set; } = -1;
     public int StartY { get; private set; } = -1;
@@ -65,7 +62,6 @@ public sealed class GridMap
         }
 
         Version++;   // 阻挡变化 → 惰性跳点缓存整体失效
-        ClearSearchOverlay();
     }
 
     public void SetStart(int x, int y)
@@ -75,7 +71,6 @@ public sealed class GridMap
 
         StartX = x;
         StartY = y;
-        ClearSearchOverlay();
     }
 
     public void SetEnd(int x, int y)
@@ -85,7 +80,6 @@ public sealed class GridMap
 
         EndX = x;
         EndY = y;
-        ClearSearchOverlay();
     }
 
     public void ClearAll()
@@ -93,60 +87,7 @@ public sealed class GridMap
         Array.Fill(_blocked, false);
         StartX = StartY = EndX = EndY = -1;
         Version++;
-        ClearSearchOverlay();
     }
-
-    public void SetSearchCells(
-        IEnumerable<(int X, int Y)> expanded,
-        IEnumerable<(int X, int Y)> frontier,
-        IEnumerable<(int X, int Y)> scanned)
-    {
-        _expanded.Clear();
-        _frontier.Clear();
-        _scanned.Clear();
-
-        foreach (var (x, y) in scanned)
-            _scanned.Add(Index(x, y));
-
-        foreach (var (x, y) in frontier)
-            _frontier.Add(Index(x, y));
-
-        foreach (var (x, y) in expanded)
-            _expanded.Add(Index(x, y));
-    }
-
-    public void SetPath(IEnumerable<(int X, int Y)> cells)
-    {
-        _path.Clear();
-        _path.AddRange(cells);
-    }
-
-    public void SetSmoothPath(IEnumerable<Vector2> waypoints)
-    {
-        _smoothPath.Clear();
-        _smoothPath.AddRange(waypoints);
-    }
-
-    public IReadOnlyList<Vector2> SmoothPath => _smoothPath;
-
-    public void ClearSearchOverlay()
-    {
-        _expanded.Clear();
-        _frontier.Clear();
-        _scanned.Clear();
-        _path.Clear();
-        _smoothPath.Clear();
-    }
-
-    public bool IsExpanded(int x, int y) => _expanded.Contains(Index(x, y));
-
-    public bool IsFrontier(int x, int y) => _frontier.Contains(Index(x, y));
-
-    public bool IsScanned(int x, int y) => _scanned.Contains(Index(x, y));
-
-    public bool IsOnPath(int x, int y) => _path.Contains((x, y));
-
-    public IReadOnlyList<(int X, int Y)> Path => _path;
 
     public bool HasStart => StartX >= 0 && StartY >= 0;
 
