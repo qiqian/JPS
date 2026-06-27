@@ -57,8 +57,8 @@ namespace JPS.Pathfinding
         // ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ----
         private int _w, _h, _size;
         private long[] _g = new long[0];           // 各节点已知最短代价 g
-        private int[] _parent = new int[0];        // 父跳点 id（JPS 跨格跳跃，回溯需要完整父 id）
-        private sbyte[] _parentDir = new sbyte[0]; // 到达该节点的方向索引（剪枝用）
+        private sbyte[] _parentDir = new sbyte[0]; // 到达该节点的方向索引（剪枝用 + 回溯反推父节点）
+        private short[] _parentSteps = new short[0]; // 到达该节点的跳跃步数；父节点 = 当前 − dir×steps（省去绝对父 id）
         private int[] _mark = new int[0];          // 访问状态：== 2·gen → open(已生成)，== 2·gen+1 → closed(已展开)
         private int _gen;
         private readonly MinHeap _open = new MinHeap();
@@ -118,8 +118,7 @@ namespace JPS.Pathfinding
             _open.Clear();
             _g[startId] = 0;
             _mark[startId] = openMark;
-            _parent[startId] = -1;
-            _parentDir[startId] = -1;
+            _parentDir[startId] = -1;   // 起点无来向（剪枝时探索全部方向；回溯到此即停）
             _open.Enqueue(startId, JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy));
 
             int expandedCount = 0;
@@ -175,8 +174,8 @@ namespace JPS.Pathfinding
 
                     _g[nbId] = tentative;
                     _mark[nbId] = openMark;
-                    _parent[nbId] = current;
                     _parentDir[nbId] = (sbyte)idx;
+                    _parentSteps[nbId] = (short)jump.Steps;   // 步数 ≤ 边长 ≤ short.MaxValue
 
                     if (collectDebug && firstSeen)
                         _generatedIds.Add(nbId);
@@ -316,8 +315,8 @@ namespace JPS.Pathfinding
             _h = map.Height;
             _size = _w * _h;
             _g = new long[_size];
-            _parent = new int[_size];
             _parentDir = new sbyte[_size];
+            _parentSteps = new short[_size];
             _mark = new int[_size];
             _scanGen = new int[0];   // 可视化用，按需在 collectDebug 时分配
             _gen = 0;
@@ -427,7 +426,11 @@ namespace JPS.Pathfinding
             int current = goalId;
             while (current != startId)
             {
-                current = _parent[current];
+                // 父节点 = 当前 − 来向 × 跳跃步数
+                var (dx, dy) = JpsDirections.All[_parentDir[current]];
+                int steps = _parentSteps[current];
+                int cx = current % _w, cy = current / _w;
+                current = (cy - dy * steps) * _w + (cx - dx * steps);
                 nodes.Add(current);
             }
             nodes.Reverse();
