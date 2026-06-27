@@ -13,8 +13,8 @@ _A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JP
   _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
 - **无锁多线程共享缓存（默认开启）**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布保证可见性与次序，免锁并行（x86 上额外开销可忽略；可移除 `JPS_CONCURRENT_CACHE` 退回单线程极速）。
   _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
-- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；结果与 A\* 同样最优（全 33 张 MovingAI 基准图、33000 组随机查询与 A\* **0 不符**），扩展节点平均少约 **19×**（结构化/迷宫图可达 100×+），墙钟平均快约 **15×**。
-  _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\* (0 mismatches across 33,000 queries over all 33 MovingAI maps), averaging ~**19×** fewer expanded nodes (up to 100×+ on structured/maze maps) and ~**15×** faster wall-clock._
+- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；结果与 A\* 同样最优（MovingAI `mapf-map` 基准集 33 张图、33000 组随机查询与 A\* **0 不符**），扩展节点平均少约 **19×**（结构化/迷宫图可达 100×+），墙钟平均快约 **15×**。
+  _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\* (0 mismatches across 33,000 queries over the 33-map MovingAI `mapf-map` set), averaging ~**19×** fewer expanded nodes (up to 100×+ on structured/maze maps) and ~**15×** faster wall-clock._
 - **算法核心与界面解耦、可移植**：`Models` + `Pathfinding` 不依赖 WinForms，可整体拷入 Unity 2022。
   _**Decoupled, portable core:** `Models` + `Pathfinding` don't depend on WinForms and drop into Unity 2022 wholesale._
 
@@ -355,7 +355,7 @@ Parallel.For(0, threads, _ =>
 
 ### JPS vs A\* 性能开销对比（实测）
 
-JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` 在**全部 33 张 [MovingAI](https://movingai.com/benchmarks/) 基准地图**、每图随机取 **1000 组可解起终点（共 33000 组）** 的完整实测；`JPS扩展`/`A*扩展` 为每次平均扩展节点数，`µs` 为每次寻路平均耗时（取多轮最小，JPS 为热缓存）：
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机在 **[MovingAI](https://movingai.com/benchmarks/) `mapf-map` 基准集的 33 张地图**、每图随机取 **1000 组可解起终点（共 33000 组）** 的完整实测（仓库 `movingai/` 现含 `mapf-map` / `sc1-map` / `wc3maps512-map` 等多个子集共 **562 张**，`mapbench` 默认递归遍历全部，本表用 `mapbench 1000 mapf-map` 仅跑该子集）；`JPS扩展`/`A*扩展` 为每次平均扩展节点数，`µs` 为每次寻路平均耗时（取多轮最小，JPS 为热缓存）：
 
 | 地图 | 尺寸 | 可走% | JPS扩展 | A*扩展 | 节点比 | JPS µs | A* µs | 加速 |
 |---|---|---|---|---|---|---|---|---|
@@ -405,7 +405,7 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 - **缓存复用越多越快**：表中 JPS 耗时为**热缓存**（同图跨查询持续洗白跳点）；在 `test2.json` 上单独实测，"复用"比"每次冷缓存"快约 **10×**，且即便冷缓存 JPS 仍比 A\* 快 ~3×——这也是[多线程互相预热](#4-无锁多线程共享惰性缓存的并行寻路)的来源。
 - **单次扩展 JPS 更贵但值得 / 堆操作更少**：每次扩展要剪枝 + 跳跃扫描，单步比 A\* 的"看 8 邻居"贵；但扩展次数锐减、入队的只有跳点（堆几乎"清爽"，A\* 的入队 ≈ 扩展数×邻居数），综合净赢一个量级。
 
-> 复现：单图 `dotnet run -c Release --project JPS.Benchmark -- bench`（`test2.json`，见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `Bench`）；全量 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000`（遍历仓库 `movingai/`，见 `MapBench`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
+> 复现：本表（`mapf-map` 子集）`dotnet run -c Release --project JPS.Benchmark -- mapbench 1000 mapf-map`；不带子目录则**递归遍历 `movingai/` 全部子集**（见 `MapBench`）。单图基准 `dotnet run -c Release --project JPS.Benchmark -- bench`（`test2.json`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
 
 ---
 
@@ -437,7 +437,7 @@ dotnet run --project JPS.Playground
 
 图例（工具栏与网格之间）把每种叠加色映射到含义，同样会本地化。
 
-**MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。也可在命令行自检单图：`dotnet run --project JPS.Benchmark -- map movingai/den520d.map`；或**遍历 `movingai/` 全部地图、每图随机取若干可解起终点对比 JPS/A***：`dotnet run -c Release --project JPS.Benchmark -- mapbench 100`（每图样本数可调，输出每图尺寸/可走率/扩展节点/耗时/加速比及总汇总）。
+**MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。也可在命令行自检单图：`dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`；或**递归遍历 `movingai/` 全部子目录（现含 562 张地图）、每图随机取若干可解起终点对比 JPS/A***：`dotnet run -c Release --project JPS.Benchmark -- mapbench 100`（每图样本数可调；可加第二参数只跑某子集，如 `mapbench 100 sc1-map`；输出每图尺寸/可走率/扩展节点/耗时/加速比/与 A* 是否一致及总汇总，并同时写入仓库 `benchmark-results/` 下带时间戳的报告文件，方便日后查看）。
 
 ---
 
@@ -482,7 +482,7 @@ JPS.slnx                         # 解决方案
 │   └── Program.cs               # WinForms 入口
 │
 └── JPS.Benchmark/               # ④ 命令行基准 / 压测（引用 Core/Data）
-    └── Program.cs               # `-- bench` 单图基准；`-- mt` 并发压测；`-- map <path>` 单图自检；`-- mapbench [q]` 全量 MovingAI 基准
+    └── Program.cs               # `-- bench` 单图基准；`-- mt` 并发压测；`-- map <path>` 单图自检；`-- mapbench [q] [子目录]` 递归遍历 movingai/ 全量基准
 ```
 
 > **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
@@ -802,7 +802,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 ### JPS vs A\* Performance (measured)
 
-JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is the full measurement of `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` over **all 33 [MovingAI](https://movingai.com/benchmarks/) maps**, **1000 random solvable start/goal pairs each (33,000 total)**; `JPSexp`/`A*exp` are average expanded nodes per query, `µs` is average time per query (min over rounds, JPS warm-cache):
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is the full measurement over the **33 maps of the [MovingAI](https://movingai.com/benchmarks/) `mapf-map` set**, **1000 random solvable pairs each (33,000 total)** (the repo's `movingai/` now holds 562 maps across subsets like `mapf-map` / `sc1-map` / `wc3maps512-map`, all traversed recursively by `mapbench` by default; this table uses `mapbench 1000 mapf-map` for just that subset); `JPSexp`/`A*exp` are average expanded nodes per query, `µs` is average time per query (min over rounds, JPS warm-cache):
 
 | Map | Size | walk% | JPSexp | A*exp | ratio | JPS µs | A* µs | speed |
 |---|---|---|---|---|---|---|---|---|
@@ -852,7 +852,7 @@ Interpretation:
 - **The more cache reuse, the faster:** JPS times above are **warm-cache** (jump points whitened across queries on the same map); measured separately on `test2.json`, "reuse" is ~**10×** faster than "cold every time", and even cold-cache JPS still beats A\* by ~3× — this is the source of [multithreaded mutual warming](#4-lock-free-multithreading).
 - **JPS expansions cost more but worth it / fewer heap ops:** each expansion does pruning + jump scanning, costlier than A\*'s "look at 8 neighbors"; but expansions plummet and only jump points are enqueued (heap stays "clean", vs A\*'s enqueues ≈ expansions × neighbors), netting an order-of-magnitude win.
 
-> Reproduce: single map `dotnet run -c Release --project JPS.Benchmark -- bench` (`test2.json`, see `Bench` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)); full suite `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` (walks the repo's `movingai/`, see `MapBench`). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
+> Reproduce: this table (`mapf-map` subset) with `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000 mapf-map`; omit the subdir to **recurse over all of `movingai/`** (see `MapBench`). Single-map benchmark: `dotnet run -c Release --project JPS.Benchmark -- bench` (`test2.json`). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
 
 ## Run
 
@@ -882,7 +882,7 @@ Typical flow: **Wall** to draw obstacles → **Start** / **Goal** to mark → **
 
 The legend (between the toolbar and the grid) maps every overlay color to its meaning; it is localized too.
 
-**MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked). You can sanity-check a single map from the CLI: `dotnet run --project JPS.Benchmark -- map movingai/den520d.map`; or **benchmark JPS vs A\* across every map under `movingai/`, each with random solvable start/goal pairs**: `dotnet run -c Release --project JPS.Benchmark -- mapbench 100` (samples-per-map is configurable; prints per-map size/walkable%/expanded/time/speedup plus a grand total).
+**MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked). You can sanity-check a single map from the CLI: `dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`; or **benchmark JPS vs A\* recursively across all of `movingai/` (562 maps), each with random solvable start/goal pairs**: `dotnet run -c Release --project JPS.Benchmark -- mapbench 100` (samples-per-map is configurable; an optional second arg limits to one subset, e.g. `mapbench 100 sc1-map`; prints per-map size/walkable%/expanded/time/speedup/A*-match plus a grand total, and also writes a timestamped report under `benchmark-results/`).
 
 ## Project Structure
 
@@ -925,7 +925,7 @@ JPS.slnx                         # solution
 │   └── Program.cs               # WinForms entry
 │
 └── JPS.Benchmark/               # ④ CLI benchmark / stress test (references Core/Data)
-    └── Program.cs               # `-- bench` single-map benchmark; `-- mt` concurrency stress; `-- map <path>` self-check; `-- mapbench [q]` full MovingAI benchmark
+    └── Program.cs               # `-- bench` single-map benchmark; `-- mt` concurrency stress; `-- map <path>` self-check; `-- mapbench [q] [subdir]` recursive MovingAI benchmark
 ```
 
 > **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.

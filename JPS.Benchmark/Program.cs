@@ -12,7 +12,8 @@ namespace JPS.Benchmark
     ///   dotnet run -- bench         单线程 JPS / A* 性能基准（test2.json）
     ///   dotnet run -- mt            多线程共享缓存正确性压测（JPS.Core 默认已开启 JPS_CONCURRENT_CACHE）
     ///   dotnet run -- map &lt;path&gt;    加载一张 MovingAI .map 并做一次 JPS 寻路（解析/寻路自检）
-    ///   dotnet run -- mapbench [q]  遍历 movingai/ 所有 .map，每图随机取 q 组可解起终点对比 JPS/A*
+    ///   dotnet run -- mapbench [q] [子目录]  递归遍历 movingai/（或其指定子目录）下所有 .map，每图随机取 q 组可解起终点对比 JPS/A*
+    ///                                        结果同时打印到控制台并写入 benchmark-results/ 下的报告文件
     /// </summary>
     internal static class Program
     {
@@ -23,10 +24,10 @@ namespace JPS.Benchmark
             {
                 case "bench": Bench(); return 0;
                 case "mt": MtTest(); return 0;
-                case "map": MapTest(args.Length >= 2 ? args[1] : FindFile("movingai/maze-32-32-2.map")); return 0;
-                case "mapbench": MapBench(args.Length >= 2 && int.TryParse(args[1], out int q) ? q : 100); return 0;
+                case "map": MapTest(args.Length >= 2 ? args[1] : FindFile("movingai/mapf-map/maze-32-32-2.map")); return 0;
+                case "mapbench": MapBench(args.Length >= 2 && int.TryParse(args[1], out int q) ? q : 30, args.Length >= 3 ? args[2] : null); return 0;
                 default:
-                    Console.WriteLine("用法: dotnet run -- [bench | mt | map <path.map> | mapbench [每图样本数]]");
+                    Console.WriteLine("用法: dotnet run -- [bench | mt | map <path.map> | mapbench [每图样本数] [子目录]]");
                     return 1;
             }
         }
@@ -129,14 +130,43 @@ namespace JPS.Benchmark
         }
 
         // 遍历 movingai/ 下所有 .map，每图随机取 q 组“可解”起终点，对比 JPS / A*。
-        private static void MapBench(int q)
+        // 同时把输出写到控制台与报告文件（接管 Console.Out，无需改动任何 WriteLine）。
+        private sealed class TeeTextWriter : TextWriter
         {
-            string dir = FindDir("movingai");
-            var files = Directory.GetFiles(dir, "*.map")
-                                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+            private readonly TextWriter _a, _b;
+            public TeeTextWriter(TextWriter a, TextWriter b) { _a = a; _b = b; }
+            public override Encoding Encoding => _a.Encoding;
+            public override void Write(char value) { _a.Write(value); _b.Write(value); }
+            public override void Write(string? value) { _a.Write(value); _b.Write(value); }
+            public override void WriteLine(string? value) { _a.WriteLine(value); _b.WriteLine(value); }
+            public override void Flush() { _a.Flush(); _b.Flush(); }
+        }
+
+        private static void MapBench(int q, string? sub = null)
+        {
+            string root = FindDir("movingai");
+            string dir = string.IsNullOrEmpty(sub) ? root : Path.Combine(root, sub!);
+            if (!Directory.Exists(dir)) { Console.WriteLine($"目录不存在：{dir}"); return; }
+
+            var files = Directory.GetFiles(dir, "*.map", SearchOption.AllDirectories)
+                                 .OrderBy(f => Path.GetRelativePath(root, f), StringComparer.OrdinalIgnoreCase)
                                  .ToArray();
 
-            Console.WriteLine($"MovingAI 批量基准：{files.Length} 张图，每图目标 {q} 组随机可解起终点（耗时取多轮最小，逐图输出）");
+            string scope = string.IsNullOrEmpty(sub) ? "递归遍历 movingai/ 全部子目录" : $"子集 movingai/{sub}";
+
+            // 结果同时落盘到 benchmark-results/ 下的报告文件，方便日后查看
+            string repoRoot = Directory.GetParent(root)?.FullName ?? root;
+            string reportsDir = Path.Combine(repoRoot, "benchmark-results");
+            Directory.CreateDirectory(reportsDir);
+            string scopeTag = string.IsNullOrEmpty(sub) ? "all" : sub!.Replace('/', '-').Replace('\\', '-');
+            string reportPath = Path.Combine(reportsDir, $"mapbench-{scopeTag}-q{q}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+
+            var consoleOut = Console.Out;
+            var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
+            Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+
+            Console.WriteLine($"# JPS vs A* · MovingAI 基准报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"MovingAI 批量基准：{files.Length} 张图（{scope}），每图目标 {q} 组随机可解起终点（耗时取多轮最小，逐图输出）");
             Console.WriteLine();
             Console.WriteLine("列说明：");
             Console.WriteLine("  map     地图名");
@@ -151,8 +181,8 @@ namespace JPS.Benchmark
             Console.WriteLine("  speed   墙钟加速比 = A*us / JPSus（越大表示 JPS 越快）");
             Console.WriteLine("  mism    与 A* 结果不一致的组数（成败不同或路径代价不等；正确应为 0）");
             Console.WriteLine();
-            Console.WriteLine($"{"map",-24}{"size",11}{"walk%",7}{"pairs",7}{"JPSexp",8}{"A*exp",8}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}{"mism",6}");
-            Console.WriteLine(new string('-', 101));
+            Console.WriteLine($"{"map",-34}{"size",11}{"walk%",7}{"pairs",7}{"JPSexp",8}{"A*exp",8}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}{"mism",6}");
+            Console.WriteLine(new string('-', 113));
 
             long sumJexp = 0, sumAexp = 0;
             double sumJms = 0, sumAms = 0;
@@ -161,7 +191,9 @@ namespace JPS.Benchmark
             foreach (var f in files)
             {
                 var map = MovingAiMap.Parse(File.ReadAllText(f));
-                string name = Path.GetFileNameWithoutExtension(f);
+                string rel = Path.GetRelativePath(root, f);
+                string name = (rel.EndsWith(".map", StringComparison.OrdinalIgnoreCase)
+                    ? rel.Substring(0, rel.Length - 4) : rel).Replace('\\', '/');
                 string size = $"{map.Width}x{map.Height}";
                 long tot = (long)map.Width * map.Height;
 
@@ -169,7 +201,7 @@ namespace JPS.Benchmark
                 for (int y = 0; y < map.Height; y++)
                     for (int x = 0; x < map.Width; x++)
                         if (map.IsWalkable(x, y)) walk.Add((x, y));
-                if (walk.Count < 2) { Console.WriteLine($"{name,-24}{size,11}   (可走格不足)"); continue; }
+                if (walk.Count < 2) { Console.WriteLine($"{name,-34}{size,11}   (可走格不足)"); continue; }
 
                 var system = new JpsSystem(map);
                 system.Sync();
@@ -188,7 +220,7 @@ namespace JPS.Benchmark
                     if (jps.FindPath(system, s, g, false).Success) qs.Add((s, g));
                 }
                 int n = qs.Count;
-                if (n == 0) { Console.WriteLine($"{name,-24}{size,11}   (无可解样本)"); continue; }
+                if (n == 0) { Console.WriteLine($"{name,-34}{size,11}   (无可解样本)"); continue; }
 
                 // 扩展节点 + 正确性校验（与耗时分离统计）：
                 // 逐样本对比 JPS 与 A* 的成败与“路径代价”是否一致（代价相等即最优；两者可走不同的等价最优路）。
@@ -222,13 +254,13 @@ namespace JPS.Benchmark
 
                 double jus = jMs / n * 1000, aus = aMs / n * 1000;
                 Console.WriteLine(
-                    $"{name,-24}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
+                    $"{name,-34}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
                     $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{mism,6}");
 
                 sumJexp += jExp; sumAexp += aExp; sumJms += jMs; sumAms += aMs; sumPairs += n; sumMism += mism;
             }
 
-            Console.WriteLine(new string('-', 101));
+            Console.WriteLine(new string('-', 113));
             if (sumPairs > 0)
             {
                 Console.WriteLine(
@@ -238,6 +270,11 @@ namespace JPS.Benchmark
                     ? $"正确性：{sumPairs} 组 JPS 与 A* 结果完全一致（成败 + 路径代价），✓ 通过"
                     : $"正确性：⚠ 有 {sumMism} 组与 A* 不一致！");
             }
+
+            Console.Out.Flush();
+            Console.SetOut(consoleOut);   // 还原标准输出
+            fileOut.Dispose();
+            Console.WriteLine($"报告已保存：{reportPath}");
         }
 
         // 加载一张 MovingAI .map，做一次 JPS 寻路，验证解析与寻路是否正常。
