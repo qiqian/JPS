@@ -2,30 +2,35 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-一个用于**直观演示与测试 JPS（Jump Point Search，跳点搜索）寻路算法**的 Windows Forms 应用（.NET / C#）。
-内置 A\* 对照、路径平滑、JSON 存档，以及把"跳点表更新过程"实时可视化的能力——非常适合用来理解 JPS 的内部机理。
+一个用于**直观演示与测试 JPS（Jump Point Search，跳点搜索）寻路算法**的 Windows Forms 应用（.NET / C#）。内置 A\* 对照、路径平滑、JSON 存档，以及把"跳点表更新过程"实时可视化的能力——非常适合用来理解 JPS 的内部机理。
+_A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JPS (Jump Point Search) pathfinding algorithm**. It ships with an A\* baseline, path smoothing, JSON save/load, and real-time visualization of the "jump-table update process" — ideal for understanding how JPS works inside._
 
 > 刷阻挡 → 设起点/终点 → `JPS寻路` / `A*寻路`，即可看到搜索过程、最终路径、平滑路径，以及每个格子各方向跳点缓存的更新状态。
+> _Brush obstacles → set start/goal → `JPS寻路` / `A*寻路` to watch the search process, final path, smoothed path, and each cell's per-direction jump-cache update state._
+
+> 中文正文在前，**English translation of the full body is appended after the Chinese sections** (see the right-hand links in the table of contents).
 
 ---
 
-## 目录
+## 目录 · Table of Contents
 
-- [功能一览](#功能一览)
-- [一、JPS 算法核心原理](#一jps-算法核心原理)
-  - [1. 网格与移动规则](#1-网格与移动规则)
-  - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居)
-  - [3. 强迫邻居判定规则（forced neighbor）](#3-强迫邻居判定规则forced-neighbor)
-  - [4. 走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则)
-  - [5. 为什么比 A\* 快](#5-为什么比-a-快)
-- [二、本项目的核心实现](#二本项目的核心实现)
-  - [1. Jump Table Lazy Update（惰性跳点表）](#1-jump-table-lazy-update惰性跳点表)
-  - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计)
-  - [3. 平滑方案的选择](#3-平滑方案的选择)
-  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路)
-- [三、可视化说明](#三可视化说明)
-- [四、工程与性能要点](#四工程与性能要点)
-- [运行](#运行)
+> 每条左侧为中文锚点，右侧 `·` 后为英文锚点。 _Left link → Chinese section, right link (after `·`) → English section._
+
+- [功能一览](#功能一览) · [Features](#features)
+- [一、JPS 算法核心原理](#一jps-算法核心原理) · [I. Core Principles of JPS](#i-core-principles-of-jps)
+  - [1. 网格与移动规则](#1-网格与移动规则) · [1. Grid and Movement Rules](#1-grid-and-movement-rules)
+  - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居) · [2. Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors)
+  - [3. 强迫邻居判定规则（forced neighbor）](#3-强迫邻居判定规则forced-neighbor) · [3. Forced-Neighbor Rules](#3-forced-neighbor-rules)
+  - [4. 走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则) · [4. Straight and Diagonal Scanning](#4-straight-and-diagonal-scanning)
+  - [5. 为什么比 A\* 快](#5-为什么比-a-快) · [5. Why It's Faster Than A\*](#5-why-its-faster-than-a)
+- [二、本项目的核心实现](#二本项目的核心实现) · [II. Implementation Highlights](#ii-implementation-highlights)
+  - [1. Jump Table Lazy Update（惰性跳点表）](#1-jump-table-lazy-update惰性跳点表) · [1. Jump Table Lazy Update](#1-jump-table-lazy-update)
+  - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计) · [2. Unified Obstacle Model](#2-unified-obstacle-model)
+  - [3. 平滑方案的选择](#3-平滑方案的选择) · [3. Path Smoothing](#3-path-smoothing)
+  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [4. Lock-Free Multithreading](#4-lock-free-multithreading)
+- [三、可视化说明](#三可视化说明) · [III. Visualization](#iii-visualization)
+- [四、工程与性能要点](#四工程与性能要点) · [IV. Engineering and Performance](#iv-engineering-and-performance)
+- [运行](#运行) · [Run](#run)
 
 ---
 
@@ -110,7 +115,7 @@ JPS 是对 A\* 在**均匀代价栅格**上的加速：它不改变最优性，�
 2. 当前对角格出现对角强迫邻居 → 是跳点，返回。
 3. **关键递归**：在每个对角格上，先沿它的两个正交分量做"直线跳跃"；只要任一分量能找到跳点，当前对角格就也算跳点并返回。
 
-这条"对角每步派生两次直线扫描"的递归，是对角跳跃天然比直线贵的原因（最坏 O(L²)）——本项目用[惰性正交缓存](#2-jump-table-lazy-update惰性跳点表)把它降回接近 O(L)。
+这条"对角每步派生两次直线扫描"的递归，是对角跳跃天然比直线贵的原因（最坏 O(L²)）——本项目用[惰性正交缓存](#1-jump-table-lazy-update惰性跳点表)把它降回接近 O(L)。
 
 ### 5. 为什么比 A\* 快
 
@@ -406,3 +411,374 @@ JPS/
 ## 许可证
 
 本项目以 **MIT License** 开源——可自由用于个人或**商业**用途：使用、复制、修改、合并、发布、分发、再授权、出售均不受限，只需在副本中保留版权与许可声明。详见 [LICENSE](LICENSE)。
+
+---
+---
+
+# English Translation
+
+> Full English translation of the body above. Use the right-hand links in the [table of contents](#目录--table-of-contents) to jump here. ([↑ back to top](#jps-pathfinding-playground))
+
+## Features
+
+| Category | Details |
+|---|---|
+| Editing | Obstacle brush (click empty → paint 2×2; click obstacle → erase 1 cell), set start/goal, clear |
+| Pathfinding | **JPS**, **A\*** (baseline); integer cost (1000 cardinal / 1414 diagonal, 8-direction octile heuristic) |
+| Smoothing | Forward-incremental line-of-sight string pulling, drawn as a red polyline overlay |
+| Save/Load | Export/import the map (obstacles + start/goal) as JSON |
+| Visualization | Expanded / frontier / scanned-skipped / path / smoothed path; **per-cell dirty/clean dots for the 4-direction jump cache** |
+
+## I. Core Principles of JPS
+
+JPS accelerates A\* on **uniform-cost grids**: it preserves optimality but exploits grid symmetry, compressing "examine 8 neighbors every step" into "jump along a direction over meaningless cells, stopping to enqueue only at **jump points**".
+
+### 1. Grid and Movement Rules
+
+- 8-connectivity: 4 cardinal directions (↑↓←→) + 4 diagonal (↖↗↙↘).
+- Cost: cardinal `1000`, diagonal `1414` (≈ √2 × 1000), all integer.
+- Heuristic: octile distance
+  `h = (max(dx,dy) - min(dx,dy)) × 1000 + min(dx,dy) × 1414`
+- This project allows **cutting corners**: a diagonal move only requires the target cell to be walkable (it does not require both flanking cardinal cells to be free). A\* and JPS share the exact same movement rules, so their results are comparable.
+
+### 2. Pruning: Natural vs Forced Neighbors
+
+To understand JPS, first understand **why it can skip cells**.
+
+On a uniform-cost grid there are usually **many equal-cost equivalent paths** from the start to a given cell (e.g. "right then down" equals "down then right") — this is **path symmetry**. A\* expands all of these equivalents, doing lots of redundant work. **JPS breaks this symmetry: each cell keeps only one "canonical path" and prunes all other equivalent branches.**
+
+Concretely, after moving from parent `p` along some direction to the current node `n`, `n`'s neighbors split into two kinds:
+
+| Kind | Definition | Action |
+|---|---|---|
+| **Natural** | Reachable with equal or shorter cost without going through `n` | **Pruned** (left to another path) |
+| **Forced** | Because of a nearby **obstacle**, the only way around is through `n` | **Kept** |
+
+> Once a cell has a forced neighbor it is a **jump point** — we must stop and enqueue it, because the path may "turn" here. **Cells with no forced neighbor can be skipped entirely and never enqueued.** This is where JPS saves the bulk of its work.
+
+So the two key questions for JPS are: **how to detect forced neighbors (→ find jump points)** and **how to scan for jump points along a direction efficiently**. The next two sections answer each.
+
+### 3. Forced-Neighbor Rules
+
+Forced neighbors are always caused by **obstacles** (`X` = obstacle, arrow = movement direction, `F` = forced neighbor):
+
+**Straight move (rightward → as example):** when the cell directly above/below `n` is blocked but its **diagonal-ahead** cell is walkable, that diagonal cell is a forced neighbor (the only detour is through `n`):
+
+```
+ .  X  F      row y-1: (x,y-1)=X blocked, (x+1,y-1)=F walkable → F is forced
+ .  n→ .      row y  : n advances along →
+ .  .  .      row y+1
+
+rule: !walk(x, y-1) && walk(x+1, y-1)   (forced above)
+      !walk(x, y+1) && walk(x+1, y+1)   (forced below)
+```
+
+**Diagonal move (↘ as example, dx=+1, dy=+1):** when a cardinal "behind" direction is blocked while its corresponding diagonal is walkable, a forced neighbor appears:
+
+```
+rule: !walk(x-dx, y)  && walk(x-dx, y+dy)   → forced neighbor (x-dx, y+dy)
+      !walk(x, y-dy)  && walk(x+dx, y-dy)   → forced neighbor (x+dx, y-dy)
+```
+
+> See [`JpsRules`](JPS/Pathfinding/JpsRules.cs): `HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`.
+> ⚠️ The direction used for forced-neighbor detection must **exactly match** the direction actually explored during pruning (look at the "forward" `x+dx`, not "behind" `x-dx`), otherwise real jump points are missed and no path is found — one of the easiest JPS pitfalls.
+
+### 4. Straight and Diagonal Scanning
+
+**Straight jump** (along a single cardinal direction):
+
+1. Step cell-by-cell along the direction.
+2. Hit a wall / out of bounds → no jump point in this direction.
+3. Reach the goal → the goal is a jump point.
+4. Current cell has a forced neighbor → the current cell is a jump point; stop and return.
+
+**Diagonal jump** (along a diagonal direction):
+
+1. Step cell-by-cell diagonally; wall / out-of-bounds → no jump point; reach goal → return.
+2. Current diagonal cell has a diagonal forced neighbor → it is a jump point; return.
+3. **Key recursion:** at each diagonal cell, first run a "straight jump" along each of its two cardinal components; if either finds a jump point, the current diagonal cell counts as a jump point and returns.
+
+This "each diagonal step spawns two straight scans" recursion is why diagonal jumping is inherently costlier than straight (worst case O(L²)) — this project uses a [lazy cardinal cache](#1-jump-table-lazy-update) to bring it back to near O(L).
+
+### 5. Why It's Faster Than A\*
+
+Mapping the pruning idea onto cost reveals JPS's edge over A\*:
+
+```mermaid
+flowchart LR
+    A["A*: each expansion<br/>enqueues all 8 neighbors"] -->|open list explodes| S1["many heap ops"]
+    J["JPS: jump along directions<br/>enqueue only jump points"] -->|open list stays sparse| S2["very few heap ops"]
+```
+
+- **A\***: puts every walkable cell into the priority queue, repeatedly pushing/popping the heap.
+- **JPS**: while advancing along a direction, intermediate cells are merely "glanced at" (not enqueued, not expanded, no heap op); **only jump points enter the open list**.
+
+Because jump points are far fewer than cells, JPS drastically cuts open-list size and heap operations, typically running an order of magnitude faster than A\*; with an admissible heuristic and identical movement rules, its **result is just as optimal as A\*** (verified against A\* on 600+ random maps with identical costs).
+
+## II. Implementation Highlights
+
+### 1. Jump Table Lazy Update
+
+This is the core design of the project.
+
+Classic JPS+ **precomputes** a table of "distance from each cell, in each direction, to the next jump point/wall", accelerating jumps to O(1). But this table depends on obstacle layout — **any obstacle change forces a full O(N) rebuild**, which is hostile to frequently changing obstacles.
+
+This project does **no eager precomputation** and instead turns the jump table into a "**update a cell only when it's actually used**" lazy cache.
+
+**Data structure (cardinal 4 directions only):** each cell, per cardinal direction, stores one signed distance (`>0` = distance to a jump point, `≤0` = distance to a wall) + one **generation stamp**.
+
+**Three operations:**
+
+| Event | Handling | Complexity |
+|---|---|---|
+| Obstacle change (`Version` changes) | Global valid generation `+1` → the entire table is instantly dirty | **O(1)** |
+| Query a cell/direction (clean) | Read the cache directly | **O(1)** |
+| Query a cell/direction (dirty) | Scan once along the direction to a jump point/wall and **whiten the whole run at once** | O(L), one scan clears a whole strip |
+
+**Why cache only cardinal directions and always scan diagonals?** A deliberate trade-off, for three reasons:
+
+1. **The diagonal bottleneck is actually in the cardinals.** Recall the [diagonal scanning rule](#4-straight-and-diagonal-scanning): each diagonal step runs a straight scan along each of its two cardinal components, so diagonal jumping is worst-case **O(L²)**. Just turning those two cardinal sub-checks into "read the cardinal cache" brings diagonal jumping down to near **O(L)** — **cache the cardinals, diagonals speed up for free**, no separate diagonal table needed.
+
+2. **The cardinal cache has an excellent payoff.** Recomputing one cardinal entry costs one straight scan (O(L)), same as "scan without caching"; but once cached, reuse is **O(1)**, and **a single scan whitens the whole run** (a strip of cells sharing the same jump point/wall). So "scan once, reuse long-term" pays off handsomely.
+
+3. **Diagonal entries are hard to maintain lazily and yield little.** A diagonal distance depends on "the diagonal neighbor's diagonal distance + jump points along the cardinal components"; one obstacle change **ripples along the diagonal** and updates recurse into cardinal results — complex and error-prone, while the extra benefit is already mostly absorbed by reason 1. Poor ROI, so it's skipped.
+
+> Also, the goal is handled naturally by the [classic diagonal scan](#4-straight-and-diagonal-scanning)'s `==goal` test and the cardinal sub-checks, so **no diagonal table is needed for goal-targeting either**.
+
+```mermaid
+flowchart TD
+    Q["pathfinding needs a cell's jump in some direction"] --> C{direction clean?}
+    C -->|yes| R["O(1) read cache"]
+    C -->|no| Scan["scan along direction to jump point/wall<br/>whiten the whole run to clean"]
+    Scan --> R
+    E["obstacle changes"] --> G["valid generation +1 (O(1) bulk invalidate)"]
+```
+
+**Significance:**
+
+- **Zero rebuild for dynamic obstacles:** changing obstacles is just an `O(1)` invalidate, no table rebuild.
+- **Pay only for the cells you step on:** versus "full O(N) rebuild", the lazy scheme only updates the cells pathfinding actually touches; if queries cover only a local region, the cost is far below O(N).
+- **Cross-query reuse:** between two obstacle changes, multiple searches keep reusing whitened jump points, getting faster the more they run — clearly better than pure per-cell scanning.
+- A **generation counter** rather than a bool array makes "bulk invalidate" truly O(1) (no clearing pass).
+
+> See `CardinalDist` (lazy cardinal memo) and `DiagonalJump` (classic diagonal scan reusing the memo) in [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs).
+
+### 2. Unified Obstacle Model
+
+The traditional approach distinguishes "**static obstacles** (go into the precomputed table)" from "**dynamic obstacles** (kept out of the table, special-cased at search time)", because rebuilding the precomputed table is expensive and must not be triggered by frequently changing dynamic obstacles.
+
+But here the jump table is already the [lazy update from the previous section](#1-jump-table-lazy-update) — **any obstacle change is just an O(1) bulk invalidate**, with no "rebuild cost". So the distinction loses its meaning:
+
+> Since changing any obstacle is only an O(1) invalidate, "static vs dynamic" makes **no difference at the algorithm level** — an obstacle has only one property: "is it walkable right now".
+
+So this project **unifies everything into a single obstacle type**:
+
+- Only **one obstacle type** + one version number [`GridMap.Version`](JPS/Models/GridMap.cs): any add/remove → `Version++` → the lazy jump table is bulk-invalidated.
+- Pathfinding / jump table / A\* all just look at `IsWalkable`, indifferent to an obstacle's "origin".
+- No dual static/dynamic logic, no "dynamic obstacle falls back to classic scan" branch, no manual precompute button — the architecture is greatly simplified.
+
+In other words: **the lazy jump table dissolves the "dynamic obstacle" problem entirely** — all obstacles are inherently "dynamic", at zero cost.
+
+### 3. Path Smoothing
+
+Grid pathfinding yields a "cell-hugging polyline" that needs smoothing into a more natural path. We compared several approaches and chose **forward-incremental line-of-sight string pulling**:
+
+| Approach | Complexity | Behavior on grids | Verdict |
+|---|---|---|---|
+| End-greedy pulling (farthest visible point) | worst O(n³) | marginally better quality | too slow |
+| **Forward-incremental pulling (this project)** | **O(n·L)** | nearly identical quality to end-greedy | ✅ adopted |
+| Funnel algorithm | O(n) | limited by 1-cell-wide corridors, **worse** in open areas | great for navmesh, not grids |
+| Theta\* | slow (loses JPS pruning + full LOS) | near-optimal any-angle | a "better pathfinder", not a "better smoother" |
+
+- **Line-of-sight check** uses an integer supercover line (same integer math as pathfinding, same corner-cutting allowance), testing cell-by-cell whether the segment crosses an obstacle.
+- **Integer / float boundary:** pathfinding is all-integer; **floats appear only in the final path smoothing and drawing**. The smoothed result is output as continuous coordinates (cell center = `cx+0.5`) and overlaid as a red polyline on the original path.
+
+> See [`PathSmoother`](JPS/Pathfinding/PathSmoother.cs).
+> Note: even with identical cost, JPS and A\* may take different equivalent-optimal grid paths; smoothing is an input-dependent greedy algorithm, so their smoothed results can differ — this is normal, not a bug.
+
+### 4. Lock-Free Multithreading
+
+Many scenarios (e.g. a server pathfinding for hundreds/thousands of units at once) want **multiple threads pathfinding on the same map in parallel**. This project's structure suits that naturally, and does it **lock-free**.
+
+#### Design
+
+**1) Split "shared read-only state" from "thread-private state".**
+[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs) holds `GridMap` + `JumpPointCache` (**shared**); each [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs) holds only its own per-node search state (`g / mark / open / parent …`, **thread-private**). So parallel pathfinding = many private pathfinders running independently, with the shared cache as their only meeting point.
+
+```mermaid
+flowchart TD
+    Sys["JpsSystem (shared)<br/>GridMap + JumpPointCache"]
+    T1["Thread 1: JpsPathfinder #1<br/>private g/mark/open"] -->|read / lazy fill| Sys
+    T2["Thread 2: JpsPathfinder #2<br/>private g/mark/open"] -->|read / lazy fill| Sys
+    T3["Thread N: JpsPathfinder #N<br/>private g/mark/open"] -->|read / lazy fill| Sys
+```
+
+**2) Make the shared cache lock-free.** Key observation: the map is unchanged during parallel runs, so **each cache entry's correct value is a pure function of the fixed map** — different threads compute the same dist for the same cell/direction. So even if two threads fill the same cell simultaneously, they just write the **same value** twice; the result is consistent. The only remaining risk is **visibility and write ordering**: a reader might see the "clean" generation stamp before the corresponding dist.
+
+**3) Use full barriers to guarantee publish ordering (instead of locking).** At the lazy-fill site, `Thread.MemoryBarrier()` establishes a release/acquire pair:
+
+- **Writer**: first write all `dist` for the whole run → **release barrier** → then publish all generation stamps `gen`. Guarantees "if you can see gen, you can see dist".
+- **Reader**: after a clean hit (`gen == valid generation`) → **acquire barrier** → then read `dist`.
+- Only one barrier per run (write the whole dist strip, then publish gen together), keeping barrier cost on the dirty slow path; a clean hit costs just one extra barrier, lock-free and uncontended.
+
+This needs no mutex and does **not increase the cache's per-cell memory** (barriers only constrain ordering, add no fields).
+
+**4) Multiple finders warm the cache for each other → faster the more parallel it gets.** This is the sweetest dividend of the shared cache: the cache is [lazily whitened](#1-jump-table-lazy-update) — **a strip is scanned and whitened to clean only when it's traversed**. Since all threads share **one** cache —
+
+- A region scanned first by **any** thread is whitened once; afterward **all threads** hit it in O(1).
+- So across the whole parallel run, each strip's O(L) scan is **paid globally once**, not "once per thread". The more threads, the denser the queries, the more the paths overlap — the higher the reuse, and the **lower the average time per search**.
+
+In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [cache-reuse row in chapter IV](#jps-vs-a-performance-estimate): reuse is ~10× faster than no-reuse.)
+
+> ⚠️ Prerequisite: **before** parallel pathfinding, a **single thread** must call `JpsSystem.Sync()` once (to fix the cache version), and the map **must not change** during parallel runs. To edit the map, join all pathfinding threads first, then Sync, then go parallel again.
+
+#### Usage
+
+| Mode | How to enable | Use case |
+|---|---|---|
+| **Single-thread max speed** (default) | define no symbol | tool demo / single-threaded calls; barriers vanish, zero overhead |
+| **Lock-free multithreading** | define the compile symbol `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel |
+
+Enable thread-safe mode — add to the `<PropertyGroup>` of `JPS/JPS.csproj`:
+
+```xml
+<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
+```
+
+Parallel calling pattern:
+
+```csharp
+var system = new JpsSystem(map);
+system.Sync();                       // ① sync once on a single thread before going parallel
+
+Parallel.For(0, threads, _ =>
+{
+    var jps = new JpsPathfinder();   // ② one private pathfinder per thread
+    foreach (var (s, g) in queries)  //    sharing the same system (read / lazy-fill cache)
+        jps.FindPath(system, s, g);
+});                                  // ③ do not modify the map during parallel runs
+```
+
+> **Correctness check:** with `JPS_CONCURRENT_CACHE` enabled, 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run -- mt` (see `MtTest` in [`Program.cs`](JPS/Program.cs)).
+
+## III. Visualization
+
+| Color / marker | Meaning |
+|---|---|
+| Gray / near-black | walkable cell / obstacle |
+| 🟩 green | expanded (dequeued and expanded jump point) |
+| 🟪 purple | frontier (enqueued, not yet expanded) |
+| 🟦 blue-gray | scanned-skipped (cells a ray passed through but never entered open) |
+| 🟡 gold line | final path |
+| 🔴 red line | smoothed path |
+| S / G | start / goal |
+
+**The 4 dots in each cell's cross** = the cache state of that cell's 4 cardinal directions (position = direction: up N, down S, left W, right E):
+
+- hollow = **dirty** (to be computed)
+- solid white = previously cached
+- solid orange = direction **newly updated by this search**
+
+These dots make the "lazy jump table" process obvious: after editing obstacles everything turns hollow (O(1) bulk invalidate); run one search and only the touched directions light up, with the ones newly whitened this run shown in orange.
+
+## IV. Engineering and Performance
+
+- **Integer pathfinding:** cost, heuristic, g/f are all integer (`long`), no float error.
+- **Flat arrays instead of hashing:** per-node data (`g / parent / closed / jump cache`) is indexed by `id = y·W + x`, avoiding tuple-hash overhead.
+- **Generation stamps avoid clearing:** each query increments a generation number to test "visited this run?", with no per-query array clear.
+- **Buffer reuse:** allocated once per map size and reused across queries, near-zero GC.
+- **Zero-allocation direction pruning:** pruned directions are written to a reused buffer, no iterator allocation.
+- **Correctness check:** 600+ random maps (including mid-run obstacle changes) compared against A\*, identical path cost and success/failure.
+
+### JPS vs A\* Memory Footprint
+
+Both keep per-node state as flat arrays "allocated once per map size, reused across queries" (`N = width × height`). Exact bytes per cell:
+
+| Data | Field | A\* | JPS | Owner |
+|---|---|---|---|---|
+| g value | `long` | 8 | 8 | per instance (thread-private) |
+| parent info | A\*: came-dir `sbyte`; JPS: came-dir `sbyte` + steps `short` | 1 | 3 | per instance (thread-private) |
+| visit state | `int` (`2·gen` / `2·gen+1` merged seen/closed) | 4 | 4 | per instance (thread-private) |
+| **search-state subtotal** | | **13 B/cell** | **15 B/cell** | per instance |
+| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **shared per map** ([`JpsSystem`](JPS/Pathfinding/JpsSystem.cs)) |
+| **total** | | **13 B/cell** | **27 B/cell** | |
+
+- **Single instance:** JPS is about **~2.1×** A\* (the extra 14 B/cell is almost entirely the 12 B/cell cardinal jump cache — the core space-for-"O(1) jump" trade-off).
+- **Multithread sharing:** the jump cache is stored once per map and shared by all threads; only the 15 B/cell search state grows linearly with thread count. For `T` threads on a 200×200 (40k-cell) map:
+
+  | Threads | A\* | JPS |
+  |---|---|---|
+  | 1 | 0.52 MB | 1.08 MB (0.60 MB search state + 0.48 MB shared cache) |
+  | 8 | 4.16 MB | 5.28 MB (4.80 MB search state + 0.48 MB shared cache) |
+
+- The map itself ([`GridMap._blocked`](JPS/Models/GridMap.cs)) is bit-packed to 1 bit/cell (≈0.125 B/cell), shared by both, negligible.
+- The open list ([`MinHeap`](JPS/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
+- The visualization `_scanGen` (4 B/cell) is allocated only when debug visualization (`collectDebug`) is on; pure algorithm runs don't use it.
+
+### JPS vs A\* Performance (Estimate)
+
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is measured by `dotnet run -c Release -- bench` on **`test2.json` (137×68 structured map, continuous walls, close to a real level)** over **8000 random start/goal pairs, min over multiple rounds**:
+
+| Metric (avg/query) | JPS | A\* | Ratio |
+|---|---|---|---|
+| **Expanded nodes** | **~31** | **~1565** | A\*/JPS ≈ **51×** |
+| Time (cache reuse) | **4.8 µs** | 164.7 µs | ≈ **34× faster** |
+| Time (no cache reuse, cold each time) | 50.9 µs | 164.7 µs | ≈ 3.2× faster |
+| **Cache reuse vs no-reuse** | 4.8 µs vs 50.9 µs | — | reuse ≈ **10.5×** |
+
+Interpretation and estimation notes:
+
+- **Expanded-node count = JPS's hard advantage:** JPS heads almost "straight for the goal" (enqueuing only at turns), while A\* stuffs the whole reachable area into the heap — a **~51×** gap here. This advantage is independent of implementation/hardware and most reliably estimable.
+- **Structured maps are JPS's home turf:** on `test2.json` (continuous walls, corridors and open areas), jump points are sparse and wall-clock speedup hits **~34×**. The counter-example is a **random-scatter** map (forced neighbors everywhere → dense jump points → frequent diagonal scans), JPS's unfavorable case where speedup drops sharply (measured ~1.4× at 20% random scatter) — real levels are far friendlier than random scatter.
+- **The more cache reuse, the faster (≈10.5×):** "no-reuse" resets the jump table to cold before every query (simulating no mutual warming); "reuse" keeps whitening across queries on the same map. The gap is **~10×**, and even **cold-cache JPS (50.9 µs) still beats A\* (164.7 µs) by ~3×**. **This directly backs [multithreaded mutual warming](#4-lock-free-multithreading):** in parallel, finders share one cache, early runs lay out jump points for later ones, reuse rises with thread/query count, and average time per search keeps dropping.
+- **Bigger maps pay off more:** A\*'s work ≈ reachable area (∝ N), JPS ≈ jump-point count (grows far slower). This map is only 137×68; at thousand-cell sides JPS's relative advantage widens further.
+- **JPS expansions cost more but worth it / fewer heap ops:** each JPS expansion does pruning + jump scanning, costlier than A\*'s "look at 8 neighbors"; but expansions drop ~51× and only jump points are enqueued (heap stays "clean", vs A\*'s enqueues ≈ expansions × neighbors), netting an order-of-magnitude win.
+
+> Reproduce: `dotnet run -c Release -- bench` (see `Bench` in [`Program.cs`](JPS/Program.cs); the map is `test2.json` at the repo root). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
+
+## Run
+
+Requires .NET (Windows, WinForms).
+
+```powershell
+dotnet run --project JPS/JPS.csproj
+```
+
+Usage: `刷阻挡` to draw obstacles → `起点` / `终点` to mark → `JPS寻路` or `A*寻路` to compare → `保存` / `载入` to reproduce a scene.
+
+## Project Structure
+
+Three layers: **Models (pure terrain model)** / **Pathfinding (algorithm core, UI-agnostic, portable to Unity 2022)** / **Controls + Form1 (WinForms UI)**.
+
+```
+JPS/
+├── Models/                      # Pure model layer (no UI dependency)
+│   ├── GridMap.cs               # Pure terrain: size + bit-packed obstacles (ulong[]) + version
+│   └── MapData.cs               # JSON save model (obstacles + start/goal)
+│
+├── Pathfinding/                 # Algorithm core (C# 9 / Unity 2022 friendly, integer pathfinding)
+│   ├── JpsDirections.cs         # 8 directions, integer cost (1000/1414), octile heuristic
+│   ├── JpsRules.cs              # Jump-point / forced-neighbor rules
+│   ├── JumpPointCache.cs        # Lazy cardinal jump cache (generation-stamp bulk invalidate; full barriers gated by JPS_CONCURRENT_CACHE)
+│   ├── JpsSystem.cs             # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
+│   ├── JpsPathfinder.cs         # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
+│   ├── AStarPathfinder.cs       # A* baseline (packed state: came-dir sbyte + merged mark)
+│   ├── PathSmoother.cs          # Forward-incremental LOS smoothing (Vector2 chosen by build conditional)
+│   └── MinHeap.cs               # Binary min-heap (replaces PriorityQueue, Unity-compatible)
+│
+├── Controls/                    # View / interaction layer (WinForms)
+│   ├── GridControl.cs           # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
+│   ├── SearchOverlay.cs         # Search visualization overlay (view state separated from the model)
+│   └── EditMode.cs              # Edit-mode enum (brush / start / goal)
+│
+├── Form1.cs / Form1.Designer.cs # Toolbar, legend, save/load dialogs
+└── Program.cs                   # Entry (CLI tools: `-- mt` concurrent stress test; `-- bench` JPS/A* benchmark)
+```
+
+> **Portability:** `Models/` + `Pathfinding/` don't depend on WinForms (only `System` / `System.Collections.Generic` / the smoothing layer's conditionally-compiled `Vector2`), so they can be dropped into Unity 2022 wholesale; `Controls/` + `Form1` are the desktop demo UI and stay out of Unity.
+>
+> **Concurrency:** for multiple threads pathfinding in parallel on one shared `JpsSystem`, defining `JPS_CONCURRENT_CACHE` enables [lock-free multithreading](#4-lock-free-multithreading); otherwise it's single-thread max-speed mode (default).
+
+## License
+
+This project is open-sourced under the **MIT License** — free for personal or **commercial** use: use, copy, modify, merge, publish, distribute, sublicense, and sell without restriction, provided the copyright and license notice are retained in copies. See [LICENSE](LICENSE).
