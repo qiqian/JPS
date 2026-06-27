@@ -10,7 +10,6 @@ namespace JPS
         private static readonly (Func<Color> Color, string Label)[] LegendItems =
         [
             (() => GridControl.ObstacleColor, "阻挡"),
-            (() => GridControl.DynamicObstacleColor, "动态阻挡"),
             (() => GridControl.StartColor, "起点 S"),
             (() => GridControl.EndColor, "终点 G"),
             (() => GridControl.PathColor, "路径"),
@@ -54,15 +53,12 @@ namespace JPS
         private void SelectMode(EditMode mode)
         {
             btnBrush.Checked = mode == EditMode.BrushObstacle;
-            btnDynamic.Checked = mode == EditMode.DynamicObstacle;
             btnStart.Checked = mode == EditMode.SetStart;
             btnEnd.Checked = mode == EditMode.SetEnd;
             gridControl.SetMode(mode);
         }
 
         private void BtnBrush_Click(object? sender, EventArgs e) => SelectMode(EditMode.BrushObstacle);
-
-        private void BtnDynamic_Click(object? sender, EventArgs e) => SelectMode(EditMode.DynamicObstacle);
 
         private void BtnStart_Click(object? sender, EventArgs e) => SelectMode(EditMode.SetStart);
 
@@ -95,7 +91,7 @@ namespace JPS
             {
                 var data = gridControl.Export();
                 File.WriteAllText(dlg.FileName, JsonSerializer.Serialize(data, JsonOptions));
-                statusLabel.Text = $"已保存到 {dlg.FileName}（静态 {data.Obstacles.Count} 格，动态 {data.DynamicObstacles.Count} 格）";
+                statusLabel.Text = $"已保存到 {dlg.FileName}（阻挡 {data.Obstacles.Count} 格）";
             }
             catch (Exception ex)
             {
@@ -123,7 +119,7 @@ namespace JPS
                 }
 
                 gridControl.Import(data);
-                statusLabel.Text = $"已载入 {dlg.FileName}（静态 {data.Obstacles.Count} 格，动态 {data.DynamicObstacles.Count} 格，原始尺寸 {data.Width}x{data.Height}）";
+                statusLabel.Text = $"已载入 {dlg.FileName}（阻挡 {data.Obstacles.Count} 格，原始尺寸 {data.Width}x{data.Height}）";
             }
             catch (Exception ex)
             {

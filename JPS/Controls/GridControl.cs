@@ -22,7 +22,6 @@ public sealed class GridControl : Control
     // 公开的配色，供图例复用，保证图例与网格颜色一致
     public static readonly Color WalkableColor = Color.FromArgb(112, 112, 118);
     public static readonly Color ObstacleColor = Color.FromArgb(32, 32, 36);
-    public static readonly Color DynamicObstacleColor = Color.FromArgb(150, 85, 35);
     public static readonly Color ExpandedColor = Color.FromArgb(30, 158, 70);
     public static readonly Color FrontierColor = Color.FromArgb(168, 84, 224);
     public static readonly Color ScannedColor = Color.FromArgb(70, 104, 168);
@@ -77,12 +76,8 @@ public sealed class GridControl : Control
 
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
-            {
                 if (_map.IsBlocked(x, y))
                     data.Obstacles.Add(new PointData { X = x, Y = y });
-                else if (_map.IsDynamic(x, y))
-                    data.DynamicObstacles.Add(new PointData { X = x, Y = y });
-            }
 
         return data;
     }
@@ -100,20 +95,12 @@ public sealed class GridControl : Control
         if (data.End != null)
             _map.SetEnd(data.End.X, data.End.Y);
 
-        // 动态阻挡在静态/起终点之后恢复：ToggleDynamic 会自动跳过非法格
-        foreach (var d in data.DynamicObstacles)
-            _map.ToggleDynamic(d.X, d.Y);
-
         Invalidate();
     }
 
     public PathResult RunJps()
     {
         EnsureGrid();
-        // 有动态阻挡时走经典逐格跳跃，不需要预计算表；仅静态场景下预先建表（与寻路计时分开）
-        if (!_map.HasDynamicObstacles && !_map.IsPrecomputeValid)
-            _jps.RebuildCache(_map);
-
         var sw = Stopwatch.StartNew();
         var result = _jps.FindPath(_map);
         sw.Stop();
@@ -157,7 +144,8 @@ public sealed class GridControl : Control
             return;
 
         _isPainting = true;
-        _eraseObstacle = e.Button == MouseButtons.Right;
+        // 按下时的格子决定整笔笔触：点在阻挡上 → 擦除（单格）；点在空地 → 绘制（2×2）
+        _eraseObstacle = _map.IsBlocked(x, y);
         ApplyEdit(x, y);
     }
 
@@ -196,10 +184,7 @@ public sealed class GridControl : Control
             for (int x = 0; x < _map.Width; x++)
             {
                 var rect = new Rectangle(x * cs, y * cs, cs, cs);
-                Brush cellBrush = _map.IsBlocked(x, y) ? ObstacleBrush
-                    : _map.IsDynamic(x, y) ? DynamicObstacleBrush
-                    : WalkableBrush;
-                g.FillRectangle(cellBrush, rect);
+                g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleBrush : WalkableBrush, rect);
             }
         }
 
@@ -210,7 +195,6 @@ public sealed class GridControl : Control
 
     private static readonly SolidBrush WalkableBrush = new(WalkableColor);
     private static readonly SolidBrush ObstacleBrush = new(ObstacleColor);
-    private static readonly SolidBrush DynamicObstacleBrush = new(DynamicObstacleColor);
 
     private void EnsureGrid()
     {
@@ -245,14 +229,14 @@ public sealed class GridControl : Control
 
     private void PaintObstacleBlock(int cx, int cy)
     {
-        // 以点击格为中心，按 BrushSize×BrushSize 的块刷阻挡
+        // 绘制：以点击格为中心，刷 BrushSize×BrushSize 的阻挡块
         int half = BrushSize / 2;
         int x0 = cx - half;
         int y0 = cy - half;
 
         for (int y = y0; y < y0 + BrushSize; y++)
             for (int x = x0; x < x0 + BrushSize; x++)
-                _map.SetBlocked(x, y, !_eraseObstacle);
+                _map.SetBlocked(x, y, true);
     }
 
     private void ApplyEdit(int x, int y)
@@ -260,7 +244,10 @@ public sealed class GridControl : Control
         switch (_mode)
         {
             case EditMode.BrushObstacle:
-                PaintObstacleBlock(x, y);
+                if (_eraseObstacle)
+                    _map.SetBlocked(x, y, false);   // 点在阻挡上：只清 1 格
+                else
+                    PaintObstacleBlock(x, y);        // 点在空地：刷 2×2 阻挡
                 Invalidate();
                 break;
 
@@ -274,15 +261,6 @@ public sealed class GridControl : Control
                 _map.SetEnd(x, y);
                 Invalidate();
                 NotifyStatus($"终点：({x}, {y})");
-                break;
-
-            case EditMode.DynamicObstacle:
-                // 单格点击切换：有则销毁、无则新增。不重建跳点表（动态阻挡不参与预计算）。
-                _map.ToggleDynamic(x, y);
-                Invalidate();
-                NotifyStatus(_map.IsDynamic(x, y)
-                    ? $"动态阻挡 +({x}, {y})"
-                    : $"动态阻挡 -({x}, {y})");
                 break;
         }
     }

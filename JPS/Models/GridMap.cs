@@ -6,8 +6,7 @@ public enum EditMode
 {
     BrushObstacle,
     SetStart,
-    SetEnd,
-    DynamicObstacle
+    SetEnd
 }
 
 public sealed class GridMap
@@ -16,9 +15,7 @@ public sealed class GridMap
     public int Height { get; }
     public int CellSize { get; }
 
-    private readonly bool[] _blocked;   // 静态阻挡：参与 JPS 预计算
-    private readonly bool[] _dynamic;   // 动态阻挡：阻挡寻路，但不参与 JPS 预计算
-    private int _dynamicCount;
+    private readonly bool[] _blocked;
     private readonly HashSet<int> _expanded = [];
     private readonly HashSet<int> _frontier = [];
     private readonly HashSet<int> _scanned = [];
@@ -30,7 +27,10 @@ public sealed class GridMap
     public int EndX { get; private set; } = -1;
     public int EndY { get; private set; } = -1;
 
-    public bool IsPrecomputeValid { get; private set; }
+    /// <summary>
+    /// 阻挡布局的版本号：任何阻挡增删都自增。寻路器据此判断惰性跳点缓存是否失效。
+    /// </summary>
+    public int Version { get; private set; }
 
     public GridMap(int width, int height, int cellSize)
     {
@@ -38,27 +38,11 @@ public sealed class GridMap
         Height = height;
         CellSize = cellSize;
         _blocked = new bool[width * height];
-        _dynamic = new bool[width * height];
     }
 
     public bool IsBlocked(int x, int y) => InBounds(x, y) && _blocked[Index(x, y)];
 
-    public bool IsDynamic(int x, int y) => InBounds(x, y) && _dynamic[Index(x, y)];
-
-    /// <summary>寻路用的可走判定：静态、动态阻挡都算不可走。</summary>
-    public bool IsWalkable(int x, int y)
-    {
-        if (!InBounds(x, y))
-            return false;
-        int idx = Index(x, y);
-        return !_blocked[idx] && !_dynamic[idx];
-    }
-
-    /// <summary>预计算用的可走判定：只看静态阻挡，忽略动态阻挡。</summary>
-    public bool IsStaticWalkable(int x, int y) => InBounds(x, y) && !_blocked[Index(x, y)];
-
-    /// <summary>是否存在动态阻挡（决定寻路是否走经典逐格跳跃的回退路径）。</summary>
-    public bool HasDynamicObstacles => _dynamicCount > 0;
+    public bool IsWalkable(int x, int y) => InBounds(x, y) && !_blocked[Index(x, y)];
 
     public bool InBounds(int x, int y) => x >= 0 && x < Width && y >= 0 && y < Height;
 
@@ -68,67 +52,19 @@ public sealed class GridMap
             return;
 
         int idx = Index(x, y);
+        if (_blocked[idx] == blocked)
+            return;   // 无变化，不动版本号
+
         _blocked[idx] = blocked;
         if (blocked)
         {
-            // 同一格不能既是静态又是动态阻挡
-            if (_dynamic[idx])
-            {
-                _dynamic[idx] = false;
-                _dynamicCount--;
-            }
-
             if (x == StartX && y == StartY)
                 StartX = StartY = -1;
-
             if (x == EndX && y == EndY)
                 EndX = EndY = -1;
         }
 
-        IsPrecomputeValid = false;
-        ClearSearchOverlay();
-    }
-
-    /// <summary>
-    /// 动态阻挡画刷的点击切换：
-    ///  - 已是动态阻挡 → 销毁；
-    ///  - 是静态阻挡 → 转为动态阻挡（静态布局改变，预计算失效）；
-    ///  - 是空地 → 新增动态阻挡（不影响预计算）。
-    /// 起点/终点格不可放置。
-    /// </summary>
-    public void ToggleDynamic(int x, int y)
-    {
-        if (!InBounds(x, y))
-            return;
-
-        int idx = Index(x, y);
-
-        if (_dynamic[idx])
-        {
-            // 销毁动态阻挡（动态不参与预计算，无需失效）
-            _dynamic[idx] = false;
-            _dynamicCount--;
-            ClearSearchOverlay();
-            return;
-        }
-
-        if (_blocked[idx])
-        {
-            // 静态阻挡 → 动态阻挡：静态布局变了，必须清空预计算
-            _blocked[idx] = false;
-            _dynamic[idx] = true;
-            _dynamicCount++;
-            IsPrecomputeValid = false;
-            ClearSearchOverlay();
-            return;
-        }
-
-        // 空地：起点/终点上不能放
-        if ((x == StartX && y == StartY) || (x == EndX && y == EndY))
-            return;
-
-        _dynamic[idx] = true;
-        _dynamicCount++;
+        Version++;   // 阻挡变化 → 惰性跳点缓存整体失效
         ClearSearchOverlay();
     }
 
@@ -155,14 +91,10 @@ public sealed class GridMap
     public void ClearAll()
     {
         Array.Fill(_blocked, false);
-        Array.Fill(_dynamic, false);
-        _dynamicCount = 0;
         StartX = StartY = EndX = EndY = -1;
-        IsPrecomputeValid = false;
+        Version++;
         ClearSearchOverlay();
     }
-
-    public void MarkPrecomputeValid() => IsPrecomputeValid = true;
 
     public void SetSearchCells(
         IEnumerable<(int X, int Y)> expanded,
