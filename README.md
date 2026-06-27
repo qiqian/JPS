@@ -5,6 +5,19 @@
 一个用于**直观演示与测试 JPS（Jump Point Search，跳点搜索）寻路算法**的 Windows Forms 应用（.NET / C#）。内置 A\* 对照、路径平滑、JSON 存档，以及把"跳点表更新过程"实时可视化的能力——非常适合用来理解 JPS 的内部机理。
 _A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JPS (Jump Point Search) pathfinding algorithm**. It ships with an A\* baseline, path smoothing, JSON save/load, and real-time visualization of the "jump-table update process" — ideal for understanding how JPS works inside._
 
+**核心技术亮点 · Core Highlights**
+
+- **惰性跳点表（本项目核心）**：不做任何预计算，跳点距离"用到哪格才算哪格"；障碍变化只需 `O(1)` 整体置脏，并跨查询持续复用已洗白的跳点，越跑越快。
+  _**Lazy jump table (the core idea):** no precomputation — jump distances are filled on demand; obstacle changes invalidate in `O(1)`, and whitened jump points are reused across queries, getting faster the more it runs._
+- **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。
+  _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
+- **无锁多线程共享缓存**：多个寻路器共享同一份缓存并**互相预热**，用内存屏障（宏 `JPS_CONCURRENT_CACHE` 控制）保证可见性与发布次序，免锁并行。
+  _**Lock-free shared cache across threads:** many pathfinders share one cache and **warm it for each other**, using memory barriers (gated by the `JPS_CONCURRENT_CACHE` symbol) for visibility and publish ordering — parallel without locks._
+- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；结果与 A\* 同样最优，结构化地图上实测扩展节点少约 **51×**、墙钟快约 **34×**。
+  _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\*, with ~**51×** fewer expanded nodes and ~**34×** faster wall-clock on structured maps._
+- **算法核心与界面解耦、可移植**：`Models` + `Pathfinding` 不依赖 WinForms，可整体拷入 Unity 2022。
+  _**Decoupled, portable core:** `Models` + `Pathfinding` don't depend on WinForms and drop into Unity 2022 wholesale._
+
 > 刷阻挡 → 设起点/终点 → `JPS寻路` / `A*寻路`，即可看到搜索过程、最终路径、平滑路径，以及每个格子各方向跳点缓存的更新状态。
 > _Brush obstacles → set start/goal → `JPS寻路` / `A*寻路` to watch the search process, final path, smoothed path, and each cell's per-direction jump-cache update state._
 
@@ -369,9 +382,24 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 dotnet run --project JPS/JPS.csproj
 ```
 
-操作：`刷阻挡` 画障碍 → `起点` / `终点` 标记 → `JPS寻路` 或 `A*寻路` 对比 → `保存` / `载入` 复现场景。
+界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文）——工具栏按钮、提示、图例、状态栏、存档对话框一并切换（见 [`Loc`](JPS/Controls/Loc.cs)）。
 
-> 界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文），按钮、提示、图例、状态栏、对话框一并切换，见 [`Loc`](JPS/Controls/Loc.cs)。
+工具栏按钮（中文标签 · 英文标签）：
+
+| 按钮 | 作用 |
+|---|---|
+| **刷阻挡** · Wall | 刷障碍：点空地刷 2×2 阻挡，点阻挡清除 1 格 |
+| **起点** · Start | 设置起点 |
+| **终点** · Goal | 设置终点 |
+| **清除** · Clear | 清空整张地图 |
+| **JPS寻路** · JPS Path | 运行 JPS 并可视化搜索过程与路径 |
+| **A\*寻路** · A* Path | 运行 A\*（对照）以作比较 |
+| **保存** · Save | 把阻挡 + 起终点保存为 JSON |
+| **载入** · Load | 从 JSON 载入地图 |
+
+典型流程：**刷阻挡** 画障碍 → **起点** / **终点** 标记 → **JPS寻路** 或 **A\*寻路** 对比 → **保存** / **载入** 复现场景。
+
+图例（工具栏与网格之间）把每种叠加色映射到含义，同样会本地化。
 
 ---
 
