@@ -32,6 +32,11 @@ namespace JPS.Benchmark
             }
         }
 
+        // 由 JPS.Core 的编译期常量组织出一行构建配置摘要。
+        private static string BuildConfig() =>
+            $"斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}，" +
+            $"多线程共享缓存={(JpsBuildInfo.ConcurrentCache ? "开启" : "关闭")}";
+
         private static long PathCost(List<(int X, int Y)> p)
         {
             long c = 0;
@@ -122,6 +127,7 @@ namespace JPS.Benchmark
                 sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
             }
 
+            sb.AppendLine($"构建配置（JPS.Core）：{BuildConfig()}");
             sb.AppendLine($"[test2.json] {w}x{h}（结构化地图）, {Q} 组随机起终点, 可解 {solved}");
             sb.AppendLine($"  扩展节点 平均/次: JPS={jExp / (double)Q:F0}  A*={aExp / (double)Q:F0}  (A*/JPS={aExp / (double)Math.Max(1, jExp):F1}x)");
             sb.AppendLine($"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
@@ -166,6 +172,7 @@ namespace JPS.Benchmark
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
 
             Console.WriteLine($"# JPS vs A* · MovingAI 基准报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
             Console.WriteLine($"MovingAI 批量基准：{files.Length} 张图（{scope}），每图目标 {q} 组随机可解起终点（耗时取多轮最小，逐图输出）");
             Console.WriteLine();
             Console.WriteLine("列说明：");
@@ -334,6 +341,7 @@ namespace JPS.Benchmark
                 System.Threading.Interlocked.Add(ref mismatches, local);
             });
 
+            Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
             Console.WriteLine($"多线程共享 cache：{threads} 线程 × {Q} 查询并行，与 A* 不一致 {mismatches}。");
         }
     }

@@ -51,8 +51,8 @@ namespace JPS.Pathfinding
         /// <summary>
         /// 超覆盖(supercover)直线视线检测：用整数增量遍历线段经过的每一个格子，全部可走才算通视。
         /// 决策量 decision 比较“下一步水平走还是垂直走更贴近真实直线”：
-        ///   &lt;0 走水平，&gt;0 走垂直，==0 表示正好穿过格点 → 按对角同时走
-        ///   （与本项目允许斜穿拐角的移动规则一致，避免把对角擦角误判为撞墙）。
+        ///   &lt;0 走水平，&gt;0 走垂直，==0 表示正好穿过格点 → 按对角同时走。
+        ///   对角穿越是否检查两侧由 JPS_ALLOW_CORNER_CUTTING 控制，与寻路移动规则保持一致。
         /// 全整数运算，可被整数寻路安全复用。
         /// </summary>
         public static bool LineOfSight(GridMap map, int x0, int y0, int x1, int y1)
@@ -76,11 +76,16 @@ namespace JPS.Pathfinding
 
                 if (decision == 0)
                 {
-                    // 正好穿过格点：对角推进，只经过两个共角的格子
+                    // 正好穿过格点：对角推进
                     x += signX;
                     y += signY;
                     ix++;
                     iy++;
+#if !JPS_ALLOW_CORNER_CUTTING
+                    // 默认禁止斜穿角：对角穿越的两个共角格不能是阻挡（与寻路移动规则一致）
+                    if (!map.IsWalkable(x - signX, y) || !map.IsWalkable(x, y - signY))
+                        return false;
+#endif
                 }
                 else if (decision < 0)
                 {

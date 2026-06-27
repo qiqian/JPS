@@ -188,6 +188,11 @@ namespace JPS.Pathfinding
         }
 
         // ---------------- 正交跳跃（查/更新惰性跳点缓存）----------------
+        //
+        // jump（直线跳跃，论文 Algorithm 2 的直线分支）：沿单一正交方向一路推进——
+        //   撞墙/越界 → 该方向无跳点；到终点或当前格出现强迫邻居 → 该格即跳点并返回。
+        // 中间格不入队、不展开，只“扫一眼”。这里用惰性正交缓存 CardinalDist 把
+        // “到下一个跳点/墙的带符号距离”O(1) 复用，避免每次重复逐格扫描。
 
         private JumpEntry CardinalJump(GridMap map, int x, int y, int dx, int dy, int gx, int gy)
         {
@@ -212,18 +217,26 @@ namespace JPS.Pathfinding
         }
 
         // ---------------- 对角：经典逐格扫描，复用正交 memo ----------------
+        //
+        // jump（对角跳跃，论文 Algorithm 2 的对角分支）：沿对角一步步走 c——
+        //   撞墙/越界（含默认禁止切角时两侧未全开）→ 无跳点；到终点 → 返回；
+        //   当前格有强迫邻居 → 返回（跳点）；
+        //   关键（论文 Definition 2 条件 3）：每个对角格先沿它的两个正交分量各做一次直线跳跃，
+        //   只要任一分量找到跳点，当前对角格就也算跳点并返回——否则会漏掉“该转直线”的拐点。
 
         private JumpEntry DiagonalJump(GridMap map, int x, int y, int dx, int dy, int gx, int gy)
         {
             int cx = x, cy = y, steps = 0;
             while (true)
             {
+                // 默认禁止斜穿角：从当前格斜走一步需目标格 + 两侧正交格都可走
+                if (!JpsDirections.DiagonalAllowed(map, cx, cy, dx, dy))
+                    return JumpEntry.None;
+
                 cx += dx;
                 cy += dy;
                 steps++;
 
-                if (!map.IsWalkable(cx, cy))
-                    return JumpEntry.None;
                 if (cx == gx && cy == gy)
                     return new JumpEntry(cx, cy, steps);
                 if (JpsRules.HasDiagonalForcedNeighbor(_walk, cx, cy, dx, dy))
@@ -337,9 +350,25 @@ namespace JPS.Pathfinding
         private int Id(int x, int y) => y * _w + x;
 
         // ---------------- 方向剪枝（零分配，写入 _dirBuf，返回数量）----------------
+        //
+        // 剪枝 → 自然邻居（natural neighbor）+ 强迫邻居方向。对每个邻居 n，比较
+        // “经过 x 的路 π=〈p,x,n〉”和“不经过 x 的路 π'”：π' 不更差就把 n 剪掉（交给别的路径走）。
+        //   · 直线移动：π' ≤ π 即剪 → 只剩 1 个自然邻居（正前方）：
+        //         · · ·
+        //         p x o        （向右；其余 7 个邻居都能不经 x 等长到达 → 全剪）
+        //         · · ·
+        //   · 对角移动：π' < π 才剪（等长保留 = “对角优先”，借此消除等长对称）→ 剩 3 个：
+        //         p · ·
+        //         · x o        正右 o
+        //         · o o        正下 o、右下 o（对角本身）
+        // 旁边有障碍时，再额外把“强迫邻居”方向加入探索（强迫邻居规则见 JpsRules）。
 
         private int FillDirections(GridMap map, int x, int y, sbyte parentDir)
         {
+            // 作用：把“从 x 出发、剪枝后仍需要探索的方向索引”写进复用缓冲 _dirBuf，返回数量 n。
+            // 主循环随后对这 n 个方向逐个做 CardinalJump / DiagonalJump。
+
+            // 起点没有父（parentDir<0）：没有“来向”可供剪枝，必须探索全部 8 个方向。
             if (parentDir < 0)
             {
                 for (int i = 0; i < JpsDirections.Count; i++)
@@ -347,37 +376,95 @@ namespace JPS.Pathfinding
                 return JpsDirections.Count;
             }
 
+            // pdx,pdy = 父→x 的移动方向（“来向”，也即 x 当前的前进方向）。
+            // n 累计已写入的方向数。下面所有 _dirBuf[n++]=... 都是“保留一个待探索方向”。
             var (pdx, pdy) = JpsDirections.All[parentDir];
             int n = 0;
 
+#if JPS_ALLOW_CORNER_CUTTING
+            // ============ 允许斜穿角 ============
             if (JpsDirections.IsDiagonal(pdx, pdy))
             {
-                _dirBuf[n++] = parentDir;
-                _dirBuf[n++] = JpsDirections.IndexOf(pdx, 0);
-                _dirBuf[n++] = JpsDirections.IndexOf(0, pdy);
+                // 对角来向 → 3 个自然邻居：继续对角 + 它的两个正交分量。
+                _dirBuf[n++] = parentDir;                       // 继续沿对角 (pdx,pdy)
+                _dirBuf[n++] = JpsDirections.IndexOf(pdx, 0);   // 水平分量 (pdx,0)
+                _dirBuf[n++] = JpsDirections.IndexOf(0, pdy);   // 垂直分量 (0,pdy)
 
-                if (!map.IsWalkable(x - pdx, y))
-                    _dirBuf[n++] = JpsDirections.IndexOf(-pdx, pdy);
-                if (!map.IsWalkable(x, y - pdy))
-                    _dirBuf[n++] = JpsDirections.IndexOf(pdx, -pdy);
+                // 强迫邻居：身后某个正交格被挡时，要绕到它斜对面只能经过 x → 把该斜向也加入探索。
+                if (!map.IsWalkable(x - pdx, y))                       // 身后水平格 (x-pdx,y) 被挡
+                    _dirBuf[n++] = JpsDirections.IndexOf(-pdx, pdy);   // → 强制探索斜向 (-pdx,pdy)
+                if (!map.IsWalkable(x, y - pdy))                       // 身后垂直格 (x,y-pdy) 被挡
+                    _dirBuf[n++] = JpsDirections.IndexOf(pdx, -pdy);   // → 强制探索斜向 (pdx,-pdy)
 
                 return n;
             }
 
+            // 直线来向 → 唯一自然邻居就是“继续直走”。
             _dirBuf[n++] = parentDir;
 
-            if (pdx != 0)
+            if (pdx != 0)   // 水平移动：看 (x,y+1)、(x,y-1) 两侧
             {
+                // 某侧紧贴的格被挡 → 它的斜前方是强迫邻居（切角斜穿过去）。
                 if (!map.IsWalkable(x, y + 1)) _dirBuf[n++] = JpsDirections.IndexOf(pdx, 1);
                 if (!map.IsWalkable(x, y - 1)) _dirBuf[n++] = JpsDirections.IndexOf(pdx, -1);
             }
-            else
+            else            // 垂直移动：看 (x+1,y)、(x-1,y) 两侧（与上面对称）
             {
                 if (!map.IsWalkable(x + 1, y)) _dirBuf[n++] = JpsDirections.IndexOf(1, pdy);
                 if (!map.IsWalkable(x - 1, y)) _dirBuf[n++] = JpsDirections.IndexOf(-1, pdy);
             }
 
             return n;
+#else
+            // ============ 禁止斜穿角（默认，SoCS'12）============
+            if (JpsDirections.IsDiagonal(pdx, pdy))
+            {
+                // 对角来向 → 只有 3 个自然邻居；并且禁止切角时“对角不产生强迫邻居”
+                // （到达 x 已保证两侧正交格可走，见 JpsRules 说明）→ 不再追加任何方向。
+                _dirBuf[n++] = parentDir;                       // 继续沿对角
+                _dirBuf[n++] = JpsDirections.IndexOf(pdx, 0);   // 水平分量
+                _dirBuf[n++] = JpsDirections.IndexOf(0, pdy);   // 垂直分量
+                return n;
+            }
+
+            // 直线来向 → 唯一自然邻居就是“继续直走”。
+            _dirBuf[n++] = parentDir;
+
+            if (pdx != 0)   // 水平移动：在 (x,y+1)、(x,y-1) 两侧找“墙刚到头”的位置
+            {
+                // 判据 =“当前侧 (x,y+1) 可走” 且 “身后侧 (x-pdx,y+1) 被挡”：
+                // 一堵沿行走方向延伸的墙到 x 这一列正好结束。墙后那片只能经过 x 进入，
+                // 于是产生两个强迫邻居，两个方向都要探索：
+                //   (0,+1)   从 x 竖直拐进正侧那格 (x,y+1)
+                //   (pdx,+1) 从 x 斜前拐进 (x+pdx,y+1)
+                if (map.IsWalkable(x, y + 1) && !map.IsWalkable(x - pdx, y + 1))
+                {
+                    _dirBuf[n++] = JpsDirections.IndexOf(0, 1);
+                    _dirBuf[n++] = JpsDirections.IndexOf(pdx, 1);
+                }
+                // (x,y-1) 侧同理
+                if (map.IsWalkable(x, y - 1) && !map.IsWalkable(x - pdx, y - 1))
+                {
+                    _dirBuf[n++] = JpsDirections.IndexOf(0, -1);
+                    _dirBuf[n++] = JpsDirections.IndexOf(pdx, -1);
+                }
+            }
+            else            // 垂直移动：把上面的“y±1 两侧”换成“x±1 两侧”，逻辑对称
+            {
+                if (map.IsWalkable(x + 1, y) && !map.IsWalkable(x + 1, y - pdy))
+                {
+                    _dirBuf[n++] = JpsDirections.IndexOf(1, 0);     // 水平拐进 (x+1,y)
+                    _dirBuf[n++] = JpsDirections.IndexOf(1, pdy);   // 斜前拐进 (x+1,y+pdy)
+                }
+                if (map.IsWalkable(x - 1, y) && !map.IsWalkable(x - 1, y - pdy))
+                {
+                    _dirBuf[n++] = JpsDirections.IndexOf(-1, 0);
+                    _dirBuf[n++] = JpsDirections.IndexOf(-1, pdy);
+                }
+            }
+
+            return n;
+#endif
         }
 
         // ---------------- 可视化采集（不影响算法结果，仅供界面展示）----------------

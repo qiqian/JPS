@@ -1,8 +1,10 @@
+using System.Drawing.Drawing2D;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JPS.Controls;
 using JPS.Data;
 using JPS.Models;
+using JPS.Pathfinding;
 
 namespace JPS
 {
@@ -26,13 +28,17 @@ namespace JPS
         {
             InitializeComponent();
             ApplyLocalization();
+            BuildIcons();
             SelectMode(EditMode.BrushObstacle);
         }
 
         // 按系统语言设置工具栏按钮、提示、标题与状态栏文案（中/英）。
         private void ApplyLocalization()
         {
-            Text = Loc.T("JPS / A* 寻路测试", "JPS / A* Pathfinding Test");
+            // 标题注明构建配置（斜穿角 / 多线程，由 JPS.Core 编译期常量决定）
+            Text = Loc.Zh
+                ? $"JPS / A* 寻路测试 — 斜穿角:{(JpsBuildInfo.CornerCutting ? "允许" : "禁止")} | 多线程:{(JpsBuildInfo.ConcurrentCache ? "开" : "关")}"
+                : $"JPS / A* Pathfinding Test — corner-cutting:{(JpsBuildInfo.CornerCutting ? "on" : "off")} | multithread:{(JpsBuildInfo.ConcurrentCache ? "on" : "off")}";
 
             btnBrush.Text = Loc.T("刷阻挡", "Wall");
             btnBrush.ToolTipText = Loc.T("点空地刷 2×2 阻挡，点阻挡清除 1 格",
@@ -55,6 +61,104 @@ namespace JPS
             statusLabel.Text = Loc.T("左键刷阻挡，右键擦除阻挡",
                 "Left-click to paint walls, right-click to erase");
         }
+
+        // 用 GDI+ 现画一组简易位图图标（无外部资源），配色与网格语义一致，显示为“图标 + 文字”。
+        private void BuildIcons()
+        {
+            btnBrush.Image = IconWall();
+            btnStart.Image = IconDot(GridControl.StartColor);
+            btnEnd.Image = IconDot(GridControl.EndColor);
+            btnClear.Image = IconClear();
+            btnFindPath.Image = IconJps();
+            btnFindPathAStar.Image = IconAStar();
+            btnSave.Image = IconArrow(down: true);
+            btnLoad.Image = IconArrow(down: false);
+            btnOpenMap.Image = IconGrid();
+
+            foreach (var b in new[] { btnBrush, btnStart, btnEnd, btnClear, btnFindPath, btnFindPathAStar, btnSave, btnLoad, btnOpenMap })
+                b.DisplayStyle = ToolStripItemDisplayStyle.ImageAndText;
+        }
+
+        private static readonly Color IconNeutral = Color.FromArgb(72, 80, 92);
+        private static readonly Color IconBlue = Color.FromArgb(70, 120, 190);
+
+        private static Bitmap MakeIcon(Action<Graphics> draw)
+        {
+            var bmp = new Bitmap(20, 20);
+            using var g = Graphics.FromImage(bmp);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            draw(g);
+            return bmp;
+        }
+
+        // 刷阻挡：2×2 障碍块
+        private static Bitmap IconWall() => MakeIcon(g =>
+        {
+            using var b = new SolidBrush(GridControl.ObstacleColor);
+            g.FillRectangle(b, 3, 3, 6, 6);
+            g.FillRectangle(b, 11, 3, 6, 6);
+            g.FillRectangle(b, 3, 11, 6, 6);
+            g.FillRectangle(b, 11, 11, 6, 6);
+        });
+
+        // 起点/终点：实心圆 + 白边（复用网格起终点配色）
+        private static Bitmap IconDot(Color color) => MakeIcon(g =>
+        {
+            using var b = new SolidBrush(color);
+            using var p = new Pen(Color.White, 1.6f);
+            g.FillEllipse(b, 3, 3, 14, 14);
+            g.DrawEllipse(p, 3, 3, 14, 14);
+        });
+
+        // 清除：红色 ✗
+        private static Bitmap IconClear() => MakeIcon(g =>
+        {
+            using var p = new Pen(Color.FromArgb(220, 70, 70), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLine(p, 5, 5, 15, 15);
+            g.DrawLine(p, 15, 5, 5, 15);
+        });
+
+        // JPS 寻路：金色折线 + 箭头（干净跳跃）
+        private static Bitmap IconJps() => MakeIcon(g =>
+        {
+            using var p = new Pen(GridControl.PathColor, 2.4f) { StartCap = LineCap.Round };
+            p.CustomEndCap = new AdjustableArrowCap(2.5f, 2.5f);
+            g.DrawLines(p, new[] { new PointF(3, 16), new PointF(8, 9), new PointF(12, 13), new PointF(17, 4) });
+        });
+
+        // A* 寻路：绿色折线 + 节点点（扩展节点多）
+        private static Bitmap IconAStar() => MakeIcon(g =>
+        {
+            var pts = new[] { new PointF(3, 16), new PointF(8, 9), new PointF(12, 13), new PointF(17, 4) };
+            using var p = new Pen(GridControl.ExpandedColor, 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLines(p, pts);
+            using var b = new SolidBrush(GridControl.ExpandedColor);
+            foreach (var pt in pts)
+                g.FillEllipse(b, pt.X - 2.2f, pt.Y - 2.2f, 4.4f, 4.4f);
+        });
+
+        // 保存/载入：箭头 + 底托盘横线（向下=存，向上=取）
+        private static Bitmap IconArrow(bool down) => MakeIcon(g =>
+        {
+            using var arrow = new Pen(IconBlue, 2.4f) { StartCap = LineCap.Round };
+            arrow.CustomEndCap = new AdjustableArrowCap(2.4f, 2.4f);
+            if (down) g.DrawLine(arrow, 10, 3, 10, 13);
+            else g.DrawLine(arrow, 10, 15, 10, 5);
+            using var tray = new Pen(IconBlue, 2.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLine(tray, 4, 17, 16, 17);
+        });
+
+        // 打开地图：3×3 网格
+        private static Bitmap IconGrid() => MakeIcon(g =>
+        {
+            using var p = new Pen(IconNeutral, 1.6f);
+            g.DrawRectangle(p, 3, 3, 13, 13);
+            g.DrawLine(p, 3, 8, 16, 8);
+            g.DrawLine(p, 3, 12, 16, 12);
+            g.DrawLine(p, 8, 3, 8, 16);
+            g.DrawLine(p, 12, 3, 12, 16);
+        });
 
         private void LegendPanel_Paint(object? sender, PaintEventArgs e)
         {

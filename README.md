@@ -69,7 +69,7 @@ JPS 是对 A\* 在**均匀代价栅格**上的加速：它不改变最优性，�
 - 代价：正交 `1000`，对角 `1414`（≈ √2 × 1000），全整数。
 - 启发式：八方向距离（octile）
   `h = (max(dx,dy) - min(dx,dy)) × 1000 + min(dx,dy) × 1414`
-- 本项目采用**允许斜穿拐角**的模型：对角移动只要求目标格可走（不要求两侧正交格都空）。A\* 与 JPS 采用同一套移动规则，保证两者结果可比。
+- **对角移动默认禁止斜穿角（no-corner-cutting）**：对角移动要求目标格**及两侧正交格都可走**，不能从两块对角阻挡的缝里穿过。定义条件编译符号 `JPS_ALLOW_CORNER_CUTTING` 可恢复"允许斜穿拐角"（只要求目标格可走）。A\* 与 JPS 采用同一套移动规则，两种模式下结果都可比。
 
 ### 2. 剪枝思想：自然邻居与强迫邻居
 
@@ -111,6 +111,7 @@ JPS 是对 A\* 在**均匀代价栅格**上的加速：它不改变最优性，�
 ```
 
 > 实现见 [`JpsRules`](JPS.Core/Pathfinding/JpsRules.cs)：`HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`。
+> 注：上述对角规则是**允许斜穿拐角**模型；**默认禁止斜穿角**时严格按论文（Harabor & Grastien, SoCS'12）——**对角移动不产生强迫邻居，只有直线移动产生**（强迫邻居出现在"墙刚结束"处，正交与对角各一个），见 `JpsRules` / `FillDirections` 的 `#else` 分支。
 > ⚠️ 强迫邻居判定的方向必须与剪枝时实际探索的方向**严格一致**（看"前进方向 `x+dx`"而不是"身后 `x-dx`"），否则会漏掉真正的跳点导致找不到路——这是实现 JPS 最容易踩的坑之一。
 
 ### 4. 走直线与走斜线的扫描规则
@@ -222,7 +223,7 @@ flowchart TD
 | 漏斗算法 Funnel | O(n) | 受限于 1 格宽走廊，开阔区反而**更差** | 适合 navmesh，不适合栅格 |
 | Theta\* | 慢（丢失 JPS 剪枝 + 全程 LOS） | any-angle 近最优 | 是"更好的寻路器"，非"更好的平滑器" |
 
-- **视线检测**用整数 supercover 直线（与寻路同样整数、同样允许斜穿拐角），逐格判断线段是否穿障碍。
+- **视线检测**用整数 supercover 直线（与寻路同样整数、同样的切角规则——默认禁止穿对角缝），逐格判断线段是否穿障碍。
 - **整数 / 浮点边界**：寻路全程整数；**浮点只出现在最终路径平滑与绘制**。平滑结果以连续坐标（格中心 = `cx+0.5`）输出，用红色折线叠加在原路径之上。
 
 > 实现见 [`PathSmoother`](JPS.Core/Pathfinding/PathSmoother.cs)。
@@ -355,7 +356,7 @@ Parallel.For(0, threads, _ =>
 
 ### JPS vs A\* 性能开销对比（实测）
 
-JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**——扩展节点数直接决定堆操作与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` 在 **全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集、共 562 张图、每图 1000 组随机可解起终点（合计 56.2 万组）** 的汇总实测（`speed` = A\* 耗时 / JPS 耗时；区间为该集合内逐图实测的最小~最大）：
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**——扩展节点数直接决定堆操作与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` 在 **全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集、共 562 张图、每图 1000 组随机可解起终点（合计 56.2 万组）** 的汇总实测（在**允许斜穿拐角**模式下测得；当前默认禁止斜穿角，整体趋势一致、绝对加速比略变。`speed` = A\* 耗时 / JPS 耗时；区间为该集合内逐图实测的最小~最大）：
 
 | 地图集 | 张数 | 典型尺寸 | 加速 speed 区间 | 集合特征 |
 |---|---|---|---|---|
@@ -496,7 +497,7 @@ JPS accelerates A\* on **uniform-cost grids**: it preserves optimality but explo
 - Cost: cardinal `1000`, diagonal `1414` (≈ √2 × 1000), all integer.
 - Heuristic: octile distance
   `h = (max(dx,dy) - min(dx,dy)) × 1000 + min(dx,dy) × 1414`
-- This project allows **cutting corners**: a diagonal move only requires the target cell to be walkable (it does not require both flanking cardinal cells to be free). A\* and JPS share the exact same movement rules, so their results are comparable.
+- **Diagonal moves forbid corner-cutting by default (no-corner-cutting):** a diagonal move requires the target cell **and both flanking cardinal cells** to be walkable — it cannot slip through the gap between two diagonal obstacles. Define the compile symbol `JPS_ALLOW_CORNER_CUTTING` to restore corner-cutting (target cell only). A\* and JPS share the exact same movement rules, so results stay comparable in either mode.
 
 ### 2. Pruning: Natural vs Forced Neighbors
 
@@ -538,6 +539,7 @@ rule: !walk(x-dx, y)  && walk(x-dx, y+dy)   → forced neighbor (x-dx, y+dy)
 ```
 
 > See [`JpsRules`](JPS.Core/Pathfinding/JpsRules.cs): `HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`.
+> Note: the diagonal rules above are for the **corner-cutting** model; with **no-corner-cutting (default)**, per Harabor & Grastien (SoCS'12), **diagonal moves produce no forced neighbours — only straight moves do** (forced neighbours appear where a wall just ends); see the `#else` branch in `JpsRules` / `FillDirections`.
 > ⚠️ The direction used for forced-neighbor detection must **exactly match** the direction actually explored during pruning (look at the "forward" `x+dx`, not "behind" `x-dx`), otherwise real jump points are missed and no path is found — one of the easiest JPS pitfalls.
 
 ### 4. Straight and Diagonal Scanning
@@ -647,7 +649,7 @@ Grid pathfinding yields a "cell-hugging polyline" that needs smoothing into a mo
 | Funnel algorithm | O(n) | limited by 1-cell-wide corridors, **worse** in open areas | great for navmesh, not grids |
 | Theta\* | slow (loses JPS pruning + full LOS) | near-optimal any-angle | a "better pathfinder", not a "better smoother" |
 
-- **Line-of-sight check** uses an integer supercover line (same integer math as pathfinding, same corner-cutting allowance), testing cell-by-cell whether the segment crosses an obstacle.
+- **Line-of-sight check** uses an integer supercover line (same integer math and the same corner rule as pathfinding — no diagonal corner-cutting by default), testing cell-by-cell whether the segment crosses an obstacle.
 - **Integer / float boundary:** pathfinding is all-integer; **floats appear only in the final path smoothing and drawing**. The smoothed result is output as continuous coordinates (cell center = `cx+0.5`) and overlaid as a red polyline on the original path.
 
 > See [`PathSmoother`](JPS.Core/Pathfinding/PathSmoother.cs).
@@ -776,7 +778,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 ### JPS vs A\* Performance (measured)
 
-JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"** — expanded-node count directly drives heap ops and total work. The table below summarizes `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` over **all 7 [MovingAI](https://movingai.com/benchmarks/) map sets, 562 maps, 1000 random solvable start/goal pairs each (562,000 total)** (`speed` = A\* time / JPS time; the range is the per-map min–max measured within each set):
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"** — expanded-node count directly drives heap ops and total work. The table below summarizes `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` over **all 7 [MovingAI](https://movingai.com/benchmarks/) map sets, 562 maps, 1000 random solvable start/goal pairs each (562,000 total)** (measured in corner-cutting mode; the default now forbids corner-cutting — same overall trend, slightly different absolute ratios. `speed` = A\* time / JPS time; the range is the per-map min–max within each set):
 
 | Map set | Maps | Typical size | speed range | Set character |
 |---|---|---|---|---|

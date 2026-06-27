@@ -100,6 +100,8 @@ namespace JPS.Pathfinding
 
                     if (!map.IsWalkable(nx, ny))
                         continue;
+                    if (JpsDirections.IsDiagonal(dx, dy) && !JpsDirections.DiagonalAllowed(map, cx, cy, dx, dy))
+                        continue;   // 禁止斜穿角（默认；定义 JPS_ALLOW_CORNER_CUTTING 可放开）
 
                     int nbId = ny * _w + nx;
                     if (_mark[nbId] == closedMark)
