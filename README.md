@@ -260,7 +260,7 @@ flowchart TD
 - 某个区域只要被**任意一个**线程第一个走到，就被它一次性扫描洗白；此后**所有线程**再经过该区域全是 O(1) 命中。
 - 于是整段并行寻路里，每条线段的 O(L) 扫描代价**全局只付一次**，而不是"每线程各付一次"。线程越多、查询越密集、路径越重叠，复用率越高，**平均每次寻路反而越快**。
 
-换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第四章缓存复用一行](#jps-vs-a-性能开销对比估算)：复用比无复用快 ~10×。）
+换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第四章缓存复用](#jps-vs-a-性能开销对比实测)：复用比无复用快 ~10×。）
 
 > ⚠️ 前提：并行寻路**之前**必须由**单线程**调用一次 `JpsSystem.Sync()`（确定缓存版本），且并行期间**不得修改地图**。要改地图就先 join 掉所有寻路线程，改完再 Sync、再并行。
 
@@ -353,39 +353,57 @@ Parallel.For(0, threads, _ =>
 - 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
 - 可视化用的 `_scanGen`（4 B/格）仅在开启调试可视化（`collectDebug`）时才分配，纯算法运行不占用。
 
-### JPS vs A\* 性能开销对比（估算）
+### JPS vs A\* 性能开销对比（实测）
 
-JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- bench` 在 **`test2.json`（137×68 结构化地图，墙体连续，贴近真实关卡）** 上跑 **8000 组随机起终点、取多轮最小值** 的实测：
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` 在**全部 33 张 [MovingAI](https://movingai.com/benchmarks/) 基准地图**、每图随机取 **1000 组可解起终点（共 33000 组）** 的完整实测；`JPS扩展`/`A*扩展` 为每次平均扩展节点数，`µs` 为每次寻路平均耗时（取多轮最小，JPS 为热缓存）：
 
-| 指标（平均/次） | JPS | A\* | 对比 |
-|---|---|---|---|
-| **扩展节点数** | **~31** | **~1565** | A\*/JPS ≈ **51×** |
-| 耗时（缓存复用） | **4.8 µs** | 164.7 µs | ≈ **34× 提速** |
-| 耗时（缓存无复用，每次重置为冷） | 50.9 µs | 164.7 µs | ≈ 3.2× 提速 |
-| **缓存复用 vs 无复用** | 4.8 µs vs 50.9 µs | — | 复用 ≈ **10.5×** |
+| 地图 | 尺寸 | 可走% | JPS扩展 | A*扩展 | 节点比 | JPS µs | A* µs | 加速 |
+|---|---|---|---|---|---|---|---|---|
+| Berlin_1_256 | 256×256 | 72.5 | 103 | 3357 | 32.5× | 13.3 | 386.6 | 29.1× |
+| Boston_0_256 | 256×256 | 72.9 | 114 | 3467 | 30.2× | 19.5 | 394.5 | 20.2× |
+| brc202d | 530×481 | 16.9 | 437 | 11747 | 26.9× | 65.3 | 1456.2 | 22.3× |
+| den312d | 65×81 | 46.4 | 22 | 325 | 14.2× | 3.1 | 40.0 | 12.7× |
+| den520d | 256×257 | 42.8 | 77 | 3305 | 42.8× | 11.8 | 433.3 | 36.7× |
+| empty-16-16 | 16×16 | 100.0 | 2 | 17 | 6.4× | 0.5 | 1.6 | 3.0× |
+| empty-32-32 | 32×32 | 100.0 | 2 | 48 | 16.7× | 0.9 | 4.6 | 5.0× |
+| empty-48-48 | 48×48 | 100.0 | 2 | 95 | 32.4× | 1.0 | 9.7 | 9.3× |
+| empty-8-8 | 8×8 | 100.0 | 2 | 7 | 2.8× | 0.5 | 0.9 | 1.7× |
+| ht_chantry | 162×141 | 32.7 | 49 | 1188 | 24.2× | 7.5 | 143.9 | 19.2× |
+| ht_mansion_n | 133×270 | 24.9 | 44 | 1200 | 26.8× | 7.3 | 147.8 | 20.2× |
+| lak303d | 194×194 | 39.3 | 172 | 3427 | 19.9× | 29.2 | 397.5 | 13.6× |
+| lt_gallowstemplar_n | 251×180 | 22.2 | 56 | 1295 | 22.9× | 8.3 | 158.3 | 19.0× |
+| maze-128-128-1 | 128×128 | 50.0 | 814 | 3064 | 3.8× | 111.1 | 258.7 | 2.3× |
+| maze-128-128-10 | 128×128 | 90.4 | 38 | 4626 | **119.0×** | 8.7 | 555.2 | **63.8×** |
+| maze-128-128-2 | 128×128 | 66.3 | 564 | 4860 | 8.6× | 74.8 | 458.7 | 6.1× |
+| maze-32-32-2 | 32×32 | 65.0 | 32 | 229 | 7.1× | 3.8 | 20.0 | 5.3× |
+| maze-32-32-4 | 32×32 | 77.1 | 14 | 219 | 15.1× | 2.1 | 22.3 | 10.4× |
+| orz900d | 1491×656 | 9.9 | 912 | 35495 | 38.9× | 157.7 | 4288.6 | 27.2× |
+| ost003d | 194×194 | 35.1 | 108 | 3048 | 28.2× | 17.2 | 352.5 | 20.5× |
+| Paris_1_256 | 256×256 | 72.1 | 143 | 3438 | 23.9× | 26.9 | 484.5 | 18.0× |
+| random-32-32-10 | 32×32 | 90.0 | 18 | 43 | 2.4× | 3.0 | 5.1 | 1.7× |
+| random-32-32-20 | 32×32 | 80.0 | 24 | 43 | 1.8× | 3.8 | 5.8 | 1.5× |
+| random-64-64-10 | 64×64 | 90.0 | 52 | 127 | 2.4× | 8.3 | 16.2 | 1.9× |
+| random-64-64-20 | 64×64 | 79.8 | 70 | 130 | 1.9× | 10.1 | 16.0 | 1.6× |
+| room-32-32-4 | 32×32 | 66.6 | 24 | 69 | 2.8× | 3.6 | 8.4 | 2.4× |
+| room-64-64-16 | 64×64 | 89.0 | 33 | 832 | 24.6× | 5.7 | 90.2 | 15.9× |
+| room-64-64-8 | 64×64 | 78.9 | 42 | 493 | 11.6× | 7.6 | 57.3 | 7.5× |
+| warehouse-10-20-10-2-1 | 161×63 | 56.2 | 83 | 404 | 4.9× | 10.6 | 31.8 | 3.0× |
+| warehouse-10-20-10-2-2 | 170×84 | 68.5 | 120 | 620 | 5.1× | 15.2 | 69.3 | 4.5× |
+| warehouse-20-40-10-2-1 | 321×123 | 57.2 | 330 | 1533 | 4.6× | 45.9 | 132.2 | 2.9× |
+| warehouse-20-40-10-2-2 | 340×164 | 69.5 | 433 | 2235 | 5.2× | 61.3 | 256.5 | 4.2× |
+| w_woundedcoast | 642×578 | 9.2 | 206 | 7358 | 35.7× | 35.0 | 926.6 | 26.5× |
+| **合计（33000 组）** | — | — | — | — | **19.1×** | 781 ms\* | 11631 ms\* | **14.9×** |
 
-解读与估算要点：
+> \*合计行的 `µs` 两列为 33000 组的**总耗时**（ms），其余各行为每次寻路平均。
 
-- **扩展节点数 = JPS 的硬优势**：JPS 几乎"直奔终点"（只在拐点入队），A\* 却要把整片可达区都塞进堆，本图就差出 **~51×**。这部分优势与实现/硬件无关、最稳定可估。
-- **结构化地图才是 JPS 的主场**：`test2.json` 这种连续墙体、有走廊和开阔区的地图，跳点稀疏，墙钟提速达 **~34×**。反例是**随机散点**地图（遍地强迫邻居 → 跳点密集 → 对角扫描频繁），那是 JPS 的不利场景，提速会显著回落（实测 20% 随机散点仅 ~1.4×）——真实关卡远比随机散点友好。
-- **缓存越复用越快（≈10.5×）**：表中"无复用"是每次查询都把跳点表重置为冷（模拟各自不预热）；"复用"是同一地图上跨查询持续洗白。两者差 **~10×**，且即便是**冷缓存的 JPS（50.9 µs）也仍比 A\*（164.7 µs）快 ~3×**。**这条直接支撑了[多线程互相预热](#4-无锁多线程共享惰性缓存的并行寻路)**：并行时多个 finder 共享同一缓存，先跑的替后跑的把跳点铺好，复用率随线程/查询数上升，平均每次寻路越跑越快。
-- **地图越大越占便宜**：A\* 的工作量 ≈ 可达面积（∝ N），JPS ≈ 跳点数（增长慢得多）。本图只有 137×68；放大到上千边长时 JPS 的相对优势进一步拉开。
-- **单次扩展 JPS 更贵但值得 / 堆操作更少**：JPS 每次扩展要剪枝 + 跳跃扫描，单步比 A\* 的"看 8 邻居"贵；但扩展次数锐减 ~51×、入队的只有跳点（堆几乎"清爽"，A\* 的入队 ≈ 扩展数×邻居数），综合下来净赢一个量级。
-
-**MovingAI 全量基准**：用 `mapbench` 遍历全部 **33 张** [MovingAI](https://movingai.com/benchmarks/) 基准地图、每图随机取 **1000 组可解起终点**（共 **33000 组**）的实测：
-
-| 地图（类型） | 尺寸 | 扩展节点比 A\*/JPS | 墙钟加速 |
-|---|---|---|---|
-| maze-128-128-10（稀疏迷宫） | 128×128 | **119×** | **64×** |
-| den520d（游戏地图） | 256×257 | 43× | 37× |
-| Berlin_1_256（城市） | 256×256 | 32× | 29× |
-| orz900d（巨型） | 1491×656 | 39× | 27× |
-| warehouse-20-40-10-2-1（仓库） | 321×123 | 4.6× | 2.9× |
-| random-64-64-20（随机散点） | 64×64 | 1.9× | 1.6× |
-| **全部 33 图合计** | 33000 组 | **19.1×** | **14.9×** |
+解读要点：
 
 - **正确性**：33000 组中 JPS 与 A\* 的**成败与最短路径代价完全一致（0 不符）**——在真实基准数据上验证了 JPS 的完备性与最优性。
-- 趋势与单图一致：结构化 / 迷宫 / 大开阔图加速可观（几十倍），随机散点图最弱（~1.5–2×），真实关卡远比随机散点友好。
+- **扩展节点数 = JPS 的硬优势**：JPS 几乎"直奔终点"（只在拐点入队），A\* 却把整片可达区塞进堆——全量平均 A\*/JPS ≈ **19×**，稀疏迷宫 `maze-128-128-10` 高达 **119×**。这部分与实现/硬件无关、最稳定可估。
+- **地图类型决定差距**：连续墙体的结构化图、游戏图、大开阔图（`den520d` 37×、`maze-128-128-10` 64×、`orz900d` 27×、`w_woundedcoast` 27×）墙钟加速可观；**随机散点图**（`random-*` ~1.5–2×）是 JPS 的不利场景（遍地强迫邻居 → 跳点密集 → 对角扫描频繁），真实关卡远比随机散点友好。
+- **地图越大越占便宜**：A\* 工作量 ≈ 可达面积（∝ N），JPS ≈ 跳点数（增长慢得多）；`orz900d`（1491×656）这种巨图 A\* 单次要展开 ~3.5 万节点，JPS 仅 ~900。
+- **缓存复用越多越快**：表中 JPS 耗时为**热缓存**（同图跨查询持续洗白跳点）；在 `test2.json` 上单独实测，"复用"比"每次冷缓存"快约 **10×**，且即便冷缓存 JPS 仍比 A\* 快 ~3×——这也是[多线程互相预热](#4-无锁多线程共享惰性缓存的并行寻路)的来源。
+- **单次扩展 JPS 更贵但值得 / 堆操作更少**：每次扩展要剪枝 + 跳跃扫描，单步比 A\* 的"看 8 邻居"贵；但扩展次数锐减、入队的只有跳点（堆几乎"清爽"，A\* 的入队 ≈ 扩展数×邻居数），综合净赢一个量级。
 
 > 复现：单图 `dotnet run -c Release --project JPS.Benchmark -- bench`（`test2.json`，见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `Bench`）；全量 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000`（遍历仓库 `movingai/`，见 `MapBench`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
 
@@ -693,7 +711,7 @@ Field references use a static `ref` method on the struct (`Dir4Byte.Slot`) plus 
 - A region scanned first by **any** thread is whitened once; afterward **all threads** hit it in O(1).
 - So across the whole parallel run, each strip's O(L) scan is **paid globally once**, not "once per thread". The more threads, the denser the queries, the more the paths overlap — the higher the reuse, and the **lower the average time per search**.
 
-In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [cache-reuse row in chapter IV](#jps-vs-a-performance-estimate): reuse is ~10× faster than no-reuse.)
+In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [cache-reuse note in chapter IV](#jps-vs-a-performance-measured): reuse is ~10× faster than no-reuse.)
 
 > ⚠️ Prerequisite: **before** parallel pathfinding, a **single thread** must call `JpsSystem.Sync()` once (to fix the cache version), and the map **must not change** during parallel runs. To edit the map, join all pathfinding threads first, then Sync, then go parallel again.
 
@@ -782,39 +800,57 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 - The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
 - The visualization `_scanGen` (4 B/cell) is allocated only when debug visualization (`collectDebug`) is on; pure algorithm runs don't use it.
 
-### JPS vs A\* Performance (Estimate)
+### JPS vs A\* Performance (measured)
 
-JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is measured by `dotnet run -c Release --project JPS.Benchmark -- bench` on **`test2.json` (137×68 structured map, continuous walls, close to a real level)** over **8000 random start/goal pairs, min over multiple rounds**:
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is the full measurement of `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` over **all 33 [MovingAI](https://movingai.com/benchmarks/) maps**, **1000 random solvable start/goal pairs each (33,000 total)**; `JPSexp`/`A*exp` are average expanded nodes per query, `µs` is average time per query (min over rounds, JPS warm-cache):
 
-| Metric (avg/query) | JPS | A\* | Ratio |
-|---|---|---|---|
-| **Expanded nodes** | **~31** | **~1565** | A\*/JPS ≈ **51×** |
-| Time (cache reuse) | **4.8 µs** | 164.7 µs | ≈ **34× faster** |
-| Time (no cache reuse, cold each time) | 50.9 µs | 164.7 µs | ≈ 3.2× faster |
-| **Cache reuse vs no-reuse** | 4.8 µs vs 50.9 µs | — | reuse ≈ **10.5×** |
+| Map | Size | walk% | JPSexp | A*exp | ratio | JPS µs | A* µs | speed |
+|---|---|---|---|---|---|---|---|---|
+| Berlin_1_256 | 256×256 | 72.5 | 103 | 3357 | 32.5× | 13.3 | 386.6 | 29.1× |
+| Boston_0_256 | 256×256 | 72.9 | 114 | 3467 | 30.2× | 19.5 | 394.5 | 20.2× |
+| brc202d | 530×481 | 16.9 | 437 | 11747 | 26.9× | 65.3 | 1456.2 | 22.3× |
+| den312d | 65×81 | 46.4 | 22 | 325 | 14.2× | 3.1 | 40.0 | 12.7× |
+| den520d | 256×257 | 42.8 | 77 | 3305 | 42.8× | 11.8 | 433.3 | 36.7× |
+| empty-16-16 | 16×16 | 100.0 | 2 | 17 | 6.4× | 0.5 | 1.6 | 3.0× |
+| empty-32-32 | 32×32 | 100.0 | 2 | 48 | 16.7× | 0.9 | 4.6 | 5.0× |
+| empty-48-48 | 48×48 | 100.0 | 2 | 95 | 32.4× | 1.0 | 9.7 | 9.3× |
+| empty-8-8 | 8×8 | 100.0 | 2 | 7 | 2.8× | 0.5 | 0.9 | 1.7× |
+| ht_chantry | 162×141 | 32.7 | 49 | 1188 | 24.2× | 7.5 | 143.9 | 19.2× |
+| ht_mansion_n | 133×270 | 24.9 | 44 | 1200 | 26.8× | 7.3 | 147.8 | 20.2× |
+| lak303d | 194×194 | 39.3 | 172 | 3427 | 19.9× | 29.2 | 397.5 | 13.6× |
+| lt_gallowstemplar_n | 251×180 | 22.2 | 56 | 1295 | 22.9× | 8.3 | 158.3 | 19.0× |
+| maze-128-128-1 | 128×128 | 50.0 | 814 | 3064 | 3.8× | 111.1 | 258.7 | 2.3× |
+| maze-128-128-10 | 128×128 | 90.4 | 38 | 4626 | **119.0×** | 8.7 | 555.2 | **63.8×** |
+| maze-128-128-2 | 128×128 | 66.3 | 564 | 4860 | 8.6× | 74.8 | 458.7 | 6.1× |
+| maze-32-32-2 | 32×32 | 65.0 | 32 | 229 | 7.1× | 3.8 | 20.0 | 5.3× |
+| maze-32-32-4 | 32×32 | 77.1 | 14 | 219 | 15.1× | 2.1 | 22.3 | 10.4× |
+| orz900d | 1491×656 | 9.9 | 912 | 35495 | 38.9× | 157.7 | 4288.6 | 27.2× |
+| ost003d | 194×194 | 35.1 | 108 | 3048 | 28.2× | 17.2 | 352.5 | 20.5× |
+| Paris_1_256 | 256×256 | 72.1 | 143 | 3438 | 23.9× | 26.9 | 484.5 | 18.0× |
+| random-32-32-10 | 32×32 | 90.0 | 18 | 43 | 2.4× | 3.0 | 5.1 | 1.7× |
+| random-32-32-20 | 32×32 | 80.0 | 24 | 43 | 1.8× | 3.8 | 5.8 | 1.5× |
+| random-64-64-10 | 64×64 | 90.0 | 52 | 127 | 2.4× | 8.3 | 16.2 | 1.9× |
+| random-64-64-20 | 64×64 | 79.8 | 70 | 130 | 1.9× | 10.1 | 16.0 | 1.6× |
+| room-32-32-4 | 32×32 | 66.6 | 24 | 69 | 2.8× | 3.6 | 8.4 | 2.4× |
+| room-64-64-16 | 64×64 | 89.0 | 33 | 832 | 24.6× | 5.7 | 90.2 | 15.9× |
+| room-64-64-8 | 64×64 | 78.9 | 42 | 493 | 11.6× | 7.6 | 57.3 | 7.5× |
+| warehouse-10-20-10-2-1 | 161×63 | 56.2 | 83 | 404 | 4.9× | 10.6 | 31.8 | 3.0× |
+| warehouse-10-20-10-2-2 | 170×84 | 68.5 | 120 | 620 | 5.1× | 15.2 | 69.3 | 4.5× |
+| warehouse-20-40-10-2-1 | 321×123 | 57.2 | 330 | 1533 | 4.6× | 45.9 | 132.2 | 2.9× |
+| warehouse-20-40-10-2-2 | 340×164 | 69.5 | 433 | 2235 | 5.2× | 61.3 | 256.5 | 4.2× |
+| w_woundedcoast | 642×578 | 9.2 | 206 | 7358 | 35.7× | 35.0 | 926.6 | 26.5× |
+| **All 33 combined (33,000)** | — | — | — | — | **19.1×** | 781 ms\* | 11631 ms\* | **14.9×** |
 
-Interpretation and estimation notes:
+> \*The `µs` columns of the total row are the **aggregate time** (ms) over 33,000 pairs; every other row is per-query average.
 
-- **Expanded-node count = JPS's hard advantage:** JPS heads almost "straight for the goal" (enqueuing only at turns), while A\* stuffs the whole reachable area into the heap — a **~51×** gap here. This advantage is independent of implementation/hardware and most reliably estimable.
-- **Structured maps are JPS's home turf:** on `test2.json` (continuous walls, corridors and open areas), jump points are sparse and wall-clock speedup hits **~34×**. The counter-example is a **random-scatter** map (forced neighbors everywhere → dense jump points → frequent diagonal scans), JPS's unfavorable case where speedup drops sharply (measured ~1.4× at 20% random scatter) — real levels are far friendlier than random scatter.
-- **The more cache reuse, the faster (≈10.5×):** "no-reuse" resets the jump table to cold before every query (simulating no mutual warming); "reuse" keeps whitening across queries on the same map. The gap is **~10×**, and even **cold-cache JPS (50.9 µs) still beats A\* (164.7 µs) by ~3×**. **This directly backs [multithreaded mutual warming](#4-lock-free-multithreading):** in parallel, finders share one cache, early runs lay out jump points for later ones, reuse rises with thread/query count, and average time per search keeps dropping.
-- **Bigger maps pay off more:** A\*'s work ≈ reachable area (∝ N), JPS ≈ jump-point count (grows far slower). This map is only 137×68; at thousand-cell sides JPS's relative advantage widens further.
-- **JPS expansions cost more but worth it / fewer heap ops:** each JPS expansion does pruning + jump scanning, costlier than A\*'s "look at 8 neighbors"; but expansions drop ~51× and only jump points are enqueued (heap stays "clean", vs A\*'s enqueues ≈ expansions × neighbors), netting an order-of-magnitude win.
-
-**Full MovingAI benchmark:** `mapbench` over all **33** [MovingAI](https://movingai.com/benchmarks/) maps, **1000 random solvable start/goal pairs each** (**33,000 total**), measured:
-
-| Map (type) | Size | Expanded A\*/JPS | Wall-clock speedup |
-|---|---|---|---|
-| maze-128-128-10 (sparse maze) | 128×128 | **119×** | **64×** |
-| den520d (game map) | 256×257 | 43× | 37× |
-| Berlin_1_256 (city) | 256×256 | 32× | 29× |
-| orz900d (huge) | 1491×656 | 39× | 27× |
-| warehouse-20-40-10-2-1 (warehouse) | 321×123 | 4.6× | 2.9× |
-| random-64-64-20 (random scatter) | 64×64 | 1.9× | 1.6× |
-| **All 33 maps combined** | 33,000 pairs | **19.1×** | **14.9×** |
+Interpretation:
 
 - **Correctness:** across all 33,000 pairs, JPS and A\* agree on **success/failure and shortest-path cost (0 mismatches)** — validating JPS's completeness and optimality on real benchmark data.
-- Same trend as the single-map case: structured / maze / large-open maps speed up dramatically (tens of ×), random-scatter is weakest (~1.5–2×), and real levels are far friendlier than random scatter.
+- **Expanded-node count = JPS's hard advantage:** JPS heads almost "straight for the goal" (enqueuing only at turns) while A\* stuffs the whole reachable area into the heap — averaging A\*/JPS ≈ **19×**, up to **119×** on the sparse `maze-128-128-10`. Independent of implementation/hardware and most reliably estimable.
+- **Map type decides the gap:** structured maps with continuous walls, game maps, and large open maps (`den520d` 37×, `maze-128-128-10` 64×, `orz900d` 27×, `w_woundedcoast` 27×) speed up dramatically; **random-scatter** maps (`random-*` ~1.5–2×) are JPS's unfavorable case (forced neighbors everywhere → dense jump points → frequent diagonal scans) — real levels are far friendlier than random scatter.
+- **Bigger maps pay off more:** A\*'s work ≈ reachable area (∝ N), JPS ≈ jump-point count; on the huge `orz900d` (1491×656) A\* expands ~35k nodes per query while JPS expands ~900.
+- **The more cache reuse, the faster:** JPS times above are **warm-cache** (jump points whitened across queries on the same map); measured separately on `test2.json`, "reuse" is ~**10×** faster than "cold every time", and even cold-cache JPS still beats A\* by ~3× — this is the source of [multithreaded mutual warming](#4-lock-free-multithreading).
+- **JPS expansions cost more but worth it / fewer heap ops:** each expansion does pruning + jump scanning, costlier than A\*'s "look at 8 neighbors"; but expansions plummet and only jump points are enqueued (heap stays "clean", vs A\*'s enqueues ≈ expansions × neighbors), netting an order-of-magnitude win.
 
 > Reproduce: single map `dotnet run -c Release --project JPS.Benchmark -- bench` (`test2.json`, see `Bench` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)); full suite `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` (walks the repo's `movingai/`, see `MapBench`). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
 
