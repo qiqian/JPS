@@ -1,0 +1,136 @@
+using JPS.Models;
+
+namespace JPS.Pathfinding
+{
+    /// <summary>
+    /// 定长 4、按方向索引（0=E,1=W,2=S,3=N）的内联值类型。
+    /// 用值索引器读 + Set 方法写，等价于内联数组，但只需 C# 8/9（兼容 Unity 2022）。
+    /// 因数组元素是可寻址左值，cell.Dist.Set(...) 为就地变更、无整 struct 拷贝。
+    /// </summary>
+    public struct Dir4
+    {
+        private int _0;
+        private int _1;
+        private int _2;
+        private int _3;
+
+        public readonly int this[int index] => index switch
+        {
+            0 => _0,
+            1 => _1,
+            2 => _2,
+            _ => _3,
+        };
+
+        public void Set(int index, int value)
+        {
+            switch (index)
+            {
+                case 0: _0 = value; break;
+                case 1: _1 = value; break;
+                case 2: _2 = value; break;
+                default: _3 = value; break;
+            }
+        }
+    }
+
+    /// <summary>单个格子的跳点缓存：4 个方向的带符号距离 + 4 个方向的世代戳，内存连续。</summary>
+    public struct CellJump
+    {
+        public Dir4 Dist;   // >0 跳点距离，<=0 到墙距离
+        public Dir4 Gen;    // 世代戳，等于当前有效世代即 clean
+    }
+
+    /// <summary>
+    /// 惰性正交跳点缓存（JPS 加速结构）。
+    ///
+    /// 每格每正交方向（E=0,W=1,S=2,N=3）缓存一个带符号距离（&gt;0 跳点、&lt;=0 到墙）+ 一个世代戳。
+    /// 生命周期上从属于一张地图：按 <see cref="GridMap.Version"/> 失效；但它是 JPS 专属的加速结构，
+    /// 刻意独立于纯模型 <see cref="GridMap"/> 之外，避免让模型依赖具体算法（A* 并不需要它）。
+    ///
+    ///  - 障碍变化（Version 改变）→ 全局世代 +1，O(1) 整体置脏。
+    ///  - clean 命中 → O(1) 读。
+    ///  - dirty → 沿该方向扫一次到跳点/墙，并把整段 run 一起洗白。
+    /// </summary>
+    public sealed class JumpPointCache
+    {
+        private int _w;
+        private int _size;
+        private CellJump[] _cells = new CellJump[0];
+        private int _validGen;
+        private int _mapVersion = -1;
+        private Func<int, int, bool> _walk = static (_, _) => false;
+
+        /// <summary>每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。</summary>
+        public void Sync(GridMap map)
+        {
+            if (_w != map.Width || _size != map.Width * map.Height)
+            {
+                _w = map.Width;
+                _size = map.Width * map.Height;
+                _cells = new CellJump[_size];
+                _validGen = 0;
+                _mapVersion = -1;
+            }
+
+            if (_mapVersion != map.Version)
+            {
+                _validGen++;
+                if (_validGen == int.MaxValue)
+                {
+                    Array.Clear(_cells, 0, _cells.Length);
+                    _validGen = 1;
+                }
+                _mapVersion = map.Version;
+            }
+
+            _walk = map.IsWalkable;
+        }
+
+        /// <summary>某格某正交方向当前是否 clean（可视化用）。尺寸/版本不符则视为 dirty。</summary>
+        public bool IsClean(GridMap map, int x, int y, int dir)
+        {
+            if (_w != map.Width || _size != map.Width * map.Height)
+                return false;
+            if (_mapVersion != map.Version)
+                return false;
+            return _cells[y * _w + x].Gen[dir] == _validGen;
+        }
+
+        /// <summary>
+        /// 取 (x,y) 沿正交方向 (dx,dy) 的带符号跳点距离。
+        /// 命中 clean 直接读；未命中沿射线扫一次并把整段 run 一起洗白。
+        /// </summary>
+        public int CardinalDist(GridMap map, int x, int y, int dx, int dy, int dir)
+        {
+            int idx0 = y * _w + x;
+            if (_cells[idx0].Gen[dir] == _validGen)
+                return _cells[idx0].Dist[dir];
+
+            // 扫描：从 (x,y) 沿方向找最近跳点或墙
+            int s = 0, rx = x, ry = y;
+            bool jumpFound = false;
+            while (true)
+            {
+                rx += dx;
+                ry += dy;
+                s++;
+                if (!map.IsWalkable(rx, ry)) { jumpFound = false; break; }
+                if (JpsRules.IsJumpPoint(_walk, rx, ry, dx, dy)) { jumpFound = true; break; }
+            }
+
+            // 回填整段 run（步 k=0..s-1 的可走格）
+            int fx = x, fy = y;
+            for (int k = 0; k <= s - 1; k++)
+            {
+                int ci = fy * _w + fx;
+                _cells[ci].Dist.Set(dir, jumpFound ? (s - k) : -((s - 1) - k));
+                _cells[ci].Gen.Set(dir, _validGen);
+                fx += dx;
+                fy += dy;
+            }
+
+            return _cells[idx0].Dist[dir];
+        }
+    }
+}
