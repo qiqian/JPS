@@ -11,8 +11,8 @@ _A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JP
   _**Lazy jump table (the core idea):** no precomputation — jump distances are filled on demand; obstacle changes invalidate in `O(1)`, and whitened jump points are reused across queries, getting faster the more it runs._
 - **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。
   _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
-- **无锁多线程共享缓存**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布（宏 `JPS_CONCURRENT_CACHE` 控制）保证可见性与次序，免锁并行。
-  _**Lock-free shared cache across threads:** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release (gated by the `JPS_CONCURRENT_CACHE` symbol) for visibility and ordering — parallel without locks._
+- **无锁多线程共享缓存（默认开启）**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布保证可见性与次序，免锁并行（x86 上额外开销可忽略；可移除 `JPS_CONCURRENT_CACHE` 退回单线程极速）。
+  _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
 - **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；结果与 A\* 同样最优，结构化地图上实测扩展节点少约 **51×**、墙钟快约 **34×**。
   _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\*, with ~**51×** fewer expanded nodes and ~**34×** faster wall-clock on structured maps._
 - **算法核心与界面解耦、可移植**：`Models` + `Pathfinding` 不依赖 WinForms，可整体拷入 Unity 2022。
@@ -268,14 +268,16 @@ flowchart TD
 
 | 模式 | 如何启用 | 适用 |
 |---|---|---|
-| **单线程极速**（默认） | 不定义任何符号 | 工具演示 / 单线程调用，`Volatile` 全部消失（退回普通读写），零额外开销 |
-| **无锁多线程** | 定义条件编译符号 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路 |
+| **无锁多线程**（默认） | 工程已在 `JPS.Core` 定义 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路；x86/x64 上额外开销可忽略 |
+| **单线程极速** | 移除该符号 | `Volatile` 全部消失（退回普通读写），榨干单线程（尤其 ARM） |
 
-开启多线程安全模式——在 `JPS.Core/JPS.Core.csproj` 的 `<PropertyGroup>` 中加入（或命令行 `dotnet ... /p:DefineConstants=JPS_CONCURRENT_CACHE`，会自动传递到被引用的 Core）：
+多线程支持**默认开启**——`JPS.Core/JPS.Core.csproj` 的 `<PropertyGroup>` 已包含：
 
 ```xml
 <DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
 ```
+
+如需单线程极速（x86 上几乎无差别，ARM 上略有收益），删掉这行即可。
 
 并行调用范式：
 
@@ -291,7 +293,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ 并行期间不修改 map
 ```
 
-> **正确性验证**：开启 `JPS_CONCURRENT_CACHE` 后，用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。`dotnet run --project JPS.Benchmark /p:DefineConstants=JPS_CONCURRENT_CACHE -- mt` 可复现该压测（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `MtTest`）。
+> **正确性验证**：默认（已开启 `JPS_CONCURRENT_CACHE`）用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。`dotnet run --project JPS.Benchmark -- mt` 可复现该压测（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `MtTest`）。
 
 ---
 
@@ -445,7 +447,7 @@ JPS.slnx                         # 解决方案
 
 > **可移植性**：**JPS.Core** 锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
 >
-> **并发**：多线程共享同一 `JpsSystem` 并行寻路时，给 **JPS.Core** 定义符号 `JPS_CONCURRENT_CACHE` 即开启 [无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)；不定义则为单线程极速模式（默认）。
+> **并发**：[无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)**默认开启**（`JPS.Core` 已定义 `JPS_CONCURRENT_CACHE`），多个 `JpsPathfinder` 可共享同一 `JpsSystem` 并行寻路；移除该符号则退回单线程极速模式。
 
 ---
 
@@ -677,14 +679,16 @@ In other words: multiple JPS finders **warm the shared cache for each other** �
 
 | Mode | How to enable | Use case |
 |---|---|---|
-| **Single-thread max speed** (default) | define no symbol | tool demo / single-threaded calls; `Volatile` calls vanish (plain read/write), zero overhead |
-| **Lock-free multithreading** | define the compile symbol `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel |
+| **Lock-free multithreading** (default) | `JPS.Core` already defines `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel; negligible cost on x86/x64 |
+| **Single-thread max speed** | remove the symbol | `Volatile` calls vanish (plain read/write), squeeze single-thread (esp. ARM) |
 
-Enable thread-safe mode — add to the `<PropertyGroup>` of `JPS.Core/JPS.Core.csproj` (or pass `/p:DefineConstants=JPS_CONCURRENT_CACHE` on the CLI, which propagates to the referenced Core):
+Multithreading is **on by default** — the `<PropertyGroup>` of `JPS.Core/JPS.Core.csproj` already contains:
 
 ```xml
 <DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
 ```
+
+Remove that line for single-thread max speed (virtually identical on x86, a small win on ARM).
 
 Parallel calling pattern:
 
@@ -700,7 +704,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ do not modify the map during parallel runs
 ```
 
-> **Correctness check:** with `JPS_CONCURRENT_CACHE` enabled, 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run --project JPS.Benchmark /p:DefineConstants=JPS_CONCURRENT_CACHE -- mt` (see `MtTest` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)).
+> **Correctness check:** by default (with `JPS_CONCURRENT_CACHE` on), 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run --project JPS.Benchmark -- mt` (see `MtTest` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)).
 
 ## III. Visualization
 
@@ -846,7 +850,7 @@ JPS.slnx                         # solution
 
 > **Portability:** **JPS.Core** is pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only uses `System` / `System.Collections.Generic` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so it drops into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
 >
-> **Concurrency:** for multiple threads pathfinding in parallel on one shared `JpsSystem`, defining `JPS_CONCURRENT_CACHE` on **JPS.Core** enables [lock-free multithreading](#4-lock-free-multithreading); otherwise it's single-thread max-speed mode (default).
+> **Concurrency:** [lock-free multithreading](#4-lock-free-multithreading) is **on by default** (`JPS.Core` defines `JPS_CONCURRENT_CACHE`), so multiple `JpsPathfinder`s can share one `JpsSystem` in parallel; remove the symbol to fall back to single-thread max-speed mode.
 
 ## License
 
