@@ -3,11 +3,10 @@ using JPS.Models;
 namespace JPS.Pathfinding
 {
     /// <summary>
-    /// 定长 4、按方向索引（0=E,1=W,2=S,3=N）的内联值类型（short）。
-    /// 用值索引器读 + Set 方法写，等价于内联数组，但只需 C# 8/9（兼容 Unity 2022）。
-    /// 因数组元素是可寻址左值，cell.Dist.Set(...) 为就地变更、无整 struct 拷贝。
+    /// 定长 4（short），按方向索引（0=E,1=W,2=S,3=N）。值索引器读 + Set 写，
+    /// 等价内联数组但只需 C# 8/9（兼容 Unity 2022）；数组元素是可寻址左值，Set 为就地变更。
     /// </summary>
-    public struct Dir4
+    public struct Dir4Short
     {
         private short _0;
         private short _1;
@@ -34,15 +33,43 @@ namespace JPS.Pathfinding
         }
     }
 
+    /// <summary>定长 4（byte），同 <see cref="Dir4Short"/>，用于世代戳。</summary>
+    public struct Dir4Byte
+    {
+        private byte _0;
+        private byte _1;
+        private byte _2;
+        private byte _3;
+
+        public readonly byte this[int index] => index switch
+        {
+            0 => _0,
+            1 => _1,
+            2 => _2,
+            _ => _3,
+        };
+
+        public void Set(int index, byte value)
+        {
+            switch (index)
+            {
+                case 0: _0 = value; break;
+                case 1: _1 = value; break;
+                case 2: _2 = value; break;
+                default: _3 = value; break;
+            }
+        }
+    }
+
     /// <summary>
-    /// 单个格子的跳点缓存：4 方向带符号距离 + 4 方向世代戳，全用 short（16 字节/格）。
+    /// 单个格子的跳点缓存：4 方向带符号距离(short) + 4 方向世代戳(byte) = 12 字节/格。
     /// gen 与 dist 同结构相邻（AoS），同一格读 gen+dist 在同一缓存行，缓存更友好。
     /// 距离 ≤ max(Width,Height) ≤ short.MaxValue（由 GridMap 构造时校验）。
     /// </summary>
     public struct CellJump
     {
-        public Dir4 Dist;   // >0 跳点距离，<=0 到墙距离
-        public Dir4 Gen;    // 世代戳，等于当前有效世代即 clean
+        public Dir4Short Dist;   // >0 跳点距离，<=0 到墙距离
+        public Dir4Byte Gen;     // 世代戳，等于当前有效世代即 clean
     }
 
     /// <summary>
@@ -61,13 +88,14 @@ namespace JPS.Pathfinding
         private int _w;
         private int _size;
         private CellJump[] _cells = new CellJump[0];
-        private short _validGen;
+        private byte _validGen;
         private int _mapVersion = -1;
         private Func<int, int, bool> _walk = static (_, _) => false;
 
         /// <summary>
         /// 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。
-        /// 世代戳用 short：到 short.MaxValue 时整体清零（清零=全 dirty）并从 1 重来。
+        /// 世代戳用 byte：到 byte.MaxValue(255) 时整体清零（清零=全 dirty）并从 1 重来——
+        /// 即每 255 次障碍变化做一次 O(N) 清零，省内存、清零频率仍远低于"每次清"。
         /// </summary>
         public void Sync(GridMap map)
         {
@@ -82,7 +110,7 @@ namespace JPS.Pathfinding
 
             if (_mapVersion != map.Version)
             {
-                if (_validGen >= short.MaxValue)
+                if (_validGen >= byte.MaxValue)
                 {
                     Array.Clear(_cells, 0, _cells.Length);   // 世代回绕：整体清零→全 dirty
                     _validGen = 1;
@@ -135,7 +163,7 @@ namespace JPS.Pathfinding
             {
                 int ci = fy * _w + fx;
                 _cells[ci].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
-                _cells[ci].Gen.Set(dir, _validGen);
+                _cells[ci].Gen.Set(dir, _validGen);   // _validGen 为 byte
                 fx += dx;
                 fy += dy;
             }
