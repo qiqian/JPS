@@ -13,7 +13,8 @@ public sealed class GridControl : Control
     private readonly AStarPathfinder _astar = new();
     private readonly SearchOverlay _overlay = new();   // 视图层的可视化叠加，与模型分离
 
-    private GridMap _map;
+    private JpsSystem _system;   // 地图 + 共享跳点缓存
+    private GridMap _map;        // = _system.Map（保留以简化既有引用）
     private EditMode _mode = EditMode.BrushObstacle;
     private bool _isPainting;
     private bool _eraseObstacle;
@@ -54,7 +55,8 @@ public sealed class GridControl : Control
                  ControlStyles.OptimizedDoubleBuffer, true);
 
         BackColor = Color.FromArgb(60, 60, 64);
-        _map = new GridMap(80, 50);
+        _system = new JpsSystem(new GridMap(80, 50));
+        _map = _system.Map;
         _overlay.SetWidth(_map.Width);
     }
 
@@ -124,9 +126,10 @@ public sealed class GridControl : Control
     public PathResult RunJps()
     {
         EnsureGrid();
+        _system.Sync();         // 单线程把共享缓存同步到当前地图（按版本置脏）
         SnapshotCleanState();   // 记录寻路前的 clean 状态，供 UI 区分本次新更新的方向
         var sw = Stopwatch.StartNew();
-        var result = _jps.FindPath(_map, (_startX, _startY), (_endX, _endY));
+        var result = _jps.FindPath(_system, (_startX, _startY), (_endX, _endY));
         sw.Stop();
 
         _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
@@ -243,6 +246,7 @@ public sealed class GridControl : Control
                 if (_map.IsBlocked(x, y))
                     next.SetBlocked(x, y, true);
 
+        _system = new JpsSystem(next);   // 新地图 → 新的共享缓存
         _map = next;
         _overlay.SetWidth(_map.Width);
         _overlay.Clear();   // 网格尺寸变化，旧的搜索结果失效
@@ -399,7 +403,7 @@ public sealed class GridControl : Control
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
                 for (int dir = 0; dir < 4; dir++)
-                    _cleanBefore[((y * _map.Width + x) * 4) + dir] = _jps.IsCardinalClean(_map, x, y, dir);
+                    _cleanBefore[((y * _map.Width + x) * 4) + dir] = _system.Cache.IsClean(_map, x, y, dir);
     }
 
     private void DrawDirtyDots(Graphics g, int cs)
@@ -435,7 +439,7 @@ public sealed class GridControl : Control
                     float dx = cx + ox * off;
                     float dy = cy + oy * off;
 
-                    if (!_jps.IsCardinalClean(_map, x, y, dir))
+                    if (!_system.Cache.IsClean(_map, x, y, dir))
                     {
                         g.DrawEllipse(ringPen, dx - r, dy - r, r * 2, r * 2);   // dirty：空心
                         continue;

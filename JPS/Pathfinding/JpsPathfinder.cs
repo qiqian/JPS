@@ -67,10 +67,8 @@ namespace JPS.Pathfinding
         // ---- 仅可视化用，按需惰性分配（collectDebug=false 时完全不占用）----
         private int[] _scanGen = new int[0];
 
-        // ---- 惰性正交跳点缓存（独立结构，按 map.Version 失效）----
-        private readonly JumpPointCache _jumpCache = new JumpPointCache();
-
-        // 当前查询用的“可走”委托（= map.IsWalkable），供对角强迫邻居判定复用
+        // 当前查询用的共享跳点缓存与“可走”委托（每次 FindPath 入口绑定到传入的 JpsSystem）
+        private JumpPointCache _cache = null!;
         private Func<int, int, bool> _walk = static (_, _) => false;
 
         // 可视化收集
@@ -79,15 +77,15 @@ namespace JPS.Pathfinding
         private readonly List<int> _scannedIds = new List<int>();
 
         /// <summary>
-        /// 【只读内省 / 仅可视化使用，不在寻路算法路径上】
-        /// 查询某格某正交方向的惰性跳点缓存当前是否为 clean。方向索引：0=E,1=W,2=S,3=N。
-        /// 缓冲未就绪或地图版本已变则视为 dirty。算法本身用的是 CardinalDist，与此方法无关。
+        /// 在共享的 <see cref="JpsSystem"/>（地图 + 跳点缓存）上寻路。
+        /// 调用前需确保 system 已 <see cref="JpsSystem.Sync"/> 到当前地图（单线程同步缓存版本）。
+        /// 每个 JpsPathfinder 只持有自己的逐节点搜索状态，故不同实例可在各自线程上共用同一个 system。
         /// </summary>
-        public bool IsCardinalClean(GridMap map, int x, int y, int dir) =>
-            _jumpCache.IsClean(map, x, y, dir);
-
-        public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, bool collectDebug = true)
+        public PathResult FindPath(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, bool collectDebug = true)
         {
+            var map = system.Map;
+            _cache = system.Cache;
+
             if (start.X < 0 || start.Y < 0 || goal.X < 0 || goal.Y < 0)
                 return new PathResult { Message = "请先设置起点和终点。" };
 
@@ -96,8 +94,7 @@ namespace JPS.Pathfinding
 
             EnsureBuffers(map);
             NextGeneration();
-            _jumpCache.Sync(map);   // 按尺寸准备跳点缓存，并在地图版本变化时 O(1) 整体置脏
-            _walk = map.IsWalkable;
+            _walk = map.IsWalkable;   // 缓存同步由 JpsSystem.Sync 负责（调用方在寻路前完成）
 
             int openMark = _gen * 2;          // 本代“已生成/在 open”标记
             int closedMark = openMark + 1;     // 本代“已展开/closed”标记
@@ -193,7 +190,7 @@ namespace JPS.Pathfinding
         private JumpEntry CardinalJump(GridMap map, int x, int y, int dx, int dy, int gx, int gy)
         {
             int dir = JpsDirections.IndexOf(dx, dy);   // 正交方向 → 0..3
-            int dist = _jumpCache.CardinalDist(map, x, y, dx, dy, dir);
+            int dist = _cache.CardinalDist(map, x, y, dx, dy, dir);
             int maxTravel = dist > 0 ? dist : -dist;
 
             // 终点正好在这条射线上且可达 → 直接拦截
@@ -320,7 +317,7 @@ namespace JPS.Pathfinding
             _mark = new int[_size];
             _scanGen = new int[0];   // 可视化用，按需在 collectDebug 时分配
             _gen = 0;
-            // 跳点缓存由 _jumpCache.Sync 自行按尺寸/版本管理
+            // 跳点缓存由 JpsSystem/JumpPointCache 自行按尺寸/版本管理
         }
 
         private void NextGeneration()
