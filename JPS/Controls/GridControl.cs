@@ -17,6 +17,10 @@ public sealed class GridControl : Control
     private bool _isPainting;
     private bool _eraseObstacle;
 
+    // 纯 UI 层快照：寻路前各方向 clean 状态，用于区分“本次寻路新更新”的跳点方向
+    private bool[] _cleanBefore = [];
+    private int _snapW, _snapH;
+
     private static readonly Color GridLineColor = Color.FromArgb(78, 78, 84);
 
     // 公开的配色，供图例复用，保证图例与网格颜色一致
@@ -29,6 +33,8 @@ public sealed class GridControl : Control
     public static readonly Color SmoothPathColor = Color.FromArgb(255, 60, 60);
     public static readonly Color StartColor = Color.FromArgb(0, 224, 224);
     public static readonly Color EndColor = Color.FromArgb(255, 0, 170);
+    public static readonly Color JumpCleanColor = Color.FromArgb(240, 240, 240);   // 之前已缓存的跳点方向（白）
+    public static readonly Color JumpFreshColor = Color.FromArgb(255, 140, 0);      // 本次寻路新更新的跳点方向（橙）
 
     public event EventHandler<string>? StatusChanged;
 
@@ -101,6 +107,7 @@ public sealed class GridControl : Control
     public PathResult RunJps()
     {
         EnsureGrid();
+        SnapshotCleanState();   // 记录寻路前的 clean 状态，供 UI 区分本次新更新的方向
         var sw = Stopwatch.StartNew();
         var result = _jps.FindPath(_map);
         sw.Stop();
@@ -191,6 +198,7 @@ public sealed class GridControl : Control
         DrawSearchOverlay(g, cs);
         DrawGridLines(g, cs);
         DrawMarkers(g, cs);
+        DrawDirtyDots(g, cs);
     }
 
     private static readonly SolidBrush WalkableBrush = new(WalkableColor);
@@ -326,6 +334,80 @@ public sealed class GridControl : Control
 
             g.SmoothingMode = prevMode;
         }
+    }
+
+    // 在每个可走格内按方位摆成十字的 4 个点，表示该格 4 个正交方向跳点缓存的状态：
+    // 实心=clean（已缓存），空心=dirty（待计算）。位置即方向：上=N、下=S、左=W、右=E。
+    private static readonly (int Dir, float Ox, float Oy)[] DotLayout =
+    [
+        (0,  1f,  0f),   // E → 右
+        (1, -1f,  0f),   // W → 左
+        (2,  0f,  1f),   // S → 下
+        (3,  0f, -1f),   // N → 上
+    ];
+
+    // 寻路前为每格每方向记录当前 clean 状态（纯 UI，不触碰算法/数据结构）
+    private void SnapshotCleanState()
+    {
+        int need = _map.Width * _map.Height * 4;
+        if (_cleanBefore.Length != need)
+            _cleanBefore = new bool[need];
+        _snapW = _map.Width;
+        _snapH = _map.Height;
+
+        for (int y = 0; y < _map.Height; y++)
+            for (int x = 0; x < _map.Width; x++)
+                for (int dir = 0; dir < 4; dir++)
+                    _cleanBefore[((y * _map.Width + x) * 4) + dir] = _jps.IsCardinalClean(_map, x, y, dir);
+    }
+
+    private void DrawDirtyDots(Graphics g, int cs)
+    {
+        if (cs < 14)
+            return;
+
+        float r = Math.Max(2f, cs * 0.1f);
+        float off = cs * 0.30f;
+        bool snapOk = _snapW == _map.Width && _snapH == _map.Height;
+
+        using var cleanBrush = new SolidBrush(JumpCleanColor);
+        using var freshBrush = new SolidBrush(JumpFreshColor);
+        using var ringPen = new Pen(Color.FromArgb(200, 240, 240, 240), Math.Max(1.2f, cs / 22f));
+
+        var prev = g.SmoothingMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+        for (int y = 0; y < _map.Height; y++)
+        {
+            for (int x = 0; x < _map.Width; x++)
+            {
+                if (!_map.IsWalkable(x, y))
+                    continue;
+                if ((x == _map.StartX && y == _map.StartY) || (x == _map.EndX && y == _map.EndY))
+                    continue;   // 起终点格让位给 S/G 标记
+
+                float cx = x * cs + cs / 2f;
+                float cy = y * cs + cs / 2f;
+
+                foreach (var (dir, ox, oy) in DotLayout)
+                {
+                    float dx = cx + ox * off;
+                    float dy = cy + oy * off;
+
+                    if (!_jps.IsCardinalClean(_map, x, y, dir))
+                    {
+                        g.DrawEllipse(ringPen, dx - r, dy - r, r * 2, r * 2);   // dirty：空心
+                        continue;
+                    }
+
+                    // clean：本次寻路新更新（之前 dirty）用橙色，之前已缓存用白色
+                    bool wasClean = snapOk && _cleanBefore[((y * _map.Width + x) * 4) + dir];
+                    g.FillEllipse(wasClean ? cleanBrush : freshBrush, dx - r, dy - r, r * 2, r * 2);
+                }
+            }
+        }
+
+        g.SmoothingMode = prev;
     }
 
     private void DrawGridLines(Graphics g, int cs)

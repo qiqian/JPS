@@ -83,6 +83,19 @@ public sealed class JpsPathfinder
     private readonly List<int> _generatedIds = [];
     private readonly List<int> _scannedIds = [];
 
+    /// <summary>
+    /// 查询某格某正交方向的惰性跳点缓存当前是否为 clean（可视化用）。
+    /// 方向索引：0=E,1=W,2=S,3=N。缓冲未就绪或地图版本已变则视为 dirty。
+    /// </summary>
+    public bool IsCardinalClean(GridMap map, int x, int y, int dir)
+    {
+        if (_w != map.Width || _size != map.Width * map.Height)
+            return false;
+        if (_cardMapVersion != map.Version)
+            return false;
+        return _cardGen[((y * _w + x) * 4) + dir] == _cardValidGen;
+    }
+
     public PathResult FindPath(GridMap map, bool collectDebug = true)
     {
         if (!map.HasStart || !map.HasEnd)

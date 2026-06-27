@@ -17,6 +17,8 @@ namespace JPS
             (() => GridControl.ExpandedColor, "已扩展"),
             (() => GridControl.FrontierColor, "已入队未扩展"),
             (() => GridControl.ScannedColor, "扫描跳过"),
+            (() => GridControl.JumpFreshColor, "本次更新跳点"),
+            (() => GridControl.JumpCleanColor, "已缓存跳点"),
         ];
 
         public Form1()
