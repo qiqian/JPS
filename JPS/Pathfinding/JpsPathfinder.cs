@@ -79,8 +79,9 @@ namespace JPS.Pathfinding
         private readonly List<int> _scannedIds = new List<int>();
 
         /// <summary>
-        /// 查询某格某正交方向的惰性跳点缓存当前是否为 clean（可视化用）。
-        /// 方向索引：0=E,1=W,2=S,3=N。缓冲未就绪或地图版本已变则视为 dirty。
+        /// 【只读内省 / 仅可视化使用，不在寻路算法路径上】
+        /// 查询某格某正交方向的惰性跳点缓存当前是否为 clean。方向索引：0=E,1=W,2=S,3=N。
+        /// 缓冲未就绪或地图版本已变则视为 dirty。算法本身用的是 CardinalDist，与此方法无关。
         /// </summary>
         public bool IsCardinalClean(GridMap map, int x, int y, int dir) =>
             _jumpCache.IsClean(map, x, y, dir);

@@ -3,18 +3,18 @@ using JPS.Models;
 namespace JPS.Pathfinding
 {
     /// <summary>
-    /// 定长 4、按方向索引（0=E,1=W,2=S,3=N）的内联值类型。
+    /// 定长 4、按方向索引（0=E,1=W,2=S,3=N）的内联值类型（short）。
     /// 用值索引器读 + Set 方法写，等价于内联数组，但只需 C# 8/9（兼容 Unity 2022）。
     /// 因数组元素是可寻址左值，cell.Dist.Set(...) 为就地变更、无整 struct 拷贝。
     /// </summary>
     public struct Dir4
     {
-        private int _0;
-        private int _1;
-        private int _2;
-        private int _3;
+        private short _0;
+        private short _1;
+        private short _2;
+        private short _3;
 
-        public readonly int this[int index] => index switch
+        public readonly short this[int index] => index switch
         {
             0 => _0,
             1 => _1,
@@ -22,7 +22,7 @@ namespace JPS.Pathfinding
             _ => _3,
         };
 
-        public void Set(int index, int value)
+        public void Set(int index, short value)
         {
             switch (index)
             {
@@ -34,7 +34,11 @@ namespace JPS.Pathfinding
         }
     }
 
-    /// <summary>单个格子的跳点缓存：4 个方向的带符号距离 + 4 个方向的世代戳，内存连续。</summary>
+    /// <summary>
+    /// 单个格子的跳点缓存：4 方向带符号距离 + 4 方向世代戳，全用 short（16 字节/格）。
+    /// gen 与 dist 同结构相邻（AoS），同一格读 gen+dist 在同一缓存行，缓存更友好。
+    /// 距离 ≤ max(Width,Height) ≤ short.MaxValue（由 GridMap 构造时校验）。
+    /// </summary>
     public struct CellJump
     {
         public Dir4 Dist;   // >0 跳点距离，<=0 到墙距离
@@ -57,11 +61,14 @@ namespace JPS.Pathfinding
         private int _w;
         private int _size;
         private CellJump[] _cells = new CellJump[0];
-        private int _validGen;
+        private short _validGen;
         private int _mapVersion = -1;
         private Func<int, int, bool> _walk = static (_, _) => false;
 
-        /// <summary>每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。</summary>
+        /// <summary>
+        /// 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。
+        /// 世代戳用 short：到 short.MaxValue 时整体清零（清零=全 dirty）并从 1 重来。
+        /// </summary>
         public void Sync(GridMap map)
         {
             if (_w != map.Width || _size != map.Width * map.Height)
@@ -75,11 +82,14 @@ namespace JPS.Pathfinding
 
             if (_mapVersion != map.Version)
             {
-                _validGen++;
-                if (_validGen == int.MaxValue)
+                if (_validGen >= short.MaxValue)
                 {
-                    Array.Clear(_cells, 0, _cells.Length);
+                    Array.Clear(_cells, 0, _cells.Length);   // 世代回绕：整体清零→全 dirty
                     _validGen = 1;
+                }
+                else
+                {
+                    _validGen++;
                 }
                 _mapVersion = map.Version;
             }
@@ -119,12 +129,12 @@ namespace JPS.Pathfinding
                 if (JpsRules.IsJumpPoint(_walk, rx, ry, dx, dy)) { jumpFound = true; break; }
             }
 
-            // 回填整段 run（步 k=0..s-1 的可走格）
+            // 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ short.MaxValue，安全转 short。
             int fx = x, fy = y;
             for (int k = 0; k <= s - 1; k++)
             {
                 int ci = fy * _w + fx;
-                _cells[ci].Dist.Set(dir, jumpFound ? (s - k) : -((s - 1) - k));
+                _cells[ci].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
                 _cells[ci].Gen.Set(dir, _validGen);
                 fx += dx;
                 fy += dy;

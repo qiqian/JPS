@@ -1,3 +1,5 @@
+using System;
+
 namespace JPS.Models
 {
     /// <summary>
@@ -19,6 +21,14 @@ namespace JPS.Models
 
         public GridMap(int width, int height)
         {
+            if (width <= 0 || height <= 0)
+                throw new ArgumentOutOfRangeException(nameof(width), $"地图尺寸必须为正：{width}×{height}。");
+
+            // 跳点缓存用 short 存距离，距离 ≤ max(宽,高)，故边长不能超过 short.MaxValue。
+            if (width > short.MaxValue || height > short.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(width),
+                    $"地图边长不能超过 {short.MaxValue}（当前 {width}×{height}）：跳点缓存以 short 存距离。");
+
             Width = width;
             Height = height;
             _blocked = new ulong[(width * height + 63) / 64];   // 向上取整到 64 位字
