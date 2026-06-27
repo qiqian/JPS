@@ -1,5 +1,7 @@
 # JPS Pathfinding Playground
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 一个用于**直观演示与测试 JPS（Jump Point Search，跳点搜索）寻路算法**的 Windows Forms 应用（.NET / C#）。
 内置 A\* 对照、路径平滑、JSON 存档，以及把"跳点表更新过程"实时可视化的能力——非常适合用来理解 JPS 的内部机理。
 
@@ -283,3 +285,9 @@ JPS/
 ```
 
 > **可移植性**：`Models/` + `Pathfinding/` 不依赖 WinForms（仅用 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`），可整体拷入 Unity 2022 使用；`Controls/` + `Form1` 是桌面演示界面，不进 Unity。
+
+---
+
+## 许可证
+
+本项目以 **MIT License** 开源——可自由用于个人或**商业**用途：使用、复制、修改、合并、发布、分发、再授权、出售均不受限，只需在副本中保留版权与许可声明。详见 [LICENSE](LICENSE)。
