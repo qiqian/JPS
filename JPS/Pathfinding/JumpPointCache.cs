@@ -33,7 +33,12 @@ namespace JPS.Pathfinding
         }
     }
 
-    /// <summary>定长 4（byte），同 <see cref="Dir4Short"/>，用于世代戳。</summary>
+    /// <summary>
+    /// 定长 4（byte），同 <see cref="Dir4Short"/>，用于世代戳。
+    /// 并发模式（JPS_CONCURRENT_CACHE）下世代戳是“发布标志”，用 <see cref="Slot"/> 取字段引用
+    /// 配合 <c>Volatile.Read/Write</c> 做 acquire/release 发布。
+    /// ⚠️ 本结构体及其字段必须保持**可变、非 readonly**，否则 ref 会退化为对副本取引用、丢写/读旧值。
+    /// </summary>
     public struct Dir4Byte
     {
         private byte _0;
@@ -59,6 +64,16 @@ namespace JPS.Pathfinding
                 default: _3 = value; break;
             }
         }
+
+        /// <summary>
+        /// 取第 <paramref name="index"/> 个字节的可写引用（指向调用方存储，例如数组元素内部）。
+        /// 必须按 ref 接收（静态方法）——结构体实例方法不能 ref 返回自身字段（CS8170）。
+        /// </summary>
+        public static ref byte Slot(ref Dir4Byte g, int index) =>
+            ref (index == 0 ? ref g._0
+               : ref (index == 1 ? ref g._1
+                    : ref (index == 2 ? ref g._2
+                         : ref g._3)));
     }
 
     /// <summary>
@@ -83,10 +98,11 @@ namespace JPS.Pathfinding
     ///  - clean 命中 → O(1) 读。
     ///  - dirty → 沿该方向扫一次到跳点/墙，并把整段 run 一起洗白。
     ///
-    /// 多线程：定义条件编译符号 <c>JPS_CONCURRENT_CACHE</c> 时，在惰性补写处插入全屏障
-    /// （写 dist → release → 发布 gen；读 gen → acquire → 读 dist），使多个 JpsPathfinder
-    /// 可在并行寻路中**只读/惰性补写同一份缓存**（前提：并行前单线程 Sync 一次、并行期间地图不变；
-    /// 因补写值是固定地图的纯函数，重复计算结果一致）。不定义该符号时屏障消失，退回单线程极速模式。
+    /// 多线程：定义条件编译符号 <c>JPS_CONCURRENT_CACHE</c> 时，用 <c>Volatile.Write/Read</c> 对世代戳做
+    /// acquire/release 发布（写 dist → Volatile.Write 发布该格 gen；读 gen 用 Volatile.Read，再普通读 dist），
+    /// 使多个 JpsPathfinder 可在并行寻路中**只读/惰性补写同一份缓存**（前提：并行前单线程 Sync 一次、
+    /// 并行期间地图不变；因补写值是固定地图的纯函数，重复计算结果一致）。读热路径为半屏障（acquire），
+    /// 比全屏障更省；不定义该符号时退回单线程极速模式（普通读写，零屏障）。
     /// </summary>
     public sealed class JumpPointCache
     {
@@ -147,13 +163,14 @@ namespace JPS.Pathfinding
         public int CardinalDist(GridMap map, int x, int y, int dx, int dy, int dir)
         {
             int idx0 = y * _w + x;
-            if (_cells[idx0].Gen[dir] == _validGen)
-            {
 #if JPS_CONCURRENT_CACHE
-                System.Threading.Thread.MemoryBarrier();   // acquire：看到 clean 后再读 dist
-#endif
+            // acquire 读世代戳：若看到 clean，则发布它的那次 release 写之前的 dist 写均已可见，普通读 dist 即安全。
+            if (System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[idx0].Gen, dir)) == _validGen)
                 return _cells[idx0].Dist[dir];
-            }
+#else
+            if (_cells[idx0].Gen[dir] == _validGen)
+                return _cells[idx0].Dist[dir];
+#endif
 
             // 扫描：从 (x,y) 沿方向找最近跳点或墙
             int s = 0, rx = x, ry = y;
@@ -168,23 +185,18 @@ namespace JPS.Pathfinding
             }
 
             // 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ short.MaxValue，安全转 short。
-            // 并发模式下分两遍：先写完所有 dist，一次 release 屏障，再发布所有 gen。
+            // 并发模式：每格先普通写 dist，再用 Volatile.Write(release) 发布该格 gen——
+            // 每格 gen 只守护本格 dist，故按元素发布即可，无需额外全屏障，也无需分两遍。
             int fx = x, fy = y;
             for (int k = 0; k <= s - 1; k++)
             {
-                _cells[fy * _w + fx].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
-                fx += dx;
-                fy += dy;
-            }
-
+                int ci = fy * _w + fx;
+                _cells[ci].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
 #if JPS_CONCURRENT_CACHE
-            System.Threading.Thread.MemoryBarrier();   // release：所有 dist 写完后再发布 gen
+                System.Threading.Volatile.Write(ref Dir4Byte.Slot(ref _cells[ci].Gen, dir), _validGen);
+#else
+                _cells[ci].Gen.Set(dir, _validGen);
 #endif
-
-            fx = x; fy = y;
-            for (int k = 0; k <= s - 1; k++)
-            {
-                _cells[fy * _w + fx].Gen.Set(dir, _validGen);   // 发布 clean（_validGen 为 byte）
                 fx += dx;
                 fy += dy;
             }

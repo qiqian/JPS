@@ -12,8 +12,8 @@ namespace JPS.Pathfinding
     ///  - 单线程：地图阻挡改动后调用 <see cref="Sync"/>，再 FindPath（本项目工具即如此）。
     ///  - 多线程共享（无锁）：在并行寻路前由**单线程**调用一次 <see cref="Sync"/>（此时地图固定、缓存版本固定），
     ///    随后多个 JpsPathfinder 各自在自己的线程上对同一 JpsSystem 寻路，只读/惰性补写共享缓存。
-    ///    并发发布由 <see cref="JumpPointCache"/> 中受条件编译符号 <c>JPS_CONCURRENT_CACHE</c> 控制的全屏障保证
-    ///    （定义该符号才线程安全；不定义则为单线程极速模式）。
+    ///    并发发布由 <see cref="JumpPointCache"/> 中受条件编译符号 <c>JPS_CONCURRENT_CACHE</c> 控制的
+    ///    Volatile acquire/release（世代戳）保证（定义该符号才线程安全；不定义则为单线程极速模式）。
     /// </summary>
     public sealed class JpsSystem
     {

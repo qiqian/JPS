@@ -11,8 +11,8 @@ _A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JP
   _**Lazy jump table (the core idea):** no precomputation — jump distances are filled on demand; obstacle changes invalidate in `O(1)`, and whitened jump points are reused across queries, getting faster the more it runs._
 - **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。
   _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
-- **无锁多线程共享缓存**：多个寻路器共享同一份缓存并**互相预热**，用内存屏障（宏 `JPS_CONCURRENT_CACHE` 控制）保证可见性与发布次序，免锁并行。
-  _**Lock-free shared cache across threads:** many pathfinders share one cache and **warm it for each other**, using memory barriers (gated by the `JPS_CONCURRENT_CACHE` symbol) for visibility and publish ordering — parallel without locks._
+- **无锁多线程共享缓存**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布（宏 `JPS_CONCURRENT_CACHE` 控制）保证可见性与次序，免锁并行。
+  _**Lock-free shared cache across threads:** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release (gated by the `JPS_CONCURRENT_CACHE` symbol) for visibility and ordering — parallel without locks._
 - **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；结果与 A\* 同样最优，结构化地图上实测扩展节点少约 **51×**、墙钟快约 **34×**。
   _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\*, with ~**51×** fewer expanded nodes and ~**34×** faster wall-clock on structured maps._
 - **算法核心与界面解耦、可移植**：`Models` + `Pathfinding` 不依赖 WinForms，可整体拷入 Unity 2022。
@@ -247,13 +247,13 @@ flowchart TD
 
 **2) 让共享缓存无需锁。** 关键观察：并行期间地图不变，所以缓存里每一项的**正确值是固定地图的纯函数**——不同线程对同一格同方向算出的 dist 必然相同。因此即使两个线程同时给同一格补写，也只是把**同一个值**写两遍，结果一致。剩下的唯一风险是**可见性与写入次序**：读者可能先看到"已 clean"的世代戳、却还没看到对应的 dist。
 
-**3) 用全屏障保证发布次序（而非加锁）。** 在惰性补写处用 `Thread.MemoryBarrier()` 建立 release/acquire 配对：
+**3) 用 `Volatile` 的 acquire/release 保证发布次序（而非加锁）。** 世代戳 `gen` 是"发布标志"，按元素发布：
 
-- **写者**：先写完整段 run 的所有 `dist` → **release 屏障** → 再发布所有世代戳 `gen`。保证"看得到 gen 就一定看得到 dist"。
-- **读者**：命中 clean（`gen == 有效世代`）后 → **acquire 屏障** → 再读 `dist`。
-- 每条 run 只插一次屏障（先写完一串 dist 再统一发布 gen），把屏障开销压在 dirty 慢路径上；clean 命中只多一次屏障、无锁无竞争。
+- **写者**：每格先**普通写** `dist`，再 `Volatile.Write(gen)` 发布该格世代戳。release 语义保证"此前的 dist 写"对 acquire 读者可见——即"看得到 gen 就一定看得到 dist"。
+- **读者**：`Volatile.Read(gen)` 命中 clean（`gen == 有效世代`）后，再**普通读** `dist`。
+- **按元素发布**：每格的 `gen` 只守护本格的 `dist`，所以逐格 release 即可——无需额外全屏障、也无需分两遍写。读热路径只是一次 **acquire 读**（半屏障，比全屏障便宜），无锁无竞争。
 
-这样既不需要互斥锁、也不会让缓存的**单格内存占用变大**（屏障只约束次序，不增字段）。
+取字段引用用结构体的静态 `ref` 方法（`Dir4Byte.Slot`）+ `ref` 三元（结构体实例方法不能 `ref` 返回自身字段，CS8170）。这样既不需要互斥锁、也**不增加单格内存**（仍 12 B/格，AoS 布局不变，`gen`/`dist` 仍同缓存行），`Volatile` 只约束次序、不增字段。
 
 **4) 多个 finder 互相预热缓存 → 越并行越快。** 这是共享缓存最甜的红利：缓存是[惰性洗白](#1-jump-table-lazy-update惰性跳点表)的，**哪条线段被走到，哪条线段才被扫描并洗白成 clean**。由于所有线程共享**同一份**缓存——
 
@@ -268,7 +268,7 @@ flowchart TD
 
 | 模式 | 如何启用 | 适用 |
 |---|---|---|
-| **单线程极速**（默认） | 不定义任何符号 | 工具演示 / 单线程调用，屏障完全消失，零额外开销 |
+| **单线程极速**（默认） | 不定义任何符号 | 工具演示 / 单线程调用，`Volatile` 全部消失（退回普通读写），零额外开销 |
 | **无锁多线程** | 定义条件编译符号 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路 |
 
 开启多线程安全模式——在 `JPS/JPS.csproj` 的 `<PropertyGroup>` 中加入：
@@ -416,7 +416,7 @@ JPS/
 ├── Pathfinding/                 # 算法核心（C# 9 / Unity 2022 友好，整数寻路）
 │   ├── JpsDirections.cs         # 8 方向、整数代价(横1000/斜1414)、octile 启发
 │   ├── JpsRules.cs              # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
-│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控全屏障）
+│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
 │   ├── JpsSystem.cs             # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
 │   ├── JpsPathfinder.cs         # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
 │   ├── AStarPathfinder.cs       # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
@@ -646,13 +646,13 @@ flowchart TD
 
 **2) Make the shared cache lock-free.** Key observation: the map is unchanged during parallel runs, so **each cache entry's correct value is a pure function of the fixed map** — different threads compute the same dist for the same cell/direction. So even if two threads fill the same cell simultaneously, they just write the **same value** twice; the result is consistent. The only remaining risk is **visibility and write ordering**: a reader might see the "clean" generation stamp before the corresponding dist.
 
-**3) Use full barriers to guarantee publish ordering (instead of locking).** At the lazy-fill site, `Thread.MemoryBarrier()` establishes a release/acquire pair:
+**3) Use `Volatile` acquire/release to guarantee publish ordering (instead of locking).** The generation stamp `gen` is the "publish flag", published per element:
 
-- **Writer**: first write all `dist` for the whole run → **release barrier** → then publish all generation stamps `gen`. Guarantees "if you can see gen, you can see dist".
-- **Reader**: after a clean hit (`gen == valid generation`) → **acquire barrier** → then read `dist`.
-- Only one barrier per run (write the whole dist strip, then publish gen together), keeping barrier cost on the dirty slow path; a clean hit costs just one extra barrier, lock-free and uncontended.
+- **Writer**: for each cell, **plainly write** `dist`, then `Volatile.Write(gen)` to publish that cell's stamp. Release semantics make the preceding `dist` write visible to an acquire reader — i.e. "if you can see gen, you can see dist".
+- **Reader**: `Volatile.Read(gen)`; on a clean hit (`gen == valid generation`), **plainly read** `dist`.
+- **Per-element publish**: each cell's `gen` guards only its own `dist`, so a per-cell release suffices — no extra full barrier and no two-pass write. The read hot path is just one **acquire load** (a half-fence, cheaper than a full barrier), lock-free and uncontended.
 
-This needs no mutex and does **not increase the cache's per-cell memory** (barriers only constrain ordering, add no fields).
+Field references use a static `ref` method on the struct (`Dir4Byte.Slot`) plus a `ref` conditional (a struct instance method can't `ref`-return its own field, CS8170). This needs no mutex and does **not increase per-cell memory** (still 12 B/cell, AoS layout unchanged, `gen`/`dist` stay on the same cache line); `Volatile` only constrains ordering, adds no fields.
 
 **4) Multiple finders warm the cache for each other → faster the more parallel it gets.** This is the sweetest dividend of the shared cache: the cache is [lazily whitened](#1-jump-table-lazy-update) — **a strip is scanned and whitened to clean only when it's traversed**. Since all threads share **one** cache —
 
@@ -667,7 +667,7 @@ In other words: multiple JPS finders **warm the shared cache for each other** �
 
 | Mode | How to enable | Use case |
 |---|---|---|
-| **Single-thread max speed** (default) | define no symbol | tool demo / single-threaded calls; barriers vanish, zero overhead |
+| **Single-thread max speed** (default) | define no symbol | tool demo / single-threaded calls; `Volatile` calls vanish (plain read/write), zero overhead |
 | **Lock-free multithreading** | define the compile symbol `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel |
 
 Enable thread-safe mode — add to the `<PropertyGroup>` of `JPS/JPS.csproj`:
@@ -807,7 +807,7 @@ JPS/
 ├── Pathfinding/                 # Algorithm core (C# 9 / Unity 2022 friendly, integer pathfinding)
 │   ├── JpsDirections.cs         # 8 directions, integer cost (1000/1414), octile heuristic
 │   ├── JpsRules.cs              # Jump-point / forced-neighbor rules
-│   ├── JumpPointCache.cs        # Lazy cardinal jump cache (generation-stamp bulk invalidate; full barriers gated by JPS_CONCURRENT_CACHE)
+│   ├── JumpPointCache.cs        # Lazy cardinal jump cache (generation-stamp bulk invalidate; Volatile publish gated by JPS_CONCURRENT_CACHE)
 │   ├── JpsSystem.cs             # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
 │   ├── JpsPathfinder.cs         # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
 │   ├── AStarPathfinder.cs       # A* baseline (packed state: came-dir sbyte + merged mark)
