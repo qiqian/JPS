@@ -5,15 +5,18 @@ namespace JPS.Pathfinding
     /// <summary>
     /// 标准 8 邻接 A* 寻路，作为 JPS 的对照组。
     ///
-    /// 与 JPS 的区别：A* 每展开一个节点，都要实时检查它周围 8 个邻居并逐个入队，
-    /// 不做任何“跳跃”，因此扩展的节点数远多于 JPS（会铺满一大片）。它不需要预计算。
+    /// 与 JPS 的区别：A* 每展开一个节点都要实时检查 8 个邻居并逐个入队，不做跳跃，
+    /// 扩展节点远多于 JPS；不需要预计算。移动规则/启发式与本项目 JPS 一致以便公平对比。
     ///
-    /// 为公平对比，移动规则与本项目 JPS 一致（对角只要目标格可走即可），启发式同为整数八方向 octile。
-    /// 性能手法：扁平数组 + int 节点 + 代次戳免清零 + 缓冲区复用，全程整数运算。
+    /// 内存：逐节点数据用 O(N) 扁平数组（一次分配、跨查询复用）。为压缩单次寻路的内存占用，
+    /// 做了两处不损性能的优化：
+    ///   ① seen/closed 两个状态合并进一个 int 数组（用 2·gen / 2·gen+1 编码）；
+    ///   ② 父信息只存“来向” sbyte（A* 每步一格，回溯时反推父格即可），而非完整父 id。
+    /// 于是每格仅 g(8) + 来向(1) + 状态(4) = 13 字节（原先 20 字节）。
     /// </summary>
     public sealed class AStarPathfinder
     {
-        /// <summary>每个方向的移动代价（正交 1000 / 对角 1414），按方向索引预存，省去循环内分支。</summary>
+        /// <summary>每个方向的移动代价（正交 1000 / 对角 1414），按方向索引预存。</summary>
         private static readonly long[] DirCost = BuildDirCost();
 
         private static long[] BuildDirCost()
@@ -27,28 +30,30 @@ namespace JPS.Pathfinding
             return costs;
         }
 
-        // ---- 与 JpsPathfinder 同款的复用缓冲区（按 id=y*W+x 索引）----
-        private int _w, _h, _size;
-        private long[] _g = new long[0];
-        private int[] _parent = new int[0];
-        private int[] _seenGen = new int[0];
-        private int[] _closedGen = new int[0];
+        // ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ----
+        private int _w, _size;
+        private long[] _g = new long[0];           // 各节点已知最短代价 g
+        private sbyte[] _cameDir = new sbyte[0];   // 到达该节点的方向索引（0..7，-1=起点），用于回溯
+        private int[] _mark = new int[0];          // 访问状态：== 2·gen → open(已生成)，== 2·gen+1 → closed(已展开)
         private int _gen;
         private readonly MinHeap _open = new MinHeap();
 
         private readonly List<int> _expandedIds = new List<int>();
         private readonly List<int> _generatedIds = new List<int>();
 
-        public PathResult FindPath(GridMap map, bool collectDebug = true)
+        public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, bool collectDebug = true)
         {
-            if (!map.HasStart || !map.HasEnd)
+            if (start.X < 0 || start.Y < 0 || goal.X < 0 || goal.Y < 0)
                 return new PathResult { Message = "请先设置起点和终点。" };
 
-            if (!map.IsWalkable(map.StartX, map.StartY) || !map.IsWalkable(map.EndX, map.EndY))
+            if (!map.IsWalkable(start.X, start.Y) || !map.IsWalkable(goal.X, goal.Y))
                 return new PathResult { Message = "起点或终点位于阻挡上。" };
 
             EnsureBuffers(map);
             NextGeneration();
+
+            int openMark = _gen * 2;          // 本代“已生成/在 open”标记
+            int closedMark = openMark + 1;     // 本代“已展开/closed”标记
 
             if (collectDebug)
             {
@@ -56,30 +61,30 @@ namespace JPS.Pathfinding
                 _generatedIds.Clear();
             }
 
-            int gx = map.EndX, gy = map.EndY;
-            int startId = Id(map.StartX, map.StartY);
+            int gx = goal.X, gy = goal.Y;
+            int startId = Id(start.X, start.Y);
             int goalId = Id(gx, gy);
 
             _open.Clear();
             _g[startId] = 0;
-            _seenGen[startId] = _gen;
-            _parent[startId] = -1;
-            _open.Enqueue(startId, JpsDirections.OctileHeuristic(map.StartX, map.StartY, gx, gy));
+            _mark[startId] = openMark;
+            _cameDir[startId] = -1;
+            _open.Enqueue(startId, JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy));
 
             int expandedCount = 0;
 
             while (_open.TryDequeue(out int current, out _))
             {
-                if (_closedGen[current] == _gen)
-                    continue;
+                if (_mark[current] == closedMark)
+                    continue;   // 惰性删除：已展开的重复入队项跳过
 
-                _closedGen[current] = _gen;
+                _mark[current] = closedMark;
                 expandedCount++;
                 if (collectDebug)
                     _expandedIds.Add(current);
 
                 if (current == goalId)
-                    return Success(startId, goalId, expandedCount, collectDebug);
+                    return Success(startId, goalId, expandedCount, collectDebug, openMark);
 
                 int cx = current % _w;
                 int cy = current / _w;
@@ -95,17 +100,17 @@ namespace JPS.Pathfinding
                         continue;
 
                     int nbId = ny * _w + nx;
-                    if (_closedGen[nbId] == _gen)
+                    if (_mark[nbId] == closedMark)
                         continue;
 
                     long tentative = gCur + DirCost[i];
-                    bool firstSeen = _seenGen[nbId] != _gen;
+                    bool firstSeen = _mark[nbId] < openMark;
                     if (!firstSeen && tentative >= _g[nbId])
                         continue;
 
                     _g[nbId] = tentative;
-                    _seenGen[nbId] = _gen;
-                    _parent[nbId] = current;
+                    _mark[nbId] = openMark;
+                    _cameDir[nbId] = (sbyte)i;
 
                     if (collectDebug && firstSeen)
                         _generatedIds.Add(nbId);
@@ -114,10 +119,10 @@ namespace JPS.Pathfinding
                 }
             }
 
-            return Failure(expandedCount, collectDebug);
+            return Failure(expandedCount, collectDebug, openMark);
         }
 
-        private PathResult Success(int startId, int goalId, int expandedCount, bool collectDebug)
+        private PathResult Success(int startId, int goalId, int expandedCount, bool collectDebug, int openMark)
         {
             var path = ReconstructPath(startId, goalId);
 
@@ -133,7 +138,7 @@ namespace JPS.Pathfinding
             }
 
             var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints();
+            var frontier = FrontierPoints(openMark);
             return new PathResult
             {
                 Success = true,
@@ -145,13 +150,13 @@ namespace JPS.Pathfinding
             };
         }
 
-        private PathResult Failure(int expandedCount, bool collectDebug)
+        private PathResult Failure(int expandedCount, bool collectDebug, int openMark)
         {
             if (!collectDebug)
                 return new PathResult { ExpandedNodes = expandedCount, Message = $"A*：未找到路径（扩展 {expandedCount}）。" };
 
             var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints();
+            var frontier = FrontierPoints(openMark);
             return new PathResult
             {
                 Expanded = expanded,
@@ -161,12 +166,12 @@ namespace JPS.Pathfinding
             };
         }
 
-        /// <summary>前沿 = 已生成但搜索结束时仍未展开（仍在 open 里）的节点。</summary>
-        private List<(int X, int Y)> FrontierPoints()
+        /// <summary>前沿 = 已生成但仍未展开（mark 仍为 open）的节点。</summary>
+        private List<(int X, int Y)> FrontierPoints(int openMark)
         {
             var frontier = new List<(int X, int Y)>();
             foreach (int id in _generatedIds)
-                if (_closedGen[id] != _gen)
+                if (_mark[id] == openMark)
                     frontier.Add((id % _w, id / _w));
             return frontier;
         }
@@ -185,35 +190,41 @@ namespace JPS.Pathfinding
                 return;
 
             _w = map.Width;
-            _h = map.Height;
-            _size = _w * _h;
+            _size = map.Width * map.Height;
             _g = new long[_size];
-            _parent = new int[_size];
-            _seenGen = new int[_size];
-            _closedGen = new int[_size];
+            _cameDir = new sbyte[_size];
+            _mark = new int[_size];
             _gen = 0;
         }
 
+        /// <summary>
+        /// 代次自增。状态用 2·gen / 2·gen+1 编码，故每次自增 1 但有效区间是 2 个值；
+        /// 接近溢出时清零重来（实践中几乎不会触发）。
+        /// </summary>
         private void NextGeneration()
         {
             _gen++;
-            if (_gen != int.MaxValue)
+            if (_gen <= (int.MaxValue / 2) - 1)
                 return;
 
-            Array.Clear(_seenGen, 0, _seenGen.Length);
-            Array.Clear(_closedGen, 0, _closedGen.Length);
+            Array.Clear(_mark, 0, _mark.Length);
             _gen = 1;
         }
 
         private int Id(int x, int y) => y * _w + x;
 
+        /// <summary>沿“来向”从终点反推父格回溯到起点（A* 每步一格，无需补段）。</summary>
         private List<(int X, int Y)> ReconstructPath(int startId, int goalId)
         {
             var ids = new List<int> { goalId };
             int current = goalId;
             while (current != startId)
             {
-                current = _parent[current];
+                int dir = _cameDir[current];
+                var (dx, dy) = JpsDirections.All[dir];
+                int cx = current % _w;
+                int cy = current / _w;
+                current = (cy - dy) * _w + (cx - dx);   // 父格 = 当前格 - 来向位移
                 ids.Add(current);
             }
             ids.Reverse();

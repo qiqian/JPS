@@ -18,6 +18,11 @@ public sealed class GridControl : Control
     private bool _isPainting;
     private bool _eraseObstacle;
 
+    // 当前选中的起点/终点（视图/编辑状态，作为寻路查询参数；不属于地图模型）
+    private int _startX = -1, _startY = -1, _endX = -1, _endY = -1;
+    private bool HasStart => _startX >= 0 && _startY >= 0;
+    private bool HasEnd => _endX >= 0 && _endY >= 0;
+
     // 纯 UI 层快照：寻路前各方向 clean 状态，用于区分“本次寻路新更新”的跳点方向
     private bool[] _cleanBefore = [];
     private int _snapW, _snapH;
@@ -49,7 +54,7 @@ public sealed class GridControl : Control
                  ControlStyles.OptimizedDoubleBuffer, true);
 
         BackColor = Color.FromArgb(60, 60, 64);
-        _map = new GridMap(80, 50, _cellSize);
+        _map = new GridMap(80, 50);
         _overlay.SetWidth(_map.Width);
     }
 
@@ -68,6 +73,7 @@ public sealed class GridControl : Control
     {
         EnsureGrid();
         _map.ClearAll();
+        _startX = _startY = _endX = _endY = -1;
         _overlay.Clear();
         Invalidate();
         NotifyStatus("地图已清除。");
@@ -78,10 +84,10 @@ public sealed class GridControl : Control
         EnsureGrid();
         var data = new MapData { Width = _map.Width, Height = _map.Height };
 
-        if (_map.HasStart)
-            data.Start = new PointData { X = _map.StartX, Y = _map.StartY };
-        if (_map.HasEnd)
-            data.End = new PointData { X = _map.EndX, Y = _map.EndY };
+        if (HasStart)
+            data.Start = new PointData { X = _startX, Y = _startY };
+        if (HasEnd)
+            data.End = new PointData { X = _endX, Y = _endY };
 
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
@@ -99,10 +105,17 @@ public sealed class GridControl : Control
         foreach (var o in data.Obstacles)
             _map.SetBlocked(o.X, o.Y, true);   // 越界坐标会被 SetBlocked 自动忽略
 
-        if (data.Start != null)
-            _map.SetStart(data.Start.X, data.Start.Y);
-        if (data.End != null)
-            _map.SetEnd(data.End.X, data.End.Y);
+        _startX = _startY = _endX = _endY = -1;
+        if (data.Start != null && _map.IsWalkable(data.Start.X, data.Start.Y))
+        {
+            _startX = data.Start.X;
+            _startY = data.Start.Y;
+        }
+        if (data.End != null && _map.IsWalkable(data.End.X, data.End.Y))
+        {
+            _endX = data.End.X;
+            _endY = data.End.Y;
+        }
 
         _overlay.Clear();
         Invalidate();
@@ -113,7 +126,7 @@ public sealed class GridControl : Control
         EnsureGrid();
         SnapshotCleanState();   // 记录寻路前的 clean 状态，供 UI 区分本次新更新的方向
         var sw = Stopwatch.StartNew();
-        var result = _jps.FindPath(_map);
+        var result = _jps.FindPath(_map, (_startX, _startY), (_endX, _endY));
         sw.Stop();
 
         _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
@@ -128,7 +141,7 @@ public sealed class GridControl : Control
     {
         EnsureGrid();
         var sw = Stopwatch.StartNew();
-        var result = _astar.FindPath(_map);
+        var result = _astar.FindPath(_map, (_startX, _startY), (_endX, _endY));
         sw.Stop();
 
         _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
@@ -221,7 +234,7 @@ public sealed class GridControl : Control
         if (_map.Width == cols && _map.Height == rows)
             return;
 
-        var next = new GridMap(cols, rows, _cellSize);
+        var next = new GridMap(cols, rows);
 
         int copyW = Math.Min(cols, _map.Width);
         int copyH = Math.Min(rows, _map.Height);
@@ -230,15 +243,15 @@ public sealed class GridControl : Control
                 if (_map.IsBlocked(x, y))
                     next.SetBlocked(x, y, true);
 
-        if (_map.HasStart && next.InBounds(_map.StartX, _map.StartY))
-            next.SetStart(_map.StartX, _map.StartY);
-
-        if (_map.HasEnd && next.InBounds(_map.EndX, _map.EndY))
-            next.SetEnd(_map.EndX, _map.EndY);
-
         _map = next;
         _overlay.SetWidth(_map.Width);
         _overlay.Clear();   // 网格尺寸变化，旧的搜索结果失效
+
+        // 起终点若超出新网格或落到阻挡上则清除
+        if (HasStart && !_map.IsWalkable(_startX, _startY))
+            _startX = _startY = -1;
+        if (HasEnd && !_map.IsWalkable(_endX, _endY))
+            _endX = _endY = -1;
     }
 
     private void PaintObstacleBlock(int cx, int cy)
@@ -253,6 +266,14 @@ public sealed class GridControl : Control
                 _map.SetBlocked(x, y, true);
     }
 
+    private void ClearMarkersOnObstacles()
+    {
+        if (HasStart && !_map.IsWalkable(_startX, _startY))
+            _startX = _startY = -1;
+        if (HasEnd && !_map.IsWalkable(_endX, _endY))
+            _endX = _endY = -1;
+    }
+
     private void ApplyEdit(int x, int y)
     {
         // 任何编辑都会让上一次的搜索结果失效，清掉可视化叠加
@@ -262,22 +283,33 @@ public sealed class GridControl : Control
         {
             case EditMode.BrushObstacle:
                 if (_eraseObstacle)
+                {
                     _map.SetBlocked(x, y, false);   // 点在阻挡上：只清 1 格
+                }
                 else
+                {
                     PaintObstacleBlock(x, y);        // 点在空地：刷 2×2 阻挡
+                    ClearMarkersOnObstacles();       // 起终点被刷成阻挡则清除
+                }
                 Invalidate();
                 break;
 
             case EditMode.SetStart:
-                _map.SetStart(x, y);
-                Invalidate();
-                NotifyStatus($"起点：({x}, {y})");
+                if (_map.IsWalkable(x, y))
+                {
+                    _startX = x; _startY = y;
+                    Invalidate();
+                    NotifyStatus($"起点：({x}, {y})");
+                }
                 break;
 
             case EditMode.SetEnd:
-                _map.SetEnd(x, y);
-                Invalidate();
-                NotifyStatus($"终点：({x}, {y})");
+                if (_map.IsWalkable(x, y))
+                {
+                    _endX = x; _endY = y;
+                    Invalidate();
+                    NotifyStatus($"终点：({x}, {y})");
+                }
                 break;
         }
     }
@@ -392,7 +424,7 @@ public sealed class GridControl : Control
             {
                 if (!_map.IsWalkable(x, y))
                     continue;
-                if ((x == _map.StartX && y == _map.StartY) || (x == _map.EndX && y == _map.EndY))
+                if ((x == _startX && y == _startY) || (x == _endX && y == _endY))
                     continue;   // 起终点格让位给 S/G 标记
 
                 float cx = x * cs + cs / 2f;
@@ -432,11 +464,11 @@ public sealed class GridControl : Control
 
     private void DrawMarkers(Graphics g, int cs)
     {
-        if (_map.HasStart)
-            DrawMarker(g, _map.StartX, _map.StartY, cs, StartColor, "S");
+        if (HasStart)
+            DrawMarker(g, _startX, _startY, cs, StartColor, "S");
 
-        if (_map.HasEnd)
-            DrawMarker(g, _map.EndX, _map.EndY, cs, EndColor, "G");
+        if (HasEnd)
+            DrawMarker(g, _endX, _endY, cs, EndColor, "G");
     }
 
     private static void DrawMarker(Graphics g, int x, int y, int cs, Color color, string label)
