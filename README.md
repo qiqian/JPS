@@ -256,18 +256,30 @@ dotnet run --project JPS/JPS.csproj
 
 ## 项目结构
 
+分三层：**Models（纯地形模型）** / **Pathfinding（算法核心，UI 无关、可移植到 Unity 2022）** / **Controls + Form1（WinForms 界面）**。
+
 ```
 JPS/
-├── Models/
-│   ├── GridMap.cs           # 网格地图、障碍、版本号、可视化叠加层
-│   └── MapData.cs           # JSON 存档模型
-├── Pathfinding/
-│   ├── JpsDirections.cs     # 8 方向、整数代价、octile 启发
-│   ├── JpsRules.cs          # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
-│   ├── JpsPathfinder.cs     # JPS：惰性正交跳点 memo + 经典对角扫描
-│   ├── AStarPathfinder.cs   # A* 对照
-│   └── PathSmoother.cs      # 前向增量视线拉直平滑
-├── Controls/
-│   └── GridControl.cs       # 网格绘制、交互、可视化（含跳点 dirty/clean 点）
-└── Form1.cs / Form1.Designer.cs  # 工具栏、图例、存档对话框
+├── Models/                      # 纯模型层（无 UI 依赖）
+│   ├── GridMap.cs               # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
+│   └── MapData.cs               # JSON 存档模型（阻挡 + 起终点）
+│
+├── Pathfinding/                 # 算法核心（C# 9 / Unity 2022 友好，整数寻路）
+│   ├── JpsDirections.cs         # 8 方向、整数代价(横1000/斜1414)、octile 启发
+│   ├── JpsRules.cs              # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
+│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；Dir4 内联值类型）
+│   ├── JpsPathfinder.cs         # JPS：查/更新惰性正交缓存 + 经典对角扫描
+│   ├── AStarPathfinder.cs       # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
+│   ├── PathSmoother.cs          # 前向增量视线拉直平滑（Vector2 按构建条件编译）
+│   └── MinHeap.cs               # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
+│
+├── Controls/                    # 视图/交互层（WinForms）
+│   ├── GridControl.cs           # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
+│   ├── SearchOverlay.cs         # 寻路可视化叠加（与模型分离的视图状态）
+│   └── EditMode.cs              # 编辑模式枚举（刷阻挡 / 起点 / 终点）
+│
+├── Form1.cs / Form1.Designer.cs # 工具栏、图例、存档对话框
+└── Program.cs                   # 入口
 ```
+
+> **可移植性**：`Models/` + `Pathfinding/` 不依赖 WinForms（仅用 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`），可整体拷入 Unity 2022 使用；`Controls/` + `Form1` 是桌面演示界面，不进 Unity。
