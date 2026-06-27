@@ -1,18 +1,29 @@
-namespace JPS
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using JPS.Models;
+using JPS.Pathfinding;
+
+namespace JPS.Benchmark
 {
+    /// <summary>
+    /// 命令行工具：
+    ///   dotnet run -- bench   单线程 JPS / A* 性能基准（test2.json）
+    ///   dotnet run -- mt      多线程共享缓存正确性压测（需在 JPS.Core 定义 JPS_CONCURRENT_CACHE）
+    /// </summary>
     internal static class Program
     {
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
-        [STAThread]
-        static void Main(string[] args)
+        static int Main(string[] args)
         {
-            if (args.Length >= 1 && args[0] == "mt") { MtTest(); return; }
-            if (args.Length >= 1 && args[0] == "bench") { Bench(); return; }
-
-            ApplicationConfiguration.Initialize();
-            Application.Run(new Form1());
+            string cmd = args.Length >= 1 ? args[0] : "bench";
+            switch (cmd)
+            {
+                case "bench": Bench(); return 0;
+                case "mt": MtTest(); return 0;
+                default:
+                    Console.WriteLine("用法: dotnet run -- [bench|mt]");
+                    return 1;
+            }
         }
 
         private static long PathCost(List<(int X, int Y)> p)
@@ -21,7 +32,7 @@ namespace JPS
             for (int i = 1; i < p.Count; i++)
             {
                 int dx = Math.Abs(p[i].X - p[i - 1].X), dy = Math.Abs(p[i].Y - p[i - 1].Y);
-                c += (dx != 0 && dy != 0) ? JPS.Pathfinding.JpsDirections.DiagonalCost : JPS.Pathfinding.JpsDirections.CardinalCost;
+                c += (dx != 0 && dy != 0) ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost;
             }
             return c;
         }
@@ -29,28 +40,28 @@ namespace JPS
         private static string FindFile(string name)
         {
             string? dir = AppContext.BaseDirectory;
-            for (int i = 0; i < 8 && dir != null; i++)
+            for (int i = 0; i < 10 && dir != null; i++)
             {
-                string p = System.IO.Path.Combine(dir, name);
-                if (System.IO.File.Exists(p)) return p;
-                dir = System.IO.Directory.GetParent(dir)?.FullName;
+                string p = Path.Combine(dir, name);
+                if (File.Exists(p)) return p;
+                dir = Directory.GetParent(dir)?.FullName;
             }
-            if (System.IO.File.Exists(name)) return name;
-            throw new System.IO.FileNotFoundException(name);
+            if (File.Exists(name)) return name;
+            throw new FileNotFoundException(name);
         }
 
         private static void Bench()
         {
-            var sb = new System.Text.StringBuilder();
+            var sb = new StringBuilder();
             string path = FindFile("test2.json");
-            var data = System.Text.Json.JsonSerializer.Deserialize<JPS.Models.MapData>(System.IO.File.ReadAllText(path))!;
+            var data = JsonSerializer.Deserialize<MapData>(File.ReadAllText(path))!;
             int w = data.Width, h = data.Height;
-            var map = new JPS.Models.GridMap(w, h);
+            var map = new GridMap(w, h);
             foreach (var o in data.Obstacles) map.SetBlocked(o.X, o.Y, true);
 
-            var system = new JPS.Pathfinding.JpsSystem(map);
-            var jps = new JPS.Pathfinding.JpsPathfinder();
-            var astar = new JPS.Pathfinding.AStarPathfinder();
+            var system = new JpsSystem(map);
+            var jps = new JpsPathfinder();
+            var astar = new AStarPathfinder();
             var rng = new Random(123);
             (int X, int Y) Free() { for (int k = 0; k < 9999; k++) { int x = rng.Next(w), y = rng.Next(h); if (map.IsWalkable(x, y)) return (x, y); } return (-1, -1); }
 
@@ -66,12 +77,12 @@ namespace JPS
             for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g, false); aExp += r.ExpandedNodes; }
 
             // 无复用基线：每次查询前翻转一个可走格(改回原状)使 Version 跳变→整表 dirty，
-            // 模拟"每个 finder 各持私有冷缓存、彼此不预热"的总开销。
+            // 模拟“每个 finder 各持私有冷缓存、彼此不预热”的总开销。
             var (tx, ty) = qs[0].s;   // 一个已知可走格
             void ForceDirty() { map.SetBlocked(tx, ty, true); map.SetBlocked(tx, ty, false); system.Sync(); }
 
             double jColdMs = double.MaxValue, jWarmMs = double.MaxValue, aMs = double.MaxValue;
-            var sw = new System.Diagnostics.Stopwatch();
+            var sw = new Stopwatch();
             for (int rep = 0; rep < 6; rep++)
             {
                 GC.Collect(); GC.WaitForPendingFinalizers();
@@ -97,22 +108,21 @@ namespace JPS
             sb.AppendLine($"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
             sb.AppendLine($"  缓存无复用/复用:  无复用={jColdMs / Q * 1000:F1}us  复用={jWarmMs / Q * 1000:F1}us  (加速={jColdMs / Math.Max(0.001, jWarmMs):F2}x)");
             Console.WriteLine(sb.ToString());
-            System.IO.File.WriteAllText("bench_result.txt", sb.ToString());
         }
 
         private static void MtTest()
         {
             var rng = new Random(7);
             int w = 200, h = 200;
-            var map = new JPS.Models.GridMap(w, h);
+            var map = new GridMap(w, h);
             for (int i = 0; i < w * h * 0.2; i++) map.SetBlocked(rng.Next(w), rng.Next(h), true);
-            var system = new JPS.Pathfinding.JpsSystem(map);
+            var system = new JpsSystem(map);
             system.Sync();   // 并行前单线程同步一次
 
             (int X, int Y) Free() { for (int k = 0; k < 500; k++) { int x = rng.Next(w), y = rng.Next(h); if (map.IsWalkable(x, y)) return (x, y); } return (-1, -1); }
 
             // 单线程用 A* 算 ground truth
-            var astar = new JPS.Pathfinding.AStarPathfinder();
+            var astar = new AStarPathfinder();
             const int Q = 3000;
             var pairs = new (int sx, int sy, int gx, int gy, long cost, bool ok)[Q];
             for (int i = 0; i < Q; i++)
@@ -126,7 +136,7 @@ namespace JPS
             int threads = 8, mismatches = 0;
             System.Threading.Tasks.Parallel.For(0, threads, _ =>
             {
-                var jps = new JPS.Pathfinding.JpsPathfinder();
+                var jps = new JpsPathfinder();
                 int local = 0;
                 for (int i = 0; i < Q; i++)
                 {
@@ -138,9 +148,7 @@ namespace JPS
                 System.Threading.Interlocked.Add(ref mismatches, local);
             });
 
-            string msg = $"多线程共享 cache：{threads} 线程 × {Q} 查询并行，与 A* 不一致 {mismatches}。";
-            Console.WriteLine(msg);
-            System.IO.File.WriteAllText("mt_result.txt", msg);
+            Console.WriteLine($"多线程共享 cache：{threads} 线程 × {Q} 查询并行，与 A* 不一致 {mismatches}。");
         }
     }
 }

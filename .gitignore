@@ -1,3 +1,9 @@
 /.vs
 JPS/obj
 JPS/bin
+/JPS.Benchmark/obj
+/JPS.Core/obj
+/JPS.Playground/obj
+/JPS.Benchmark/bin
+/JPS.Playground/bin
+/JPS.Core/bin

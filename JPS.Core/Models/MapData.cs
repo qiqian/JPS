@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace JPS.Models
 {
     public sealed class PointData

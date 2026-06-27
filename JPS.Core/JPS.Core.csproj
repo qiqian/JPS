@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    核心算法库（UI 无关、可移植到 Unity 2022）。
+    刻意锁定 netstandard2.1 + C# 9，与 Unity 2022 的运行时/语言版本对齐——
+    这样任何 net-only API 或 C#10+ 语法会在此被编译期拦截，保证源码可直接拷入 Unity。
+    （故不启用 ImplicitUsings：global using 需 C# 10，且 Unity 端需各文件自带 using。）
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>JPS</RootNamespace>
+    <AssemblyName>JPS.Core</AssemblyName>
+  </PropertyGroup>
+
+  <!-- 基准/压测项目需要访问内部的 JpsDirections 代价常量。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="JPS.Benchmark" />
+  </ItemGroup>
+
+</Project>

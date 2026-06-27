@@ -110,7 +110,7 @@ JPS 是对 A\* 在**均匀代价栅格**上的加速：它不改变最优性，�
       !walk(x, y-dy)  && walk(x+dx, y-dy)   → 强迫邻居 (x+dx, y-dy)
 ```
 
-> 实现见 [`JpsRules`](JPS/Pathfinding/JpsRules.cs)：`HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`。
+> 实现见 [`JpsRules`](JPS.Core/Pathfinding/JpsRules.cs)：`HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`。
 > ⚠️ 强迫邻居判定的方向必须与剪枝时实际探索的方向**严格一致**（看"前进方向 `x+dx`"而不是"身后 `x-dx`"），否则会漏掉真正的跳点导致找不到路——这是实现 JPS 最容易踩的坑之一。
 
 ### 4. 走直线与走斜线的扫描规则
@@ -193,7 +193,7 @@ flowchart TD
 - **跨查询复用**：两次障碍变化之间的多次寻路，会不断复用已洗白的跳点，越用越快——明显优于纯逐格扫描。
 - 用**世代计数器**而非 bool 数组，使"整体置脏"真正 O(1)（无需遍历清零）。
 
-> 实现见 [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs) 的 `CardinalDist`（惰性正交 memo）与 `DiagonalJump`（复用 memo 的经典对角扫描）。
+> 实现见 [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs) 的 `CardinalDist`（惰性正交 memo）与 `DiagonalJump`（复用 memo 的经典对角扫描）。
 
 ### 2. 静态 / 动态障碍的兼容设计
 
@@ -205,7 +205,7 @@ flowchart TD
 
 因此本项目**彻底统一为一种障碍**：
 
-- 只有**一种障碍** + 一个版本号 [`GridMap.Version`](JPS/Models/GridMap.cs)：任何增删 → `Version++` → 惰性跳点表整体置脏。
+- 只有**一种障碍** + 一个版本号 [`GridMap.Version`](JPS.Core/Models/GridMap.cs)：任何增删 → `Version++` → 惰性跳点表整体置脏。
 - 寻路 / 跳点表 / A\* 一视同仁地看 `IsWalkable`，不关心障碍"来源"。
 - 没有静态/动态两套逻辑、没有"动态障碍回退到经典扫描"的分支、没有手动预计算按钮——架构大幅简化。
 
@@ -225,7 +225,7 @@ flowchart TD
 - **视线检测**用整数 supercover 直线（与寻路同样整数、同样允许斜穿拐角），逐格判断线段是否穿障碍。
 - **整数 / 浮点边界**：寻路全程整数；**浮点只出现在最终路径平滑与绘制**。平滑结果以连续坐标（格中心 = `cx+0.5`）输出，用红色折线叠加在原路径之上。
 
-> 实现见 [`PathSmoother`](JPS/Pathfinding/PathSmoother.cs)。
+> 实现见 [`PathSmoother`](JPS.Core/Pathfinding/PathSmoother.cs)。
 > 注：JPS 与 A\* 即便代价相同，也可能走不同的等价最优栅格路；平滑是依赖输入的贪心算法，所以两者平滑结果可能不同——这是正常现象，非 bug。
 
 ### 4. 无锁多线程：共享惰性缓存的并行寻路
@@ -235,7 +235,7 @@ flowchart TD
 #### 设计思路
 
 **1) 拆分"共享只读态"与"线程私有态"。**
-[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs) 持有 `GridMap` + `JumpPointCache`（**共享**）；每个 [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs) 只持有自己的逐节点搜索状态（`g / mark / open / parent …`，**线程私有**）。于是并行寻路 = 多个私有 pathfinder 各跑各的，唯一的交汇点就是那份共享缓存。
+[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs) 持有 `GridMap` + `JumpPointCache`（**共享**）；每个 [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs) 只持有自己的逐节点搜索状态（`g / mark / open / parent …`，**线程私有**）。于是并行寻路 = 多个私有 pathfinder 各跑各的，唯一的交汇点就是那份共享缓存。
 
 ```mermaid
 flowchart TD
@@ -271,7 +271,7 @@ flowchart TD
 | **单线程极速**（默认） | 不定义任何符号 | 工具演示 / 单线程调用，`Volatile` 全部消失（退回普通读写），零额外开销 |
 | **无锁多线程** | 定义条件编译符号 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路 |
 
-开启多线程安全模式——在 `JPS/JPS.csproj` 的 `<PropertyGroup>` 中加入：
+开启多线程安全模式——在 `JPS.Core/JPS.Core.csproj` 的 `<PropertyGroup>` 中加入（或命令行 `dotnet ... /p:DefineConstants=JPS_CONCURRENT_CACHE`，会自动传递到被引用的 Core）：
 
 ```xml
 <DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
@@ -291,7 +291,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ 并行期间不修改 map
 ```
 
-> **正确性验证**：开启 `JPS_CONCURRENT_CACHE` 后，用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。命令行 `dotnet run -- mt` 可复现该压测（见 [`Program.cs`](JPS/Program.cs) 的 `MtTest`）。
+> **正确性验证**：开启 `JPS_CONCURRENT_CACHE` 后，用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。`dotnet run --project JPS.Benchmark /p:DefineConstants=JPS_CONCURRENT_CACHE -- mt` 可复现该压测（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `MtTest`）。
 
 ---
 
@@ -336,7 +336,7 @@ Parallel.For(0, threads, _ =>
 | 父信息 | A\*: 来向 `sbyte`；JPS: 来向 `sbyte` + 步数 `short` | 1 | 3 | 每实例（线程私有） |
 | 访问状态 | `int`（`2·gen` / `2·gen+1` 合并 seen/closed） | 4 | 4 | 每实例（线程私有） |
 | **搜索态小计** | | **13 B/格** | **15 B/格** | 每实例 |
-| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **每地图共享**（[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs)） |
+| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **每地图共享**（[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)） |
 | **合计** | | **13 B/格** | **27 B/格** | |
 
 - **单实例**：JPS 约为 A\* 的 **~2.1×**（多出的 14 B/格几乎全是那张 12 B/格的正交跳点缓存——这是用空间换"跳跃 O(1)"的核心代价）。
@@ -347,13 +347,13 @@ Parallel.For(0, threads, _ =>
   | 1 | 0.52 MB | 1.08 MB（0.60 MB 搜索态 + 0.48 MB 共享缓存） |
   | 8 | 4.16 MB | 5.28 MB（4.80 MB 搜索态 + 0.48 MB 共享缓存） |
 
-- 地图本身（[`GridMap._blocked`](JPS/Models/GridMap.cs)）位压缩到 1 bit/格（≈0.125 B/格），两者共享，可忽略。
-- 开放列表（[`MinHeap`](JPS/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
+- 地图本身（[`GridMap._blocked`](JPS.Core/Models/GridMap.cs)）位压缩到 1 bit/格（≈0.125 B/格），两者共享，可忽略。
+- 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
 - 可视化用的 `_scanGen`（4 B/格）仅在开启调试可视化（`collectDebug`）时才分配，纯算法运行不占用。
 
 ### JPS vs A\* 性能开销对比（估算）
 
-JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release -- bench` 在 **`test2.json`（137×68 结构化地图，墙体连续，贴近真实关卡）** 上跑 **8000 组随机起终点、取多轮最小值** 的实测：
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**。决定性指标是**扩展节点数**——它直接决定堆操作次数与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- bench` 在 **`test2.json`（137×68 结构化地图，墙体连续，贴近真实关卡）** 上跑 **8000 组随机起终点、取多轮最小值** 的实测：
 
 | 指标（平均/次） | JPS | A\* | 对比 |
 |---|---|---|---|
@@ -370,7 +370,7 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 - **地图越大越占便宜**：A\* 的工作量 ≈ 可达面积（∝ N），JPS ≈ 跳点数（增长慢得多）。本图只有 137×68；放大到上千边长时 JPS 的相对优势进一步拉开。
 - **单次扩展 JPS 更贵但值得 / 堆操作更少**：JPS 每次扩展要剪枝 + 跳跃扫描，单步比 A\* 的"看 8 邻居"贵；但扩展次数锐减 ~51×、入队的只有跳点（堆几乎"清爽"，A\* 的入队 ≈ 扩展数×邻居数），综合下来净赢一个量级。
 
-> 复现：`dotnet run -c Release -- bench`（见 [`Program.cs`](JPS/Program.cs) 的 `Bench`，地图取仓库根目录的 `test2.json`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
+> 复现：`dotnet run -c Release --project JPS.Benchmark -- bench`（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `Bench`，地图取仓库根目录的 `test2.json`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
 
 ---
 
@@ -379,10 +379,10 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 需要 .NET（Windows，WinForms）。
 
 ```powershell
-dotnet run --project JPS/JPS.csproj
+dotnet run --project JPS.Playground
 ```
 
-界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文）——工具栏按钮、提示、图例、状态栏、存档对话框一并切换（见 [`Loc`](JPS/Controls/Loc.cs)）。
+界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文）——工具栏按钮、提示、图例、状态栏、存档对话框一并切换（见 [`Loc`](JPS.Playground/Controls/Loc.cs)）。
 
 工具栏按钮（中文标签 · 英文标签）：
 
@@ -405,37 +405,47 @@ dotnet run --project JPS/JPS.csproj
 
 ## 项目结构
 
-分三层：**Models（纯地形模型）** / **Pathfinding（算法核心，UI 无关、可移植到 Unity 2022）** / **Controls + Form1（WinForms 界面）**。
+解决方案 `JPS.slnx` 拆成**三个职责清晰的工程**：
+
+| 工程 | 类型 / 目标框架 | 职责 |
+|---|---|---|
+| **JPS.Core** | 类库 · `netstandard2.1` / C# 9 | 纯算法核心，UI 无关、可直接拷入 **Unity 2022** |
+| **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core |
+| **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core |
 
 ```
-JPS/
-├── Models/                      # 纯模型层（无 UI 依赖）
-│   ├── GridMap.cs               # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
-│   └── MapData.cs               # JSON 存档模型（阻挡 + 起终点）
+JPS.slnx                         # 解决方案
 │
-├── Pathfinding/                 # 算法核心（C# 9 / Unity 2022 友好，整数寻路）
-│   ├── JpsDirections.cs         # 8 方向、整数代价(横1000/斜1414)、octile 启发
-│   ├── JpsRules.cs              # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
-│   ├── JumpPointCache.cs        # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
-│   ├── JpsSystem.cs             # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
-│   ├── JpsPathfinder.cs         # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
-│   ├── AStarPathfinder.cs       # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
-│   ├── PathSmoother.cs          # 前向增量视线拉直平滑（Vector2 按构建条件编译）
-│   └── MinHeap.cs               # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
+├── JPS.Core/                    # ① 算法核心（netstandard2.1 / C# 9，整数寻路，无 UI 依赖）
+│   ├── Models/
+│   │   ├── GridMap.cs           # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
+│   │   └── MapData.cs           # JSON 存档模型（阻挡 + 起终点）
+│   └── Pathfinding/
+│       ├── JpsDirections.cs     # 8 方向、整数代价(横1000/斜1414)、octile 启发
+│       ├── JpsRules.cs          # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
+│       ├── JumpPointCache.cs    # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
+│       ├── JpsSystem.cs         # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
+│       ├── JpsPathfinder.cs     # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
+│       ├── AStarPathfinder.cs   # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
+│       ├── PathSmoother.cs      # 前向增量视线拉直平滑（Vector2 按构建条件编译）
+│       └── MinHeap.cs           # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
 │
-├── Controls/                    # 视图/交互层（WinForms）
-│   ├── GridControl.cs           # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
-│   ├── SearchOverlay.cs         # 寻路可视化叠加（与模型分离的视图状态）
-│   ├── EditMode.cs              # 编辑模式枚举（刷阻挡 / 起点 / 终点）
-│   └── Loc.cs                   # 界面本地化（按系统语言中/英二选一，仅 UI 层）
+├── JPS.Playground/              # ② WinForms 演示界面（引用 Core）
+│   ├── Controls/
+│   │   ├── GridControl.cs       # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
+│   │   ├── SearchOverlay.cs     # 寻路可视化叠加（与模型分离的视图状态）
+│   │   ├── EditMode.cs          # 编辑模式枚举（刷阻挡 / 起点 / 终点）
+│   │   └── Loc.cs               # 界面本地化（按系统语言中/英二选一，仅 UI 层）
+│   ├── Form1.cs / Form1.Designer.cs   # 工具栏、图例、存档对话框
+│   └── Program.cs               # WinForms 入口
 │
-├── Form1.cs / Form1.Designer.cs # 工具栏、图例、存档对话框
-└── Program.cs                   # 入口（含命令行工具：`-- mt` 多线程并发压测；`-- bench` JPS/A* 性能基准）
+└── JPS.Benchmark/               # ③ 命令行基准 / 压测（引用 Core）
+    └── Program.cs               # `-- bench` JPS/A* 性能基准；`-- mt` 多线程并发正确性压测
 ```
 
-> **可移植性**：`Models/` + `Pathfinding/` 不依赖 WinForms（仅用 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`），可整体拷入 Unity 2022 使用；`Controls/` + `Form1` 是桌面演示界面，不进 Unity。
+> **可移植性**：**JPS.Core** 锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
 >
-> **并发**：多线程共享同一 `JpsSystem` 并行寻路时，定义符号 `JPS_CONCURRENT_CACHE` 即开启 [无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)；不定义则为单线程极速模式（默认）。
+> **并发**：多线程共享同一 `JpsSystem` 并行寻路时，给 **JPS.Core** 定义符号 `JPS_CONCURRENT_CACHE` 即开启 [无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)；不定义则为单线程极速模式（默认）。
 
 ---
 
@@ -511,7 +521,7 @@ rule: !walk(x-dx, y)  && walk(x-dx, y+dy)   → forced neighbor (x-dx, y+dy)
       !walk(x, y-dy)  && walk(x+dx, y-dy)   → forced neighbor (x+dx, y-dy)
 ```
 
-> See [`JpsRules`](JPS/Pathfinding/JpsRules.cs): `HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`.
+> See [`JpsRules`](JPS.Core/Pathfinding/JpsRules.cs): `HasCardinalForcedNeighbor` / `HasDiagonalForcedNeighbor`.
 > ⚠️ The direction used for forced-neighbor detection must **exactly match** the direction actually explored during pruning (look at the "forward" `x+dx`, not "behind" `x-dx`), otherwise real jump points are missed and no path is found — one of the easiest JPS pitfalls.
 
 ### 4. Straight and Diagonal Scanning
@@ -592,7 +602,7 @@ flowchart TD
 - **Cross-query reuse:** between two obstacle changes, multiple searches keep reusing whitened jump points, getting faster the more they run — clearly better than pure per-cell scanning.
 - A **generation counter** rather than a bool array makes "bulk invalidate" truly O(1) (no clearing pass).
 
-> See `CardinalDist` (lazy cardinal memo) and `DiagonalJump` (classic diagonal scan reusing the memo) in [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs).
+> See `CardinalDist` (lazy cardinal memo) and `DiagonalJump` (classic diagonal scan reusing the memo) in [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs).
 
 ### 2. Unified Obstacle Model
 
@@ -604,7 +614,7 @@ But here the jump table is already the [lazy update from the previous section](#
 
 So this project **unifies everything into a single obstacle type**:
 
-- Only **one obstacle type** + one version number [`GridMap.Version`](JPS/Models/GridMap.cs): any add/remove → `Version++` → the lazy jump table is bulk-invalidated.
+- Only **one obstacle type** + one version number [`GridMap.Version`](JPS.Core/Models/GridMap.cs): any add/remove → `Version++` → the lazy jump table is bulk-invalidated.
 - Pathfinding / jump table / A\* all just look at `IsWalkable`, indifferent to an obstacle's "origin".
 - No dual static/dynamic logic, no "dynamic obstacle falls back to classic scan" branch, no manual precompute button — the architecture is greatly simplified.
 
@@ -624,7 +634,7 @@ Grid pathfinding yields a "cell-hugging polyline" that needs smoothing into a mo
 - **Line-of-sight check** uses an integer supercover line (same integer math as pathfinding, same corner-cutting allowance), testing cell-by-cell whether the segment crosses an obstacle.
 - **Integer / float boundary:** pathfinding is all-integer; **floats appear only in the final path smoothing and drawing**. The smoothed result is output as continuous coordinates (cell center = `cx+0.5`) and overlaid as a red polyline on the original path.
 
-> See [`PathSmoother`](JPS/Pathfinding/PathSmoother.cs).
+> See [`PathSmoother`](JPS.Core/Pathfinding/PathSmoother.cs).
 > Note: even with identical cost, JPS and A\* may take different equivalent-optimal grid paths; smoothing is an input-dependent greedy algorithm, so their smoothed results can differ — this is normal, not a bug.
 
 ### 4. Lock-Free Multithreading
@@ -634,7 +644,7 @@ Many scenarios (e.g. a server pathfinding for hundreds/thousands of units at onc
 #### Design
 
 **1) Split "shared read-only state" from "thread-private state".**
-[`JpsSystem`](JPS/Pathfinding/JpsSystem.cs) holds `GridMap` + `JumpPointCache` (**shared**); each [`JpsPathfinder`](JPS/Pathfinding/JpsPathfinder.cs) holds only its own per-node search state (`g / mark / open / parent …`, **thread-private**). So parallel pathfinding = many private pathfinders running independently, with the shared cache as their only meeting point.
+[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs) holds `GridMap` + `JumpPointCache` (**shared**); each [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs) holds only its own per-node search state (`g / mark / open / parent …`, **thread-private**). So parallel pathfinding = many private pathfinders running independently, with the shared cache as their only meeting point.
 
 ```mermaid
 flowchart TD
@@ -670,7 +680,7 @@ In other words: multiple JPS finders **warm the shared cache for each other** �
 | **Single-thread max speed** (default) | define no symbol | tool demo / single-threaded calls; `Volatile` calls vanish (plain read/write), zero overhead |
 | **Lock-free multithreading** | define the compile symbol `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel |
 
-Enable thread-safe mode — add to the `<PropertyGroup>` of `JPS/JPS.csproj`:
+Enable thread-safe mode — add to the `<PropertyGroup>` of `JPS.Core/JPS.Core.csproj` (or pass `/p:DefineConstants=JPS_CONCURRENT_CACHE` on the CLI, which propagates to the referenced Core):
 
 ```xml
 <DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
@@ -690,7 +700,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ do not modify the map during parallel runs
 ```
 
-> **Correctness check:** with `JPS_CONCURRENT_CACHE` enabled, 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run -- mt` (see `MtTest` in [`Program.cs`](JPS/Program.cs)).
+> **Correctness check:** with `JPS_CONCURRENT_CACHE` enabled, 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run --project JPS.Benchmark /p:DefineConstants=JPS_CONCURRENT_CACHE -- mt` (see `MtTest` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)).
 
 ## III. Visualization
 
@@ -731,7 +741,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 | parent info | A\*: came-dir `sbyte`; JPS: came-dir `sbyte` + steps `short` | 1 | 3 | per instance (thread-private) |
 | visit state | `int` (`2·gen` / `2·gen+1` merged seen/closed) | 4 | 4 | per instance (thread-private) |
 | **search-state subtotal** | | **13 B/cell** | **15 B/cell** | per instance |
-| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **shared per map** ([`JpsSystem`](JPS/Pathfinding/JpsSystem.cs)) |
+| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **shared per map** ([`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)) |
 | **total** | | **13 B/cell** | **27 B/cell** | |
 
 - **Single instance:** JPS is about **~2.1×** A\* (the extra 14 B/cell is almost entirely the 12 B/cell cardinal jump cache — the core space-for-"O(1) jump" trade-off).
@@ -742,13 +752,13 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
   | 1 | 0.52 MB | 1.08 MB (0.60 MB search state + 0.48 MB shared cache) |
   | 8 | 4.16 MB | 5.28 MB (4.80 MB search state + 0.48 MB shared cache) |
 
-- The map itself ([`GridMap._blocked`](JPS/Models/GridMap.cs)) is bit-packed to 1 bit/cell (≈0.125 B/cell), shared by both, negligible.
-- The open list ([`MinHeap`](JPS/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
+- The map itself ([`GridMap._blocked`](JPS.Core/Models/GridMap.cs)) is bit-packed to 1 bit/cell (≈0.125 B/cell), shared by both, negligible.
+- The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
 - The visualization `_scanGen` (4 B/cell) is allocated only when debug visualization (`collectDebug`) is on; pure algorithm runs don't use it.
 
 ### JPS vs A\* Performance (Estimate)
 
-JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is measured by `dotnet run -c Release -- bench` on **`test2.json` (137×68 structured map, continuous walls, close to a real level)** over **8000 random start/goal pairs, min over multiple rounds**:
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"**. The decisive metric is **expanded-node count** — it directly drives heap-op count and total work. The table below is measured by `dotnet run -c Release --project JPS.Benchmark -- bench` on **`test2.json` (137×68 structured map, continuous walls, close to a real level)** over **8000 random start/goal pairs, min over multiple rounds**:
 
 | Metric (avg/query) | JPS | A\* | Ratio |
 |---|---|---|---|
@@ -765,17 +775,17 @@ Interpretation and estimation notes:
 - **Bigger maps pay off more:** A\*'s work ≈ reachable area (∝ N), JPS ≈ jump-point count (grows far slower). This map is only 137×68; at thousand-cell sides JPS's relative advantage widens further.
 - **JPS expansions cost more but worth it / fewer heap ops:** each JPS expansion does pruning + jump scanning, costlier than A\*'s "look at 8 neighbors"; but expansions drop ~51× and only jump points are enqueued (heap stays "clean", vs A\*'s enqueues ≈ expansions × neighbors), netting an order-of-magnitude win.
 
-> Reproduce: `dotnet run -c Release -- bench` (see `Bench` in [`Program.cs`](JPS/Program.cs); the map is `test2.json` at the repo root). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
+> Reproduce: `dotnet run -c Release --project JPS.Benchmark -- bench` (see `Bench` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs); the map is `test2.json` at the repo root). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
 
 ## Run
 
 Requires .NET (Windows, WinForms).
 
 ```powershell
-dotnet run --project JPS/JPS.csproj
+dotnet run --project JPS.Playground
 ```
 
-The UI **auto-selects its language from the system locale** — Chinese on `zh*` systems, English otherwise — so toolbar buttons, tooltips, the legend, the status bar and the save/load dialogs all switch accordingly (see [`Loc`](JPS/Controls/Loc.cs)).
+The UI **auto-selects its language from the system locale** — Chinese on `zh*` systems, English otherwise — so toolbar buttons, tooltips, the legend, the status bar and the save/load dialogs all switch accordingly (see [`Loc`](JPS.Playground/Controls/Loc.cs)).
 
 Toolbar buttons (English label · Chinese label):
 
@@ -796,37 +806,47 @@ The legend (between the toolbar and the grid) maps every overlay color to its me
 
 ## Project Structure
 
-Three layers: **Models (pure terrain model)** / **Pathfinding (algorithm core, UI-agnostic, portable to Unity 2022)** / **Controls + Form1 (WinForms UI)**.
+The `JPS.slnx` solution splits into **three clearly-scoped projects**:
+
+| Project | Type / TFM | Responsibility |
+|---|---|---|
+| **JPS.Core** | class library · `netstandard2.1` / C# 9 | pure algorithm core, UI-agnostic, drops straight into **Unity 2022** |
+| **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core |
+| **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core |
 
 ```
-JPS/
-├── Models/                      # Pure model layer (no UI dependency)
-│   ├── GridMap.cs               # Pure terrain: size + bit-packed obstacles (ulong[]) + version
-│   └── MapData.cs               # JSON save model (obstacles + start/goal)
+JPS.slnx                         # solution
 │
-├── Pathfinding/                 # Algorithm core (C# 9 / Unity 2022 friendly, integer pathfinding)
-│   ├── JpsDirections.cs         # 8 directions, integer cost (1000/1414), octile heuristic
-│   ├── JpsRules.cs              # Jump-point / forced-neighbor rules
-│   ├── JumpPointCache.cs        # Lazy cardinal jump cache (generation-stamp bulk invalidate; Volatile publish gated by JPS_CONCURRENT_CACHE)
-│   ├── JpsSystem.cs             # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
-│   ├── JpsPathfinder.cs         # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
-│   ├── AStarPathfinder.cs       # A* baseline (packed state: came-dir sbyte + merged mark)
-│   ├── PathSmoother.cs          # Forward-incremental LOS smoothing (Vector2 chosen by build conditional)
-│   └── MinHeap.cs               # Binary min-heap (replaces PriorityQueue, Unity-compatible)
+├── JPS.Core/                    # ① algorithm core (netstandard2.1 / C# 9, integer pathfinding, no UI deps)
+│   ├── Models/
+│   │   ├── GridMap.cs           # Pure terrain: size + bit-packed obstacles (ulong[]) + version
+│   │   └── MapData.cs           # JSON save model (obstacles + start/goal)
+│   └── Pathfinding/
+│       ├── JpsDirections.cs     # 8 directions, integer cost (1000/1414), octile heuristic
+│       ├── JpsRules.cs          # Jump-point / forced-neighbor rules
+│       ├── JumpPointCache.cs    # Lazy cardinal jump cache (generation-stamp bulk invalidate; Volatile publish gated by JPS_CONCURRENT_CACHE)
+│       ├── JpsSystem.cs         # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
+│       ├── JpsPathfinder.cs     # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
+│       ├── AStarPathfinder.cs   # A* baseline (packed state: came-dir sbyte + merged mark)
+│       ├── PathSmoother.cs      # Forward-incremental LOS smoothing (Vector2 chosen by build conditional)
+│       └── MinHeap.cs           # Binary min-heap (replaces PriorityQueue, Unity-compatible)
 │
-├── Controls/                    # View / interaction layer (WinForms)
-│   ├── GridControl.cs           # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
-│   ├── SearchOverlay.cs         # Search visualization overlay (view state separated from the model)
-│   ├── EditMode.cs              # Edit-mode enum (brush / start / goal)
-│   └── Loc.cs                   # UI localization (Chinese/English by system locale; UI layer only)
+├── JPS.Playground/              # ② WinForms demo UI (references Core)
+│   ├── Controls/
+│   │   ├── GridControl.cs       # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
+│   │   ├── SearchOverlay.cs     # Search visualization overlay (view state separated from the model)
+│   │   ├── EditMode.cs          # Edit-mode enum (brush / start / goal)
+│   │   └── Loc.cs               # UI localization (Chinese/English by system locale; UI layer only)
+│   ├── Form1.cs / Form1.Designer.cs   # Toolbar, legend, save/load dialogs
+│   └── Program.cs               # WinForms entry
 │
-├── Form1.cs / Form1.Designer.cs # Toolbar, legend, save/load dialogs
-└── Program.cs                   # Entry (CLI tools: `-- mt` concurrent stress test; `-- bench` JPS/A* benchmark)
+└── JPS.Benchmark/               # ③ CLI benchmark / stress test (references Core)
+    └── Program.cs               # `-- bench` JPS/A* benchmark; `-- mt` multithread correctness stress test
 ```
 
-> **Portability:** `Models/` + `Pathfinding/` don't depend on WinForms (only `System` / `System.Collections.Generic` / the smoothing layer's conditionally-compiled `Vector2`), so they can be dropped into Unity 2022 wholesale; `Controls/` + `Form1` are the desktop demo UI and stay out of Unity.
+> **Portability:** **JPS.Core** is pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only uses `System` / `System.Collections.Generic` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so it drops into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
 >
-> **Concurrency:** for multiple threads pathfinding in parallel on one shared `JpsSystem`, defining `JPS_CONCURRENT_CACHE` enables [lock-free multithreading](#4-lock-free-multithreading); otherwise it's single-thread max-speed mode (default).
+> **Concurrency:** for multiple threads pathfinding in parallel on one shared `JpsSystem`, defining `JPS_CONCURRENT_CACHE` on **JPS.Core** enables [lock-free multithreading](#4-lock-free-multithreading); otherwise it's single-thread max-speed mode (default).
 
 ## License
 
