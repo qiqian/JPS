@@ -78,7 +78,7 @@ public sealed class GridControl : Control
         _startX = _startY = _endX = _endY = -1;
         _overlay.Clear();
         Invalidate();
-        NotifyStatus("地图已清除。");
+        NotifyStatus(Loc.T("地图已清除。", "Map cleared."));
     }
 
     public MapData Export()
@@ -136,7 +136,7 @@ public sealed class GridControl : Control
         _overlay.SetPath(result.Path);
         _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
-        NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
+        NotifyStatus(DescribeResult("JPS", result, sw));
         return result;
     }
 
@@ -151,8 +151,41 @@ public sealed class GridControl : Control
         _overlay.SetPath(result.Path);
         _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
-        NotifyStatus($"{result.Message} 用时 {sw.Elapsed.TotalMilliseconds:F2} ms");
+        NotifyStatus(DescribeResult("A*", result, sw));
         return result;
+    }
+
+    // 按系统语言把寻路结果格式化为状态栏文案（中/英）。表现层负责本地化，
+    // 算法层（PathResult）只提供数据（扩展数、前沿、扫描、路径等），保持 UI 无关。
+    private string DescribeResult(string algo, PathResult r, Stopwatch sw)
+    {
+        if (!HasStart || !HasEnd)
+            return Loc.T("请先设置起点和终点。", "Set a start and a goal first.");
+        if (!_map.IsWalkable(_startX, _startY) || !_map.IsWalkable(_endX, _endY))
+            return Loc.T("起点或终点位于阻挡上。", "Start or goal is on an obstacle.");
+
+        bool isAStar = algo == "A*";
+        string body;
+        if (r.Success)
+        {
+            string mid = isAStar
+                ? Loc.Zh ? $"搜索合计 {r.Expanded.Count + r.Frontier.Count} 格，" : $"searched {r.Expanded.Count + r.Frontier.Count} cells, "
+                : Loc.Zh ? $"扫描跳过 {r.Scanned.Count} 格，" : $"scanned-skipped {r.Scanned.Count} cells, ";
+            body = Loc.Zh
+                ? $"{algo}：扩展 {r.ExpandedNodes}，入队未扩展 {r.Frontier.Count}，{mid}路径 {r.Path.Count} 格。"
+                : $"{algo}: expanded {r.ExpandedNodes}, frontier {r.Frontier.Count}, {mid}path {r.Path.Count} cells.";
+        }
+        else
+        {
+            string tail = isAStar
+                ? Loc.Zh ? " 格" : " cells"
+                : Loc.Zh ? $"，扫描跳过 {r.Scanned.Count} 格" : $", scanned-skipped {r.Scanned.Count} cells";
+            body = Loc.Zh
+                ? $"{algo}：未找到路径（扩展 {r.ExpandedNodes}{tail}）。"
+                : $"{algo}: no path found (expanded {r.ExpandedNodes}{tail}).";
+        }
+
+        return $"{body} {Loc.T("用时", "in")} {sw.Elapsed.TotalMilliseconds:F2} ms";
     }
 
     protected override void OnResize(EventArgs e)
@@ -303,7 +336,7 @@ public sealed class GridControl : Control
                 {
                     _startX = x; _startY = y;
                     Invalidate();
-                    NotifyStatus($"起点：({x}, {y})");
+                    NotifyStatus(Loc.Zh ? $"起点：({x}, {y})" : $"Start: ({x}, {y})");
                 }
                 break;
 
@@ -312,7 +345,7 @@ public sealed class GridControl : Control
                 {
                     _endX = x; _endY = y;
                     Invalidate();
-                    NotifyStatus($"终点：({x}, {y})");
+                    NotifyStatus(Loc.Zh ? $"终点：({x}, {y})" : $"Goal: ({x}, {y})");
                 }
                 break;
         }

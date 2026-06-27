@@ -17,19 +17,19 @@ _A Windows Forms app (.NET / C#) for **visually demonstrating and testing the JP
 > 每条左侧为中文锚点，右侧 `·` 后为英文锚点。 _Left link → Chinese section, right link (after `·`) → English section._
 
 - [功能一览](#功能一览) · [Features](#features)
-- [一、JPS 算法核心原理](#一jps-算法核心原理) · [I. Core Principles of JPS](#i-core-principles-of-jps)
-  - [1. 网格与移动规则](#1-网格与移动规则) · [1. Grid and Movement Rules](#1-grid-and-movement-rules)
-  - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居) · [2. Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors)
-  - [3. 强迫邻居判定规则（forced neighbor）](#3-强迫邻居判定规则forced-neighbor) · [3. Forced-Neighbor Rules](#3-forced-neighbor-rules)
-  - [4. 走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则) · [4. Straight and Diagonal Scanning](#4-straight-and-diagonal-scanning)
-  - [5. 为什么比 A\* 快](#5-为什么比-a-快) · [5. Why It's Faster Than A\*](#5-why-its-faster-than-a)
-- [二、本项目的核心实现](#二本项目的核心实现) · [II. Implementation Highlights](#ii-implementation-highlights)
-  - [1. Jump Table Lazy Update（惰性跳点表）](#1-jump-table-lazy-update惰性跳点表) · [1. Jump Table Lazy Update](#1-jump-table-lazy-update)
-  - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计) · [2. Unified Obstacle Model](#2-unified-obstacle-model)
-  - [3. 平滑方案的选择](#3-平滑方案的选择) · [3. Path Smoothing](#3-path-smoothing)
-  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [4. Lock-Free Multithreading](#4-lock-free-multithreading)
-- [三、可视化说明](#三可视化说明) · [III. Visualization](#iii-visualization)
-- [四、工程与性能要点](#四工程与性能要点) · [IV. Engineering and Performance](#iv-engineering-and-performance)
+- [一、JPS 算法核心原理](#一jps-算法核心原理) · [Core Principles of JPS](#i-core-principles-of-jps)
+  - [1. 网格与移动规则](#1-网格与移动规则) · [Grid and Movement Rules](#1-grid-and-movement-rules)
+  - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居) · [Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors)
+  - [3. 强迫邻居判定规则](#3-强迫邻居判定规则forced-neighbor) · [Forced-Neighbor Rules](#3-forced-neighbor-rules)
+  - [4. 走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则) · [Straight and Diagonal Scanning](#4-straight-and-diagonal-scanning)
+  - [5. 为什么比 A\* 快](#5-为什么比-a-快) · [Why It's Faster Than A\*](#5-why-its-faster-than-a)
+- [二、本项目的核心实现](#二本项目的核心实现) · [Implementation Highlights](#ii-implementation-highlights)
+  - [1. 惰性跳点表](#1-jump-table-lazy-update惰性跳点表) · [Jump Table Lazy Update](#1-jump-table-lazy-update)
+  - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计) · [Unified Obstacle Model](#2-unified-obstacle-model)
+  - [3. 平滑方案的选择](#3-平滑方案的选择) · [Path Smoothing](#3-path-smoothing)
+  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [Lock-Free Multithreading](#4-lock-free-multithreading)
+- [三、可视化说明](#三可视化说明) · [Visualization](#iii-visualization)
+- [四、工程与性能要点](#四工程与性能要点) · [Engineering and Performance](#iv-engineering-and-performance)
 - [运行](#运行) · [Run](#run)
 
 ---
@@ -371,6 +371,8 @@ dotnet run --project JPS/JPS.csproj
 
 操作：`刷阻挡` 画障碍 → `起点` / `终点` 标记 → `JPS寻路` 或 `A*寻路` 对比 → `保存` / `载入` 复现场景。
 
+> 界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文），按钮、提示、图例、状态栏、对话框一并切换，见 [`Loc`](JPS/Controls/Loc.cs)。
+
 ---
 
 ## 项目结构
@@ -396,7 +398,8 @@ JPS/
 ├── Controls/                    # 视图/交互层（WinForms）
 │   ├── GridControl.cs           # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
 │   ├── SearchOverlay.cs         # 寻路可视化叠加（与模型分离的视图状态）
-│   └── EditMode.cs              # 编辑模式枚举（刷阻挡 / 起点 / 终点）
+│   ├── EditMode.cs              # 编辑模式枚举（刷阻挡 / 起点 / 终点）
+│   └── Loc.cs                   # 界面本地化（按系统语言中/英二选一，仅 UI 层）
 │
 ├── Form1.cs / Form1.Designer.cs # 工具栏、图例、存档对话框
 └── Program.cs                   # 入口（含命令行工具：`-- mt` 多线程并发压测；`-- bench` JPS/A* 性能基准）
@@ -744,7 +747,24 @@ Requires .NET (Windows, WinForms).
 dotnet run --project JPS/JPS.csproj
 ```
 
-Usage: `刷阻挡` to draw obstacles → `起点` / `终点` to mark → `JPS寻路` or `A*寻路` to compare → `保存` / `载入` to reproduce a scene.
+The UI **auto-selects its language from the system locale** — Chinese on `zh*` systems, English otherwise — so toolbar buttons, tooltips, the legend, the status bar and the save/load dialogs all switch accordingly (see [`Loc`](JPS/Controls/Loc.cs)).
+
+Toolbar buttons (English label · Chinese label):
+
+| Button | Action |
+|---|---|
+| **Wall** · 刷阻挡 | Brush obstacles: click empty to paint a 2×2 wall; click a wall to erase 1 cell |
+| **Start** · 起点 | Set the start cell |
+| **Goal** · 终点 | Set the goal cell |
+| **Clear** · 清除 | Clear the whole map |
+| **JPS Path** · JPS寻路 | Run JPS and visualize the search + path |
+| **A\* Path** · A*寻路 | Run A\* (baseline) for comparison |
+| **Save** · 保存 | Save obstacles + start/goal to JSON |
+| **Load** · 载入 | Load a map from JSON |
+
+Typical flow: **Wall** to draw obstacles → **Start** / **Goal** to mark → **JPS Path** or **A\* Path** to compare → **Save** / **Load** to reproduce a scene.
+
+The legend (between the toolbar and the grid) maps every overlay color to its meaning; it is localized too.
 
 ## Project Structure
 
@@ -769,7 +789,8 @@ JPS/
 ├── Controls/                    # View / interaction layer (WinForms)
 │   ├── GridControl.cs           # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
 │   ├── SearchOverlay.cs         # Search visualization overlay (view state separated from the model)
-│   └── EditMode.cs              # Edit-mode enum (brush / start / goal)
+│   ├── EditMode.cs              # Edit-mode enum (brush / start / goal)
+│   └── Loc.cs                   # UI localization (Chinese/English by system locale; UI layer only)
 │
 ├── Form1.cs / Form1.Designer.cs # Toolbar, legend, save/load dialogs
 └── Program.cs                   # Entry (CLI tools: `-- mt` concurrent stress test; `-- bench` JPS/A* benchmark)

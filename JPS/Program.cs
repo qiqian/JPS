@@ -28,7 +28,7 @@ namespace JPS
 
         private static string FindFile(string name)
         {
-            string dir = AppContext.BaseDirectory;
+            string? dir = AppContext.BaseDirectory;
             for (int i = 0; i < 8 && dir != null; i++)
             {
                 string p = System.IO.Path.Combine(dir, name);
