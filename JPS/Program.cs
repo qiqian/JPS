@@ -26,53 +26,76 @@ namespace JPS
             return c;
         }
 
+        private static string FindFile(string name)
+        {
+            string dir = AppContext.BaseDirectory;
+            for (int i = 0; i < 8 && dir != null; i++)
+            {
+                string p = System.IO.Path.Combine(dir, name);
+                if (System.IO.File.Exists(p)) return p;
+                dir = System.IO.Directory.GetParent(dir)?.FullName;
+            }
+            if (System.IO.File.Exists(name)) return name;
+            throw new System.IO.FileNotFoundException(name);
+        }
+
         private static void Bench()
         {
             var sb = new System.Text.StringBuilder();
-            void Run(string name, double fill)
+            string path = FindFile("test2.json");
+            var data = System.Text.Json.JsonSerializer.Deserialize<JPS.Models.MapData>(System.IO.File.ReadAllText(path))!;
+            int w = data.Width, h = data.Height;
+            var map = new JPS.Models.GridMap(w, h);
+            foreach (var o in data.Obstacles) map.SetBlocked(o.X, o.Y, true);
+
+            var system = new JPS.Pathfinding.JpsSystem(map);
+            var jps = new JPS.Pathfinding.JpsPathfinder();
+            var astar = new JPS.Pathfinding.AStarPathfinder();
+            var rng = new Random(123);
+            (int X, int Y) Free() { for (int k = 0; k < 9999; k++) { int x = rng.Next(w), y = rng.Next(h); if (map.IsWalkable(x, y)) return (x, y); } return (-1, -1); }
+
+            const int Q = 8000;
+            var qs = new ((int X, int Y) s, (int X, int Y) g)[Q];
+            for (int i = 0; i < Q; i++) qs[i] = (Free(), Free());
+
+            // 节点数（与计时分离）：JIT 预热后统计
+            system.Sync();
+            for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g, false);
+            long jExp = 0, aExp = 0; int solved = 0;
+            for (int i = 0; i < Q; i++) { var r = jps.FindPath(system, qs[i].s, qs[i].g, false); jExp += r.ExpandedNodes; if (r.Success) solved++; }
+            for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g, false); aExp += r.ExpandedNodes; }
+
+            // 无复用基线：每次查询前翻转一个可走格(改回原状)使 Version 跳变→整表 dirty，
+            // 模拟"每个 finder 各持私有冷缓存、彼此不预热"的总开销。
+            var (tx, ty) = qs[0].s;   // 一个已知可走格
+            void ForceDirty() { map.SetBlocked(tx, ty, true); map.SetBlocked(tx, ty, false); system.Sync(); }
+
+            double jColdMs = double.MaxValue, jWarmMs = double.MaxValue, aMs = double.MaxValue;
+            var sw = new System.Diagnostics.Stopwatch();
+            for (int rep = 0; rep < 6; rep++)
             {
-                var rng = new Random(123);
-                int w = 200, h = 200;
-                var map = new JPS.Models.GridMap(w, h);
-                for (int i = 0; i < w * h * fill; i++) map.SetBlocked(rng.Next(w), rng.Next(h), true);
-                var system = new JPS.Pathfinding.JpsSystem(map);
+                GC.Collect(); GC.WaitForPendingFinalizers();
+                sw.Restart();
+                for (int i = 0; i < Q; i++) { ForceDirty(); jps.FindPath(system, qs[i].s, qs[i].g, false); }
+                sw.Stop(); jColdMs = Math.Min(jColdMs, sw.Elapsed.TotalMilliseconds);
+
+                // 热缓存（共享/复用）：Sync 一次，整批复用已洗白的跳点
+                GC.Collect(); GC.WaitForPendingFinalizers();
                 system.Sync();
-                var jps = new JPS.Pathfinding.JpsPathfinder();
-                var astar = new JPS.Pathfinding.AStarPathfinder();
-                (int X, int Y) Free() { for (int k = 0; k < 999; k++) { int x = rng.Next(w), y = rng.Next(h); if (map.IsWalkable(x, y)) return (x, y); } return (-1, -1); }
+                sw.Restart();
+                for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g, false);
+                sw.Stop(); jWarmMs = Math.Min(jWarmMs, sw.Elapsed.TotalMilliseconds);
 
-                const int Q = 2000;
-                var qs = new ((int X, int Y) s, (int X, int Y) g)[Q];
-                for (int i = 0; i < Q; i++) qs[i] = (Free(), Free());
-
-                // 充分预热（JIT + 跳点缓存洗白）：整批跑几遍
-                for (int rep = 0; rep < 3; rep++)
-                    for (int i = 0; i < Q; i++) { jps.FindPath(system, qs[i].s, qs[i].g, false); astar.FindPath(map, qs[i].s, qs[i].g, false); }
-
-                long jExp = 0, aExp = 0; int solved = 0;
-                double jMs = double.MaxValue, aMs = double.MaxValue;
-                var sw = new System.Diagnostics.Stopwatch();
-                for (int rep = 0; rep < 5; rep++)   // 取多轮最小值，抑制 GC/调度噪声
-                {
-                    GC.Collect(); GC.WaitForPendingFinalizers();
-                    sw.Restart();
-                    for (int i = 0; i < Q; i++) { var r = jps.FindPath(system, qs[i].s, qs[i].g, false); if (rep == 0) { jExp += r.ExpandedNodes; if (r.Success) solved++; } }
-                    sw.Stop(); jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
-
-                    GC.Collect(); GC.WaitForPendingFinalizers();
-                    sw.Restart();
-                    for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g, false); if (rep == 0) aExp += r.ExpandedNodes; }
-                    sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
-                }
-
-                sb.AppendLine($"[{name}] 200x200, 阻挡 {fill:P0}, {Q} 查询, 可解 {solved}");
-                sb.AppendLine($"  扩展节点 平均/次: JPS={jExp / (double)Q:F0}  A*={aExp / (double)Q:F0}  (A*/JPS={aExp / (double)Math.Max(1, jExp):F1}x)");
-                sb.AppendLine($"  耗时 平均/次:   JPS={jMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jMs):F1}x)");
+                GC.Collect(); GC.WaitForPendingFinalizers();
+                sw.Restart();
+                for (int i = 0; i < Q; i++) astar.FindPath(map, qs[i].s, qs[i].g, false);
+                sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
             }
 
-            Run("开阔", 0.0);
-            Run("稀疏", 0.10);
-            Run("中密", 0.20);
+            sb.AppendLine($"[test2.json] {w}x{h}（结构化地图）, {Q} 组随机起终点, 可解 {solved}");
+            sb.AppendLine($"  扩展节点 平均/次: JPS={jExp / (double)Q:F0}  A*={aExp / (double)Q:F0}  (A*/JPS={aExp / (double)Math.Max(1, jExp):F1}x)");
+            sb.AppendLine($"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
+            sb.AppendLine($"  缓存无复用/复用:  无复用={jColdMs / Q * 1000:F1}us  复用={jWarmMs / Q * 1000:F1}us  (加速={jColdMs / Math.Max(0.001, jWarmMs):F2}x)");
             Console.WriteLine(sb.ToString());
             System.IO.File.WriteAllText("bench_result.txt", sb.ToString());
         }
