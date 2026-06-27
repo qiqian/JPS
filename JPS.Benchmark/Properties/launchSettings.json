@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "JPS.Benchmark": {
+      "commandName": "Project",
+      "commandLineArgs": "mapbench 1000"
+    }
+  }
+}
