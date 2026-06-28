@@ -18,6 +18,7 @@ public sealed class SearchOverlay : ISearchObserver
     private readonly HashSet<int> _scanned = [];
     private readonly HashSet<int> _pathSet = [];
     private readonly List<(int X, int Y)> _path = [];
+    private readonly List<List<(int X, int Y)>> _pathSegments = [];
     private readonly List<Vector2> _smoothPath = [];
 
     public void SetWidth(int width) => _width = Math.Max(1, width);
@@ -35,6 +36,7 @@ public sealed class SearchOverlay : ISearchObserver
         _scanned.Clear();
         _pathSet.Clear();
         _path.Clear();
+        _pathSegments.Clear();
         _smoothPath.Clear();
     }
 
@@ -42,17 +44,39 @@ public sealed class SearchOverlay : ISearchObserver
     {
         _path.Clear();
         _pathSet.Clear();
+        AddPath(cells);
+    }
+
+    public void AddPath(IEnumerable<(int X, int Y)> cells)
+    {
+        var segment = new List<(int X, int Y)>();
         foreach (var c in cells)
         {
+            segment.Add(c);
             _path.Add(c);
             _pathSet.Add(Index(c.X, c.Y));
         }
+
+        if (segment.Count > 0)
+            _pathSegments.Add(segment);
     }
 
     public void SetSmoothPath(IEnumerable<Vector2> waypoints)
     {
         _smoothPath.Clear();
         _smoothPath.AddRange(waypoints);
+    }
+
+    public void AddFrom(SearchOverlay other)
+    {
+        foreach (int id in other._expanded)
+            _expanded.Add(id);
+        foreach (int id in other._generated)
+            _generated.Add(id);
+        foreach (int id in other._scanned)
+            _scanned.Add(id);
+        foreach (var segment in other._pathSegments)
+            AddPath(segment);
     }
 
     public void Clear()
@@ -62,6 +86,7 @@ public sealed class SearchOverlay : ISearchObserver
         _scanned.Clear();
         _pathSet.Clear();
         _path.Clear();
+        _pathSegments.Clear();
         _smoothPath.Clear();
     }
 
@@ -88,6 +113,7 @@ public sealed class SearchOverlay : ISearchObserver
     public int ScannedCount => _scanned.Count;
 
     public IReadOnlyList<(int X, int Y)> Path => _path;
+    public IReadOnlyList<IReadOnlyList<(int X, int Y)>> PathSegments => _pathSegments;
     public IReadOnlyList<Vector2> SmoothPath => _smoothPath;
 
     private int Index(int x, int y) => y * _width + x;

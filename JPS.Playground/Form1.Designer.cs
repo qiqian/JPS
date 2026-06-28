@@ -8,6 +8,7 @@
         private ToolStripButton btnStart;
         private ToolStripButton btnEnd;
         private ToolStripButton btnClear;
+        private ToolStripButton btnDynamic;
         private ToolStripButton btnFindPath;
         private ToolStripButton btnFindPathAStar;
         private ToolStripButton btnSave;
@@ -38,6 +39,7 @@
             btnStart = new ToolStripButton();
             btnEnd = new ToolStripButton();
             btnClear = new ToolStripButton();
+            btnDynamic = new ToolStripButton();
             toolStripSeparator1 = new ToolStripSeparator();
             btnFindPath = new ToolStripButton();
             btnFindPathAStar = new ToolStripButton();
@@ -61,7 +63,7 @@
             toolStrip1.ImageScalingSize = new Size(20, 20);
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
-                btnBrush, btnStart, btnEnd, btnClear, toolStripSeparator1, btnFindPath, btnFindPathAStar,
+                btnBrush, btnStart, btnEnd, btnClear, btnDynamic, toolStripSeparator1, btnFindPath, btnFindPathAStar,
                 toolStripSeparator2, btnSave, btnLoad, btnOpenMap
             });
             toolStrip1.Location = new Point(0, 0);
@@ -104,6 +106,16 @@
             btnClear.Size = new Size(60, 28);
             btnClear.Text = "清除";
             btnClear.Click += BtnClear_Click;
+            // 
+            // btnDynamic
+            // 
+            btnDynamic.CheckOnClick = true;
+            btnDynamic.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            btnDynamic.Name = "btnDynamic";
+            btnDynamic.Size = new Size(80, 28);
+            btnDynamic.Text = "动态";
+            btnDynamic.ToolTipText = "动态障碍测试";
+            btnDynamic.Click += BtnDynamic_Click;
             // 
             // btnFindPath
             // 

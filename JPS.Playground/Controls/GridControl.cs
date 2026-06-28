@@ -8,6 +8,71 @@ namespace JPS.Controls;
 public sealed class GridControl : ScrollableControl
 {
     private const int BrushSize = 2;
+    private const int DynamicWidth = 137;
+    private const int DynamicHeight = 68;
+    private const int DynamicMonsterCount = 14;
+    private const int DynamicBlockW = 10;
+    private const int DynamicBlockH = 7;
+    private const int DynamicRandomObstacleCount = 6;
+    private const int DynamicMaxBlockStepsPerTick = 1;
+    private const int DynamicMonsterMoveInterval = 10;
+    private const float DynamicMonsterVisualLerp = 0.18f;
+    private const int DynamicObstacleMoveInterval = 30;
+    private const int DynamicObstacleMaxDrift = 3;
+    private const double DynamicObstacleMoveChance = 0.18;
+    private const double DynamicRandomRepathChance = 0.06;
+    private const int DynamicPathfinderPoolInitialSize = 2;
+
+    private sealed class DynamicMonster
+    {
+        public int X;
+        public int Y;
+        public float VisualX;
+        public float VisualY;
+        public int TargetX;
+        public int TargetY;
+        public readonly List<(int X, int Y)> Path = new();
+        public int PathIndex;
+
+        public DynamicMonster(int x, int y, int targetX, int targetY)
+        {
+            X = x;
+            Y = y;
+            VisualX = x;
+            VisualY = y;
+            TargetX = targetX;
+            TargetY = targetY;
+        }
+    }
+
+    private sealed class DynamicObstacle
+    {
+        public readonly int HomeX;
+        public readonly int HomeY;
+        public int X;
+        public int Y;
+        public readonly List<(int X, int Y)> Cells = new();
+        public readonly HashSet<(int X, int Y)> CellSet = new();
+
+        public DynamicObstacle(int x, int y)
+        {
+            HomeX = x;
+            HomeY = y;
+            X = x;
+            Y = y;
+        }
+
+        public void AddCell(int x, int y)
+        {
+            if (CellSet.Add((x, y)))
+                Cells.Add((x, y));
+        }
+
+        public bool ContainsWorldCell(int x, int y) => CellSet.Contains((x - X, y - Y));
+    }
+
+    private readonly record struct DynamicMonsterSnapshot(int Index, int X, int Y, int TargetX, int TargetY, JpsPathfinder Pathfinder);
+    private readonly record struct DynamicPlan(int Index, bool Success, List<(int X, int Y)> Path, SearchOverlay Overlay);
 
     private int _cellSize;               // 当前格像素尺寸
     private readonly int _baseCellSize;  // 沙盒模式的默认格尺寸
@@ -24,6 +89,27 @@ public sealed class GridControl : ScrollableControl
     private EditMode _mode = EditMode.BrushObstacle;
     private bool _isPainting;
     private bool _eraseObstacle;
+
+    private readonly System.Windows.Forms.Timer _dynamicTimer = new();
+    private readonly Random _dynamicRng = new(20260628);
+    private DynamicMonster[] _monsters = [];
+    private bool[,]? _dynamicStaticBlocked;
+    private readonly List<DynamicObstacle> _dynamicObstacles = new();
+    private readonly List<JpsPathfinder> _dynamicPathfinderPool = new();
+    private bool _dynamicMode;
+    private bool _dynamicBusy;
+    private int _dynamicBlockX;
+    private int _dynamicBlockY;
+    private long _dynamicFrames;
+    private long _dynamicPathFrames;
+    private double _dynamicPathTotalMs;
+    private double _dynamicLastPathMs;
+    private int _dynamicLastPathRequests;
+    private long _dynamicPathFailures;
+    private int _dynamicLastPathFailures;
+    private int _pendingBlockDx;
+    private int _pendingBlockDy;
+    private readonly Bitmap[] _monsterSprites = CreateMonsterSprites();
 
     // 当前选中的起点/终点（视图/编辑状态，作为寻路查询参数；不属于地图模型）
     private int _startX = -1, _startY = -1, _endX = -1, _endY = -1;
@@ -48,6 +134,21 @@ public sealed class GridControl : ScrollableControl
     public static readonly Color EndColor = Color.FromArgb(255, 0, 170);
     public static readonly Color JumpCleanColor = Color.FromArgb(240, 240, 240);   // 之前已缓存的跳点方向（白）
     public static readonly Color JumpFreshColor = Color.FromArgb(255, 140, 0);      // 本次寻路新更新的跳点方向（橙）
+    public static readonly Color DynamicBlockColor = Color.FromArgb(34, 34, 38);
+    public static readonly Color MonsterColor = Color.FromArgb(255, 74, 58);
+    private static readonly Color[] DynamicPathColors =
+    [
+        Color.FromArgb(255, 214, 76),
+        Color.FromArgb(76, 220, 255),
+        Color.FromArgb(117, 255, 134),
+        Color.FromArgb(255, 112, 210),
+        Color.FromArgb(255, 143, 82),
+        Color.FromArgb(176, 132, 255),
+        Color.FromArgb(95, 255, 211),
+        Color.FromArgb(255, 235, 122),
+        Color.FromArgb(120, 170, 255),
+        Color.FromArgb(255, 107, 107),
+    ];
 
     public event EventHandler<string>? StatusChanged;
 
@@ -65,6 +166,9 @@ public sealed class GridControl : ScrollableControl
         _system = new JpsSystem(new GridMap(80, 50));
         _map = _system.Map;
         _overlay.SetWidth(_map.Width);
+
+        _dynamicTimer.Interval = 33;
+        _dynamicTimer.Tick += DynamicTimer_Tick;
     }
 
     public GridMap Map
@@ -78,8 +182,707 @@ public sealed class GridControl : ScrollableControl
 
     public void SetMode(EditMode mode) => _mode = mode;
 
+    public bool DynamicMode => _dynamicMode;
+
+    public void ToggleDynamicDemo()
+    {
+        if (_dynamicMode)
+            StopDynamicDemo();
+        else
+            StartDynamicDemo();
+    }
+
+    private void StartDynamicDemo()
+    {
+        _dynamicMode = true;
+        _dynamicBusy = false;
+        _dynamicFrames = 0;
+        _dynamicPathFrames = 0;
+        _dynamicPathTotalMs = 0;
+        _dynamicLastPathMs = 0;
+        _dynamicLastPathRequests = 0;
+        _dynamicPathFailures = 0;
+        _dynamicLastPathFailures = 0;
+        _pendingBlockDx = 0;
+        _pendingBlockDy = 0;
+        _fixedSize = true;
+        _cellSize = _baseCellSize;
+        AutoScroll = true;
+        AutoScrollMinSize = new Size(DynamicWidth * _cellSize, DynamicHeight * _cellSize);
+        AutoScrollPosition = new Point(0, 0);
+        _overlay.Clear();
+        _startX = _startY = _endX = _endY = -1;
+        _dynamicBlockX = DynamicWidth / 2 - DynamicBlockW / 2;
+        _dynamicBlockY = DynamicHeight / 2 - DynamicBlockH / 2;
+        BuildDynamicStaticObstacles();
+        EnsureDynamicPathfinderPool();
+
+        _monsters = new DynamicMonster[DynamicMonsterCount];
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var pos = RandomDynamicFreeCell(exceptMonster: -1);
+            _monsters[i] = new DynamicMonster(pos.X, pos.Y, pos.X, pos.Y);
+            PickMonsterTarget(i);
+        }
+
+        RebuildDynamicDisplayMap();
+        Focus();
+        _dynamicTimer.Start();
+        Invalidate();
+        NotifyStatus(Loc.Zh
+            ? "动态障碍测试：方向键移动大障碍，小怪共享同一 JPS 缓存并用占位表避让。"
+            : "Dynamic obstacle test: arrow keys move the block; monsters share one JPS cache and avoid via reservations.");
+    }
+
+    private void StopDynamicDemo()
+    {
+        if (!_dynamicMode)
+            return;
+
+        _dynamicTimer.Stop();
+        _dynamicMode = false;
+        _dynamicBusy = false;
+        _monsters = [];
+        _dynamicStaticBlocked = null;
+        _dynamicObstacles.Clear();
+        _pendingBlockDx = 0;
+        _pendingBlockDy = 0;
+        _overlay.Clear();
+        NotifyStatus(Loc.T("动态障碍测试已停止。", "Dynamic obstacle test stopped."));
+    }
+
+    private void BuildDynamicStaticObstacles()
+    {
+        _dynamicStaticBlocked = new bool[DynamicWidth, DynamicHeight];
+        _dynamicObstacles.Clear();
+
+        for (int x = 0; x < DynamicWidth; x++)
+        {
+            _dynamicStaticBlocked[x, 0] = true;
+            _dynamicStaticBlocked[x, DynamicHeight - 1] = true;
+        }
+        for (int y = 0; y < DynamicHeight; y++)
+        {
+            _dynamicStaticBlocked[0, y] = true;
+            _dynamicStaticBlocked[DynamicWidth - 1, y] = true;
+        }
+
+        AddDynamicBlob(16, 14, 8, 5);
+        AddDynamicBlob(36, 18, 12, 6);
+        AddDynamicBlob(23, 54, 10, 8);
+        AddDynamicBlob(84, 16, 11, 7);
+        AddDynamicBlob(103, 48, 13, 8);
+        AddDynamicBlob(76, 66, 15, 5);
+        AddDynamicWall(48, 8, 4, 19);
+        AddDynamicWall(34, 35, 20, 4);
+        AddDynamicWall(94, 24, 4, 18);
+
+        for (int i = 0; i < DynamicRandomObstacleCount; i++)
+        {
+            int x = _dynamicRng.Next(3, DynamicWidth - 3);
+            int y = _dynamicRng.Next(3, DynamicHeight - 3);
+            AddDynamicPebble(x, y);
+        }
+    }
+
+    private void AddDynamicWall(int x0, int y0, int w, int h)
+    {
+        if (_dynamicStaticBlocked == null)
+            return;
+
+        var obstacle = new DynamicObstacle(x0, y0);
+        for (int y = y0; y < y0 + h; y++)
+            for (int x = x0; x < x0 + w; x++)
+                obstacle.AddCell(x - x0, y - y0);
+
+        AddDynamicObstacle(obstacle);
+    }
+
+    private void AddDynamicBlob(int cx, int cy, int rx, int ry)
+    {
+        if (_dynamicStaticBlocked == null)
+            return;
+
+        var obstacle = new DynamicObstacle(cx, cy);
+        for (int y = cy - ry; y <= cy + ry; y++)
+            for (int x = cx - rx; x <= cx + rx; x++)
+            {
+                double nx = (double)(x - cx) / rx;
+                double ny = (double)(y - cy) / ry;
+                double edgeNoise = _dynamicRng.NextDouble() * 0.28 - 0.10;
+                if (nx * nx + ny * ny <= 1.0 + edgeNoise)
+                    obstacle.AddCell(x - cx, y - cy);
+            }
+
+        int chunks = Math.Max(3, (rx + ry) / 3);
+        for (int i = 0; i < chunks; i++)
+        {
+            int ox = _dynamicRng.Next(-rx, rx + 1);
+            int oy = _dynamicRng.Next(-ry, ry + 1);
+            int radius = _dynamicRng.Next(1, 4);
+            for (int y = cy + oy - radius; y <= cy + oy + radius; y++)
+                for (int x = cx + ox - radius; x <= cx + ox + radius; x++)
+                    if (Math.Abs(x - (cx + ox)) + Math.Abs(y - (cy + oy)) <= radius + 1)
+                        obstacle.AddCell(x - cx, y - cy);
+        }
+
+        AddDynamicObstacle(obstacle);
+    }
+
+    private void AddDynamicPebble(int x, int y)
+    {
+        var obstacle = new DynamicObstacle(x, y);
+        obstacle.AddCell(0, 0);
+        if (_dynamicRng.Next(2) == 0)
+            obstacle.AddCell(1, 0);
+        else
+            obstacle.AddCell(0, 1);
+
+        AddDynamicObstacle(obstacle);
+    }
+
+    private void AddDynamicObstacle(DynamicObstacle obstacle)
+    {
+        if (obstacle.Cells.Count == 0 || !CanPlaceDynamicObstacle(obstacle, 0, 0))
+            return;
+
+        _dynamicObstacles.Add(obstacle);
+        SetDynamicObstacleCells(obstacle, blocked: true, updateMap: false);
+    }
+
+    private void AddDynamicStaticCell(int x, int y)
+    {
+        if (_dynamicStaticBlocked == null)
+            return;
+        if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+            return;
+        if (IsInDynamicBlock(x, y))
+            return;
+
+        _dynamicStaticBlocked[x, y] = true;
+    }
+
+    private void StepDynamicObstacles()
+    {
+        if (_dynamicObstacles.Count == 0 || _dynamicFrames % DynamicObstacleMoveInterval != 0)
+            return;
+
+        bool movedAny = false;
+        for (int i = 0; i < _dynamicObstacles.Count; i++)
+        {
+            if (_dynamicRng.NextDouble() > DynamicObstacleMoveChance)
+                continue;
+
+            var obstacle = _dynamicObstacles[i];
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                int dx = _dynamicRng.Next(-1, 2);
+                int dy = _dynamicRng.Next(-1, 2);
+                if (dx == 0 && dy == 0)
+                    continue;
+                if (TryMoveDynamicObstacle(obstacle, dx, dy))
+                {
+                    movedAny = true;
+                    break;
+                }
+            }
+        }
+
+        if (movedAny)
+            _overlay.Clear();
+    }
+
+    private bool TryMoveDynamicObstacle(DynamicObstacle obstacle, int dx, int dy)
+    {
+        int nextX = obstacle.X + dx;
+        int nextY = obstacle.Y + dy;
+        if (Math.Abs(nextX - obstacle.HomeX) > DynamicObstacleMaxDrift ||
+            Math.Abs(nextY - obstacle.HomeY) > DynamicObstacleMaxDrift)
+            return false;
+        if (!CanPlaceDynamicObstacle(obstacle, dx, dy))
+            return false;
+
+        SetDynamicObstacleCells(obstacle, blocked: false, updateMap: true);
+        obstacle.X = nextX;
+        obstacle.Y = nextY;
+        SetDynamicObstacleCells(obstacle, blocked: true, updateMap: true);
+        return true;
+    }
+
+    private bool CanPlaceDynamicObstacle(DynamicObstacle obstacle, int dx, int dy)
+    {
+        if (_dynamicStaticBlocked == null)
+            return false;
+
+        foreach (var cell in obstacle.Cells)
+        {
+            int x = obstacle.X + dx + cell.X;
+            int y = obstacle.Y + dy + cell.Y;
+            if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+                return false;
+            if (IsInDynamicBlock(x, y))
+                return false;
+            if (DynamicCellHasMonster(x, y))
+                return false;
+            if (_dynamicStaticBlocked[x, y] && !obstacle.ContainsWorldCell(x, y))
+                return false;
+        }
+
+        return true;
+    }
+
+    private bool DynamicCellHasMonster(int x, int y)
+    {
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var m = _monsters[i];
+            if (m.X == x && m.Y == y)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void SetDynamicObstacleCells(DynamicObstacle obstacle, bool blocked, bool updateMap)
+    {
+        if (_dynamicStaticBlocked == null)
+            return;
+
+        foreach (var cell in obstacle.Cells)
+        {
+            int x = obstacle.X + cell.X;
+            int y = obstacle.Y + cell.Y;
+            if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+                continue;
+
+            _dynamicStaticBlocked[x, y] = blocked;
+            if (updateMap && _map.Width == DynamicWidth && _map.Height == DynamicHeight)
+                _map.SetBlocked(x, y, blocked);
+        }
+    }
+
+    private async void DynamicTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_dynamicMode || _dynamicBusy)
+            return;
+
+        _dynamicBusy = true;
+        try
+        {
+            ApplyPendingDynamicBlockMove();
+            StepDynamicObstacles();
+            await StepDynamicMonstersAsync();
+            UpdateDynamicMonsterVisuals();
+            if (!_dynamicMode)
+                return;
+
+            _dynamicFrames++;
+            Invalidate();
+            if (_dynamicFrames % 15 != 0)
+                return;
+
+            NotifyStatus(DescribeDynamicStatus() + DescribeDynamicFailureStatus());
+        }
+        finally
+        {
+            _dynamicBusy = false;
+        }
+    }
+
+    private string DescribeDynamicStatus()
+    {
+        if (_dynamicPathFrames == 0)
+        {
+            return Loc.Zh
+                ? $"动态障碍：帧 {_dynamicFrames}，小怪 {_monsters.Length}，共享 1 个 JpsSystem，寻路均耗 --。"
+                : $"Dynamic: frame {_dynamicFrames}, monsters {_monsters.Length}, sharing 1 JpsSystem, path avg --.";
+        }
+
+        double avg = _dynamicPathTotalMs / _dynamicPathFrames;
+        return Loc.Zh
+            ? $"动态障碍：帧 {_dynamicFrames}，小怪 {_monsters.Length}，寻路均耗 {avg:F2} ms（{_dynamicPathFrames} 帧，最近 {_dynamicLastPathMs:F2} ms / {_dynamicLastPathRequests} 次）。"
+            : $"Dynamic: frame {_dynamicFrames}, monsters {_monsters.Length}, path avg {avg:F2} ms over {_dynamicPathFrames} path frames, last {_dynamicLastPathMs:F2} ms / {_dynamicLastPathRequests} requests.";
+    }
+
+    private string DescribeDynamicFailureStatus() =>
+        Loc.Zh
+            ? $" 寻路失败 {_dynamicPathFailures} 次，最近 {_dynamicLastPathFailures} 次。"
+            : $" Path failures {_dynamicPathFailures}, last {_dynamicLastPathFailures}.";
+
+    private async Task StepDynamicMonstersAsync()
+    {
+        if (_dynamicFrames % DynamicMonsterMoveInterval != 0)
+            return;
+
+        _system.Sync();
+        var requests = new List<DynamicMonsterSnapshot>();
+        var rentedFinders = new List<JpsPathfinder>();
+
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var monster = _monsters[i];
+            if ((monster.X == monster.TargetX && monster.Y == monster.TargetY) ||
+                !IsDynamicFreeForMonster(monster.TargetX, monster.TargetY, exceptMonster: i))
+                PickMonsterTarget(i);
+
+            bool noPath = monster.Path.Count == 0 || monster.PathIndex >= monster.Path.Count - 1;
+            bool nextBlocked = !noPath && !IsMonsterPathNextUsable(monster, i);
+            bool randomRepath = !noPath && !nextBlocked && _dynamicRng.NextDouble() < DynamicRandomRepathChance;
+            if (noPath || nextBlocked || randomRepath)
+            {
+                var finder = RentDynamicPathfinder();
+                rentedFinders.Add(finder);
+                requests.Add(new DynamicMonsterSnapshot(i, monster.X, monster.Y, monster.TargetX, monster.TargetY, finder));
+            }
+        }
+
+        var sw = requests.Count > 0 ? Stopwatch.StartNew() : null;
+        var tasks = new Task<DynamicPlan>[requests.Count];
+        for (int i = 0; i < requests.Count; i++)
+        {
+            var request = requests[i];
+            tasks[i] = Task.Run(() => PlanMonsterStep(_system, request));
+        }
+
+        DynamicPlan[] plans;
+        try
+        {
+            plans = await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            for (int i = 0; i < rentedFinders.Count; i++)
+                ReturnDynamicPathfinder(rentedFinders[i]);
+        }
+
+        if (sw != null)
+        {
+            sw.Stop();
+            _dynamicPathFrames++;
+            _dynamicLastPathMs = sw.Elapsed.TotalMilliseconds;
+            _dynamicLastPathRequests = requests.Count;
+            _dynamicPathTotalMs += _dynamicLastPathMs;
+        }
+
+        var reserved = new HashSet<int>();
+        var merged = new SearchOverlay();
+        merged.SetWidth(DynamicWidth);
+        merged.BeginCollect();
+        int failedPlans = 0;
+
+        foreach (var plan in plans)
+        {
+            merged.AddFrom(plan.Overlay);
+            var monster = _monsters[plan.Index];
+            if (!plan.Success)
+            {
+                failedPlans++;
+                PickMonsterTarget(plan.Index);
+                continue;
+            }
+
+            monster.Path.Clear();
+            monster.Path.AddRange(plan.Path);
+            monster.PathIndex = 0;
+        }
+
+        if (failedPlans > 0)
+        {
+            _dynamicLastPathFailures = failedPlans;
+            _dynamicPathFailures += failedPlans;
+        }
+        else if (plans.Length > 0)
+        {
+            _dynamicLastPathFailures = 0;
+        }
+
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var monster = _monsters[i];
+            var next = GetMonsterNextStep(monster);
+            if (!IsDynamicFreeForMonster(next.X, next.Y, exceptMonster: i) || !reserved.Add(next.Y * DynamicWidth + next.X))
+            {
+                PickMonsterTarget(i);
+                next = (monster.X, monster.Y);
+            }
+
+            if (next.X != monster.X || next.Y != monster.Y)
+            {
+                monster.X = next.X;
+                monster.Y = next.Y;
+                if (monster.PathIndex < monster.Path.Count - 1 && monster.Path[monster.PathIndex + 1] == next)
+                    monster.PathIndex++;
+                else
+                    ClearMonsterPath(monster);
+            }
+
+            if (monster.X == monster.TargetX && monster.Y == monster.TargetY)
+                PickMonsterTarget(i);
+
+        }
+
+        _overlay.BeginCollect();
+        _overlay.AddFrom(merged);
+    }
+
+    private DynamicPlan PlanMonsterStep(JpsSystem system, DynamicMonsterSnapshot monster)
+    {
+        var overlay = new SearchOverlay();
+        overlay.SetWidth(DynamicWidth);
+        overlay.BeginCollect();
+        var result = monster.Pathfinder.FindPath(system, (monster.X, monster.Y), (monster.TargetX, monster.TargetY), overlay);
+
+        return new DynamicPlan(
+            monster.Index,
+            result.Success,
+            result.Success ? result.Path : new List<(int X, int Y)>(),
+            overlay);
+    }
+
+    private void EnsureDynamicPathfinderPool()
+    {
+        while (_dynamicPathfinderPool.Count < DynamicPathfinderPoolInitialSize)
+            _dynamicPathfinderPool.Add(new JpsPathfinder());
+    }
+
+    private JpsPathfinder RentDynamicPathfinder()
+    {
+        int last = _dynamicPathfinderPool.Count - 1;
+        if (last < 0)
+            return new JpsPathfinder();
+
+        var finder = _dynamicPathfinderPool[last];
+        _dynamicPathfinderPool.RemoveAt(last);
+        return finder;
+    }
+
+    private void ReturnDynamicPathfinder(JpsPathfinder finder)
+    {
+        _dynamicPathfinderPool.Add(finder);
+    }
+
+    private void UpdateDynamicMonsterVisuals()
+    {
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var monster = _monsters[i];
+            monster.VisualX = Approach(monster.VisualX, monster.X, DynamicMonsterVisualLerp);
+            monster.VisualY = Approach(monster.VisualY, monster.Y, DynamicMonsterVisualLerp);
+        }
+    }
+
+    private static float Approach(float current, float target, float factor)
+    {
+        float delta = target - current;
+        if (Math.Abs(delta) < 0.01f)
+            return target;
+
+        return current + delta * factor;
+    }
+
+    private GridMap BuildDynamicMap()
+    {
+        var map = new GridMap(DynamicWidth, DynamicHeight);
+        if (_dynamicStaticBlocked != null)
+        {
+            for (int y = 0; y < DynamicHeight; y++)
+                for (int x = 0; x < DynamicWidth; x++)
+                    if (_dynamicStaticBlocked[x, y])
+                        map.SetBlocked(x, y, true);
+        }
+
+        for (int y = _dynamicBlockY; y < _dynamicBlockY + DynamicBlockH; y++)
+            for (int x = _dynamicBlockX; x < _dynamicBlockX + DynamicBlockW; x++)
+                map.SetBlocked(x, y, true);
+
+        return map;
+    }
+
+    private void RebuildDynamicDisplayMap()
+    {
+        var map = BuildDynamicMap();
+        _system = new JpsSystem(map);
+        _map = map;
+        _overlay.SetWidth(_map.Width);
+        if (!_dynamicMode)
+            _overlay.Clear();
+    }
+
+    private void PickMonsterTarget(int index)
+    {
+        var p = RandomDynamicFreeCell(exceptMonster: index);
+        if (!IsDynamicFreeForMonster(p.X, p.Y, exceptMonster: index))
+            p = (_monsters[index].X, _monsters[index].Y);
+
+        _monsters[index].TargetX = p.X;
+        _monsters[index].TargetY = p.Y;
+        ClearMonsterPath(_monsters[index]);
+    }
+
+    private static void ClearMonsterPath(DynamicMonster monster)
+    {
+        monster.Path.Clear();
+        monster.PathIndex = 0;
+    }
+
+    private bool IsMonsterPathNextUsable(DynamicMonster monster, int index)
+    {
+        var next = GetMonsterNextStep(monster);
+        if (next.X == monster.X && next.Y == monster.Y)
+            return false;
+
+        return IsDynamicFreeForMonster(next.X, next.Y, exceptMonster: index);
+    }
+
+    private static (int X, int Y) GetMonsterNextStep(DynamicMonster monster)
+    {
+        if (monster.Path.Count == 0 || monster.PathIndex >= monster.Path.Count - 1)
+            return (monster.X, monster.Y);
+
+        if (monster.PathIndex < 0 || monster.PathIndex >= monster.Path.Count ||
+            monster.Path[monster.PathIndex] != (monster.X, monster.Y))
+        {
+            int current = monster.Path.FindIndex(p => p.X == monster.X && p.Y == monster.Y);
+            if (current < 0 || current >= monster.Path.Count - 1)
+                return (monster.X, monster.Y);
+
+            monster.PathIndex = current;
+        }
+
+        return monster.Path[monster.PathIndex + 1];
+    }
+
+    private (int X, int Y) RandomDynamicFreeCell(int exceptMonster)
+    {
+        for (int i = 0; i < 5000; i++)
+        {
+            int x = _dynamicRng.Next(1, DynamicWidth - 1);
+            int y = _dynamicRng.Next(1, DynamicHeight - 1);
+            if (IsDynamicFreeForMonster(x, y, exceptMonster))
+                return (x, y);
+        }
+
+        for (int y = 1; y < DynamicHeight - 1; y++)
+            for (int x = 1; x < DynamicWidth - 1; x++)
+                if (IsDynamicFreeForMonster(x, y, exceptMonster))
+                    return (x, y);
+
+        return (1, 1);
+    }
+
+    private bool IsDynamicFreeForMonster(int x, int y, int exceptMonster)
+    {
+        if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+            return false;
+        if (_dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y])
+            return false;
+        if (IsInDynamicBlock(x, y))
+            return false;
+
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var m = _monsters[i];
+            if (m == null)
+                continue;
+            if (i != exceptMonster && m.X == x && m.Y == y)
+                return false;
+        }
+
+        return true;
+    }
+
+    private bool IsInDynamicBlock(int x, int y) =>
+        x >= _dynamicBlockX && x < _dynamicBlockX + DynamicBlockW &&
+        y >= _dynamicBlockY && y < _dynamicBlockY + DynamicBlockH;
+
+    private void MoveDynamicBlock(int dx, int dy)
+    {
+        if (!_dynamicMode)
+            return;
+
+        _pendingBlockDx += dx;
+        _pendingBlockDy += dy;
+    }
+
+    private void ApplyPendingDynamicBlockMove()
+    {
+        for (int i = 0; i < DynamicMaxBlockStepsPerTick; i++)
+        {
+            int dx = Math.Sign(_pendingBlockDx);
+            int dy = Math.Sign(_pendingBlockDy);
+            if (dx == 0 && dy == 0)
+                return;
+
+            if (!TryMoveDynamicBlock(dx, dy))
+            {
+                if (dx != 0)
+                    _pendingBlockDx = 0;
+                if (dy != 0)
+                    _pendingBlockDy = 0;
+                return;
+            }
+
+            _pendingBlockDx -= dx;
+            _pendingBlockDy -= dy;
+        }
+    }
+
+    private bool TryMoveDynamicBlock(int dx, int dy)
+    {
+        if (!_dynamicMode)
+            return false;
+
+        int nextX = Math.Max(1, Math.Min(DynamicWidth - DynamicBlockW - 1, _dynamicBlockX + dx));
+        int nextY = Math.Max(1, Math.Min(DynamicHeight - DynamicBlockH - 1, _dynamicBlockY + dy));
+        if (nextX == _dynamicBlockX && nextY == _dynamicBlockY)
+            return false;
+
+        for (int y = nextY; y < nextY + DynamicBlockH; y++)
+            for (int x = nextX; x < nextX + DynamicBlockW; x++)
+                if (_dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y])
+                    return false;
+
+        if (DynamicBlockOverlapsMonster(nextX, nextY))
+            return false;
+
+        int oldX = _dynamicBlockX;
+        int oldY = _dynamicBlockY;
+        _dynamicBlockX = nextX;
+        _dynamicBlockY = nextY;
+        ApplyDynamicBlockToCurrentMap(oldX, oldY, nextX, nextY);
+
+        _overlay.Clear();
+        return true;
+    }
+
+    private bool DynamicBlockOverlapsMonster(int blockX, int blockY)
+    {
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var m = _monsters[i];
+            if (m.X >= blockX && m.X < blockX + DynamicBlockW &&
+                m.Y >= blockY && m.Y < blockY + DynamicBlockH)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void ApplyDynamicBlockToCurrentMap(int oldX, int oldY, int newX, int newY)
+    {
+        for (int y = oldY; y < oldY + DynamicBlockH; y++)
+            for (int x = oldX; x < oldX + DynamicBlockW; x++)
+                if (_dynamicStaticBlocked == null || !_dynamicStaticBlocked[x, y])
+                    SetDynamicAwareBlocked(x, y, false);
+
+        for (int y = newY; y < newY + DynamicBlockH; y++)
+            for (int x = newX; x < newX + DynamicBlockW; x++)
+                _map.SetBlocked(x, y, true);
+    }
+
     public void ClearMap()
     {
+        StopDynamicDemo();
         EnsureGrid();
         _map.ClearAll();
         _startX = _startY = _endX = _endY = -1;
@@ -112,6 +915,7 @@ public sealed class GridControl : ScrollableControl
     /// </summary>
     public void LoadFixedMap(GridMap map)
     {
+        StopDynamicDemo();
         _fixedSize = true;
         _system = new JpsSystem(map);
         _map = map;
@@ -128,6 +932,7 @@ public sealed class GridControl : ScrollableControl
 
     public void Import(MapData data)
     {
+        StopDynamicDemo();
         // JSON 走沙盒模式：随窗口自适应（关闭滚动，恢复默认格尺寸）
         _fixedSize = false;
         _cellSize = _baseCellSize;
@@ -286,6 +1091,46 @@ public sealed class GridControl : ScrollableControl
         base.OnMouseWheel(e);              // 普通滚轮：定尺地图下滚动查看
     }
 
+    protected override bool IsInputKey(Keys keyData)
+    {
+        if (_dynamicMode)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            if (key == Keys.Left || key == Keys.Right || key == Keys.Up || key == Keys.Down)
+                return true;
+        }
+
+        return base.IsInputKey(keyData);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+
+        if (!_dynamicMode)
+            return;
+
+        switch (e.KeyCode)
+        {
+            case Keys.Left:
+                MoveDynamicBlock(-1, 0);
+                e.Handled = true;
+                break;
+            case Keys.Right:
+                MoveDynamicBlock(1, 0);
+                e.Handled = true;
+                break;
+            case Keys.Up:
+                MoveDynamicBlock(0, -1);
+                e.Handled = true;
+                break;
+            case Keys.Down:
+                MoveDynamicBlock(0, 1);
+                e.Handled = true;
+                break;
+        }
+    }
+
     /// <summary>以鼠标位置为锚点缩放格子像素尺寸（Ctrl+滚轮）。</summary>
     private void ZoomAt(Point mouse, int dir)
     {
@@ -350,13 +1195,183 @@ public sealed class GridControl : ScrollableControl
         }
 
         DrawSearchOverlay(g, cs, sx, sy, ex, ey);
+        DrawDynamicBlock(g, cs, sx, sy, ex, ey);
         DrawGridLines(g, cs, sx, sy, ex, ey);
         DrawMarkers(g, cs);
         DrawDirtyDots(g, cs, sx, sy, ex, ey);
+        DrawDynamicMonsterPaths(g, cs);
+        DrawDynamicMonsters(g, cs, sx, sy, ex, ey);
     }
 
     private static readonly SolidBrush WalkableBrush = new(WalkableColor);
     private static readonly SolidBrush ObstacleBrush = new(ObstacleColor);
+
+    private void DrawDynamicBlock(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    {
+        if (!_dynamicMode)
+            return;
+
+        using var blockBrush = new SolidBrush(DynamicBlockColor);
+        using var blockPen = new Pen(Color.FromArgb(210, 255, 255, 255), Math.Max(1f, cs / 9f));
+        var blockRect = new Rectangle(_dynamicBlockX * cs, _dynamicBlockY * cs, DynamicBlockW * cs, DynamicBlockH * cs);
+        if (blockRect.IntersectsWith(new Rectangle(sx * cs, sy * cs, (ex - sx) * cs, (ey - sy) * cs)))
+        {
+            g.FillRectangle(blockBrush, blockRect);
+            g.DrawRectangle(blockPen, blockRect);
+        }
+    }
+
+    private void DrawDynamicMonsters(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    {
+        if (!_dynamicMode)
+            return;
+
+        using var targetPen = new Pen(Color.FromArgb(230, MonsterColor), Math.Max(1.5f, cs / 10f));
+        var prevMode = g.SmoothingMode;
+        var prevInterpolation = g.InterpolationMode;
+        var prevPixelOffset = g.PixelOffsetMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+
+        foreach (var m in _monsters)
+        {
+            if (m.TargetX >= sx && m.TargetX < ex && m.TargetY >= sy && m.TargetY < ey && cs >= 7)
+            {
+                float tx = m.TargetX * cs + cs / 2f;
+                float ty = m.TargetY * cs + cs / 2f;
+                float tr = Math.Max(2f, cs * 0.22f);
+                g.DrawEllipse(targetPen, tx - tr, ty - tr, tr * 2, tr * 2);
+            }
+
+            if (m.VisualX < sx - 1 || m.VisualX >= ex + 1 || m.VisualY < sy - 1 || m.VisualY >= ey + 1)
+                continue;
+
+            float cx = m.VisualX * cs + cs / 2f;
+            float cy = m.VisualY * cs + cs / 2f;
+            int size = Math.Max(12, Math.Min(cs + 6, (int)Math.Round(cs * 1.12)));
+            var dest = new Rectangle(
+                (int)Math.Round(cx - size / 2f),
+                (int)Math.Round(cy - size / 2f),
+                size,
+                size);
+            var sprite = _monsterSprites[(int)((_dynamicFrames + m.X + m.Y) % _monsterSprites.Length)];
+            g.DrawImage(sprite, dest);
+        }
+
+        g.PixelOffsetMode = prevPixelOffset;
+        g.InterpolationMode = prevInterpolation;
+        g.SmoothingMode = prevMode;
+    }
+
+    private void DrawDynamicMonsterPaths(Graphics g, int cs)
+    {
+        if (!_dynamicMode)
+            return;
+
+        var prevMode = g.SmoothingMode;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var monster = _monsters[i];
+            if (monster.Path.Count - monster.PathIndex < 2)
+                continue;
+
+            var color = DynamicPathColors[i % DynamicPathColors.Length];
+            using var pen = new Pen(Color.FromArgb(235, color), Math.Max(2.5f, cs / 3.2f))
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+            using var dotBrush = new SolidBrush(Color.FromArgb(220, color));
+
+            var points = monster.Path
+                .Skip(monster.PathIndex)
+                .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
+                .ToArray();
+            if (points.Length < 2)
+                continue;
+
+            g.DrawLines(pen, points);
+
+            float r = Math.Max(1.8f, cs / 7f);
+            for (int p = 1; p < points.Length; p += 3)
+                g.FillEllipse(dotBrush, points[p].X - r, points[p].Y - r, r * 2, r * 2);
+        }
+
+        g.SmoothingMode = prevMode;
+    }
+
+    private static Bitmap[] CreateMonsterSprites()
+    {
+        var sprites = new Bitmap[8];
+        for (int frame = 0; frame < sprites.Length; frame++)
+        {
+            var bmp = new Bitmap(24, 24, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var g = Graphics.FromImage(bmp);
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            int[] bobFrames = [0, -1, -2, -1, 0, 1, 0, -1];
+            int[] strideFrames = [0, 1, 2, 1, 0, -1, -2, -1];
+            int bob = bobFrames[frame];
+            int stride = strideFrames[frame];
+            int squash = frame is 4 or 5 ? 1 : 0;
+            int hornWave = frame is 1 or 2 ? 1 : frame is 5 or 6 ? -1 : 0;
+            using var shadow = new SolidBrush(Color.FromArgb(145, 0, 0, 0));
+            using var outline = new SolidBrush(Color.FromArgb(255, 12, 13, 18));
+            using var body = new SolidBrush(Color.FromArgb(255, 28, 30, 40));
+            using var face = new SolidBrush(Color.FromArgb(255, 44, 47, 60));
+            using var shine = new SolidBrush(Color.FromArgb(110, 120, 132, 160));
+            using var horn = new SolidBrush(Color.FromArgb(255, 74, 78, 96));
+            using var eye = new SolidBrush(Color.FromArgb(255, 255, 78, 68));
+            using var glint = new SolidBrush(Color.FromArgb(255, 255, 228, 112));
+            using var mouth = new Pen(Color.FromArgb(230, 255, 132, 120), 1.4f);
+
+            g.FillEllipse(shadow, 3, 19, 18, 4);
+
+            Point[] leftHorn =
+            [
+                new(6, 7 + bob),
+                new(4 - hornWave, 2 + bob),
+                new(10, 6 + bob)
+            ];
+            Point[] rightHorn =
+            [
+                new(14, 6 + bob),
+                new(20 + hornWave, 2 + bob),
+                new(18, 8 + bob)
+            ];
+            g.FillPolygon(outline, leftHorn);
+            g.FillPolygon(outline, rightHorn);
+            g.FillPolygon(horn, [new(6, 6 + bob), new(5 - hornWave, 3 + bob), new(9, 6 + bob)]);
+            g.FillPolygon(horn, [new(15, 6 + bob), new(19 + hornWave, 3 + bob), new(18, 7 + bob)]);
+
+            g.FillEllipse(outline, 2, 5 + bob + squash, 20, 16 - squash);
+            g.FillEllipse(body, 4, 5 + bob + squash, 16, 15 - squash);
+            g.FillEllipse(face, 6, 9 + bob + squash, 12, 8);
+            g.FillEllipse(shine, 7, 7 + bob + squash, 5, 3);
+
+            g.FillEllipse(outline, 2 + stride, 14 + bob, 6, 5);
+            g.FillEllipse(outline, 16 - stride, 14 + bob, 6, 5);
+            g.FillEllipse(body, 3 + stride, 14 + bob, 4, 4);
+            g.FillEllipse(body, 17 - stride, 14 + bob, 4, 4);
+            g.FillEllipse(outline, 4 + stride, 18 + bob, 6, 3);
+            g.FillEllipse(outline, 14 - stride, 18 + bob, 6, 3);
+
+            g.FillEllipse(eye, 7, 10 + bob + squash, 4, 3);
+            g.FillEllipse(eye, 14, 10 + bob + squash, 4, 3);
+            g.FillEllipse(glint, 8, 10 + bob + squash, 1.4f, 1.4f);
+            g.FillEllipse(glint, 15, 10 + bob + squash, 1.4f, 1.4f);
+            g.DrawArc(mouth, 9, 13 + bob + squash, 6, 3, 15, 150);
+
+            sprites[frame] = bmp;
+        }
+
+        return sprites;
+    }
 
     private void EnsureGrid()
     {
@@ -404,7 +1419,7 @@ public sealed class GridControl : ScrollableControl
 
         for (int y = y0; y < y0 + BrushSize; y++)
             for (int x = x0; x < x0 + BrushSize; x++)
-                _map.SetBlocked(x, y, true);
+                SetDynamicAwareBlocked(x, y, true);
     }
 
     private void ClearMarkersOnObstacles()
@@ -413,6 +1428,26 @@ public sealed class GridControl : ScrollableControl
             _startX = _startY = -1;
         if (HasEnd && !_map.IsWalkable(_endX, _endY))
             _endX = _endY = -1;
+    }
+
+    private void SetDynamicAwareBlocked(int x, int y, bool blocked)
+    {
+        if (!_dynamicMode)
+        {
+            _map.SetBlocked(x, y, blocked);
+            return;
+        }
+
+        if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+            return;
+        if (IsInDynamicBlock(x, y))
+            return;
+        if (blocked && DynamicCellHasMonster(x, y))
+            return;
+
+        _dynamicStaticBlocked ??= new bool[DynamicWidth, DynamicHeight];
+        _dynamicStaticBlocked[x, y] = blocked;
+        _map.SetBlocked(x, y, blocked);
     }
 
     private void ApplyEdit(int x, int y)
@@ -425,7 +1460,7 @@ public sealed class GridControl : ScrollableControl
             case EditMode.BrushObstacle:
                 if (_eraseObstacle)
                 {
-                    _map.SetBlocked(x, y, false);   // 点在阻挡上：只清 1 格
+                    SetDynamicAwareBlocked(x, y, false);   // 点在阻挡上：只清 1 格
                 }
                 else
                 {
@@ -483,9 +1518,12 @@ public sealed class GridControl : ScrollableControl
         foreach (var (x, y) in _overlay.Path)
             g.FillRectangle(pathBrush, new Rectangle(x * cs, y * cs, cs, cs));
 
-        if (_overlay.Path.Count >= 2)
+        foreach (var segment in _overlay.PathSegments)
         {
-            var points = _overlay.Path
+            if (segment.Count < 2)
+                continue;
+
+            var points = segment
                 .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
                 .ToArray();
             g.DrawLines(pathPen, points);
@@ -548,9 +1586,11 @@ public sealed class GridControl : ScrollableControl
         if (cs < 14)
             return;
 
+        var cacheSystem = _system;
+        var cacheMap = cacheSystem.Map;
         float r = Math.Max(2f, cs * 0.1f);
         float off = cs * 0.30f;
-        bool snapOk = _snapW == _map.Width && _snapH == _map.Height;
+        bool snapOk = !_dynamicMode && _snapW == _map.Width && _snapH == _map.Height;
 
         using var cleanBrush = new SolidBrush(JumpCleanColor);
         using var freshBrush = new SolidBrush(JumpFreshColor);
@@ -576,7 +1616,7 @@ public sealed class GridControl : ScrollableControl
                     float dx = cx + ox * off;
                     float dy = cy + oy * off;
 
-                    if (!_system.Cache.IsClean(_map, x, y, dir))
+                    if (!cacheSystem.Cache.IsClean(cacheMap, x, y, dir))
                     {
                         g.DrawEllipse(ringPen, dx - r, dy - r, r * 2, r * 2);   // dirty：空心
                         continue;
