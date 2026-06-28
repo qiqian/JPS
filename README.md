@@ -168,6 +168,8 @@ flowchart LR
 | 查询某格某方向（clean） | 直接读缓存 | **O(1)** |
 | 查询某格某方向（dirty） | 沿该方向扫一次找到跳点/墙，并把**整段 run 一起洗白** | O(L)，但一次扫描清一串 |
 
+> **水平扫描按字（64 格）批处理**：[`GridMap`](JPS.Core/Models/GridMap.cs) 把阻挡位图**按行对齐到 `ulong`**（每行行首落在 64 位边界、行尾 padding 预置为阻挡），于是横向那次"扫到跳点/墙"可在"当前行 / 上行 / 下行"三行的位图上**一次处理一个 `ulong` = 64 格**——用位运算定位最近的墙或强迫邻居（跨字进位复用相邻字、用 de Bruijn 取最低/最高置位），把横向单次扫描从 O(L) 降到约 **O(L/64)**；纵向仍逐格（行主序下同列相邻格不在同一个字，无法按字批处理）。实现见 [`JumpPointCache.HorizontalScan`](JPS.Core/Pathfinding/JumpPointCache.cs)。
+
 **为什么只缓存正交方向、对角永远扫描？** 这是本设计刻意的取舍，有三个理由：
 
 1. **对角的瓶颈本来就在正交上**。回忆[对角扫描规则](#4-走直线与走斜线的扫描规则)：对角每走一步，都要沿它的两个正交分量各做一次直线扫描，所以对角跳跃最坏是 **O(L²)**。只要把这两次正交子检测改成"查正交缓存"，对角跳跃就降到接近 **O(L)**——**缓存正交，对角免费提速**，根本不需要单独给对角建表。
@@ -294,7 +296,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ 并行期间不修改 map
 ```
 
-> **正确性验证**：默认（已开启 `JPS_CONCURRENT_CACHE`）用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。`dotnet run --project JPS.Benchmark -- mt` 可复现该压测（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `MtTest`）。
+> **正确性验证**：默认（已开启 `JPS_CONCURRENT_CACHE`）用 8 线程并行、共享同一缓存跑 3000 组随机查询，结果与单线程 A\* ground truth **完全一致（0 不符）**。`dotnet run --project JPS.Benchmark -- mt` 可复现该压测（见 [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs) 的 `MtTest`）。此外 [`JPS.Accuracy`](#运行) 现在默认就按 `CPU/2` 线程共享同一 `JpsSystem` 跑每张图的全部 `.scen`，相当于在 **142 万条**官方真实查询上持续复核共享缓存的多线程安全。
 
 ---
 
@@ -350,7 +352,7 @@ Parallel.For(0, threads, _ =>
   | 1 | 0.52 MB | 1.08 MB（0.60 MB 搜索态 + 0.48 MB 共享缓存） |
   | 8 | 4.16 MB | 5.28 MB（4.80 MB 搜索态 + 0.48 MB 共享缓存） |
 
-- 地图本身（[`GridMap._blocked`](JPS.Core/Models/GridMap.cs)）位压缩到 1 bit/格（≈0.125 B/格），两者共享，可忽略。
+- 地图本身（[`GridMap._blocked`](JPS.Core/Models/GridMap.cs)）**按行对齐**位压缩（~1 bit/格，行尾 padding 可忽略，≈0.125 B/格；行对齐是为了水平按字扫描），两者共享，可忽略。
 - 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
 - 可视化数据完全不在算法核心里：寻路器只通过 [`ISearchObserver`](JPS.Core/Pathfinding/ISearchObserver.cs) 在展开/入队/扫描时发事件，收集与存储由 UI 层的采集器（[`SearchOverlay`](JPS.Playground/Controls/SearchOverlay.cs)）负责；不传 observer（`null`）时纯算法运行零额外开销。
 
@@ -393,6 +395,8 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 >
 > **正确性（.scen 基准）**：`dotnet run -c Release --project JPS.Accuracy` 递归读取 `movingai/` 下所有 MovingAI **`.scen` 场景**，对每条用例用官方最优解长度（octile：直 1 / 斜 √2、不切角）三重校验 JPS 与 A\*：① JPS 整数代价 == A\* 整数代价（最优性硬校验）；② JPS 路径合法（逐格相邻 / 可走 / 按当前构建不切角）；③ JPS 真实长度 ≈ 官方 `optimal`。可加参数限定范围与每场景用例数，如 `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`；结果同时写入 `accuracy-results/` 报告。整数 1414 近似 √2 会带来 ~1e-4·斜步 的舍入偏差（正常），真实次优 / 切角 / 漏解会产生远大于此的偏差并被单列。
 >
+> **并行执行（兼测多线程安全）**：每张图加载并单线程 `Sync` 一次后，用 `CPU/2` 个线程**共享同一 `JpsSystem`** 跑该图的全部用例（用例按步长切分给各线程，互不重叠）——既加速整跑，又顺带在百万级真实查询上持续验证 JPS 的[无锁共享缓存多线程安全](#4-无锁多线程共享惰性缓存的并行寻路)。结果与单线程逐字一致。若 `JPS.Core` 未定义 `JPS_CONCURRENT_CACHE`（共享缓存非线程安全），则自动退回单线程。
+>
 > **最新实测**（`斜穿角=禁止`，全部 1354 个 `.scen` / **142.3 万条**用例）：**漏解 0、与 A\* 整数代价不一致 0、路径非法 0、比官方更短 0**——即 JPS 完备、与 A\* 同度量完全最优、路径全合法、零切角泄漏。与官方最优长度逐条比对：**142.3034 万条精确吻合**，仅 4 条受整数 `1414≈√2` 在长对角路径上的累积影响（最大偏差仅 **0.0315 格**）；这并非算法缺陷——`subopt=0`（JPS 整数代价与 A\* 完全相等）已证明在本项目度量下处处最优。
 
 ---
@@ -427,6 +431,17 @@ dotnet run --project JPS.Playground
 
 **MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。也可在命令行自检单图：`dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`；或**递归遍历 `movingai/` 全部子目录（现含 562 张地图）、每图随机取若干可解起终点对比 JPS/A***：`dotnet run -c Release --project JPS.Benchmark -- mapbench 100`（每图样本数可调；可加第二参数只跑某子集，如 `mapbench 100 sc1-map`；输出每图尺寸/可走率/扩展节点/耗时/加速比/与 A* 是否一致及总汇总，并同时写入仓库 `benchmark-results/` 下带时间戳的报告文件，方便日后查看）。
 
+### 动态模式
+
+点击 Playground 工具栏的 **动态（Dynamic）** 切换到一个围绕单个共享 `JpsSystem` 构建的固定尺寸压力场景。
+
+- 方向键移动那块大的玩家可控障碍；阻挡画刷的编辑同样作用在这张实时 `GridMap` 上，怪物寻路前会先跑一次 `JpsSystem.Sync()`。
+- 不规则的环境障碍在小范围内缓慢随机漂移，且不与怪物或玩家可控块重叠。
+- 怪物是动画位图角色、不是地图障碍；它们靠每帧的预约表（reservation table）互相避让。
+- 每只怪物缓存自己的路径，仅在以下情形才重新寻路：到达目标、下一步被阻挡/被预约、目标失效、或触发随机重寻概率。
+- 并行的怪物寻路共享同一份跳点缓存，并从可复用对象池租借 `JpsPathfinder` 实例；若某一帧需要的并发寻路器多于现有数量，池会自动扩容。
+- 怪物路径按各自颜色绘制。状态栏只统计**实际提交了寻路请求的帧**的平均寻路墙钟耗时，外加最近一次的请求数与累计失败数。
+
 ---
 
 ## 项目结构
@@ -446,11 +461,11 @@ JPS.slnx                         # 解决方案
 │
 ├── JPS.Core/                    # ① 算法核心（netstandard2.1 / C# 9，整数寻路，无 UI 依赖）
 │   ├── Models/
-│   │   └── GridMap.cs           # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
+│   │   └── GridMap.cs           # 纯地形：尺寸 + 按行对齐位压缩阻挡(ulong[]，供水平按字扫描) + 版本号
 │   └── Pathfinding/
 │       ├── JpsDirections.cs     # 8 方向、整数代价(横1000/斜1414)、octile 启发、斜走合法性(不切角)
 │       ├── JpsRules.cs          # 跳点 / 强迫邻居规则（直接吃 GridMap，无委托）
-│       ├── JumpPointCache.cs    # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
+│       ├── JumpPointCache.cs    # 惰性正交跳点缓存（世代戳整体置脏；水平按字 64 格批扫描；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
 │       ├── JpsSystem.cs         # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
 │       ├── JpsPathfinder.cs     # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
 │       ├── AStarPathfinder.cs   # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
@@ -475,7 +490,7 @@ JPS.slnx                         # 解决方案
 │   └── Program.cs               # `-- bench`/`-- mt`/`-- map <path>`/`-- mapbench [q] [子目录]`/`-- scenbench [子目录]` 按地图归并 .scen 性能；`-- combo [q] [子目录]` 随机投点+ .scen 合并基准
 │
 └── JPS.Accuracy/                # ⑤ MovingAI .scen 批量正确性测试（引用 Core/Data）
-    └── Program.cs               # `-- [子目录] [每scen最多用例数]` 用官方最优解校验 JPS/A*（最优性 + 路径合法 + 真实长度）
+    └── Program.cs               # `-- [子目录] [每scen最多用例数]` 用官方最优解校验 JPS/A*（最优性 + 路径合法 + 真实长度）；每图 CPU/2 线程共享 JpsSystem 并行（兼测多线程安全）
 ```
 
 > **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
@@ -612,6 +627,8 @@ This project does **no eager precomputation** and instead turns the jump table i
 | Query a cell/direction (clean) | Read the cache directly | **O(1)** |
 | Query a cell/direction (dirty) | Scan once along the direction to a jump point/wall and **whiten the whole run at once** | O(L), one scan clears a whole strip |
 
+> **The horizontal scan is bit-parallel (64 cells per word):** [`GridMap`](JPS.Core/Models/GridMap.cs) stores the obstacle bitmap **row-aligned to `ulong`** (each row starts on a 64-bit boundary; trailing padding is pre-set to blocked), so the horizontal "scan to jump point/wall" processes **one `ulong` = 64 cells at a time** over the current/above/below rows — bitwise locating the nearest wall or forced neighbor (cross-word carry reused from the adjacent word, lowest/highest set bit via de Bruijn) — cutting a single horizontal scan from O(L) to ~**O(L/64)**; vertical stays cell-by-cell (same-column neighbors aren't in one word under row-major). See [`JumpPointCache.HorizontalScan`](JPS.Core/Pathfinding/JumpPointCache.cs).
+
 **Why cache only cardinal directions and always scan diagonals?** A deliberate trade-off, for three reasons:
 
 1. **The diagonal bottleneck is actually in the cardinals.** Recall the [diagonal scanning rule](#4-straight-and-diagonal-scanning): each diagonal step runs a straight scan along each of its two cardinal components, so diagonal jumping is worst-case **O(L²)**. Just turning those two cardinal sub-checks into "read the cardinal cache" brings diagonal jumping down to near **O(L)** — **cache the cardinals, diagonals speed up for free**, no separate diagonal table needed.
@@ -738,7 +755,7 @@ Parallel.For(0, threads, _ =>
 });                                  // ③ do not modify the map during parallel runs
 ```
 
-> **Correctness check:** by default (with `JPS_CONCURRENT_CACHE` on), 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run --project JPS.Benchmark -- mt` (see `MtTest` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)).
+> **Correctness check:** by default (with `JPS_CONCURRENT_CACHE` on), 8 threads sharing one cache run 3000 random queries in parallel; results are **identical to single-threaded A\* ground truth (0 mismatches)**. Reproduce via `dotnet run --project JPS.Benchmark -- mt` (see `MtTest` in [`JPS.Benchmark/Program.cs`](JPS.Benchmark/Program.cs)). On top of that, [`JPS.Accuracy`](#run) now runs each map's full `.scen` set across `CPU/2` threads sharing one `JpsSystem` by default — continuously re-checking shared-cache thread safety over **1.42M** official real-world queries.
 
 ## III. Visualization
 
@@ -790,7 +807,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
   | 1 | 0.52 MB | 1.08 MB (0.60 MB search state + 0.48 MB shared cache) |
   | 8 | 4.16 MB | 5.28 MB (4.80 MB search state + 0.48 MB shared cache) |
 
-- The map itself ([`GridMap._blocked`](JPS.Core/Models/GridMap.cs)) is bit-packed to 1 bit/cell (≈0.125 B/cell), shared by both, negligible.
+- The map itself ([`GridMap._blocked`](JPS.Core/Models/GridMap.cs)) is **row-aligned** bit-packed (~1 bit/cell, trailing padding negligible, ≈0.125 B/cell; row alignment enables the word-at-a-time horizontal scan), shared by both, negligible.
 - The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
 - Visualization data lives entirely outside the algorithm core: the pathfinders only emit events via [`ISearchObserver`](JPS.Core/Pathfinding/ISearchObserver.cs) on expand/enqueue/scan, and collection/storage is handled by a UI-layer collector ([`SearchOverlay`](JPS.Playground/Controls/SearchOverlay.cs)); with no observer (`null`) a pure run has zero extra overhead.
 
@@ -833,6 +850,8 @@ Interpretation:
 >
 > **Correctness (.scen suite):** `dotnet run -c Release --project JPS.Accuracy` recursively reads every MovingAI **`.scen`** scenario under `movingai/` and validates JPS and A* against the official optimal length (octile: 1 / √2, no corner-cutting) with three checks per case: ① JPS integer cost == A* integer cost (hard optimality check); ② JPS path is legal (cell-adjacent / walkable / no corner-cut for the current build); ③ JPS true length ≈ official `optimal`. Scope and per-scen cap are optional args, e.g. `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`; results are also written under `accuracy-results/`. The integer-1414 approximation of √2 yields a ~1e-4·diag-steps rounding deviation (normal); genuine suboptimality / corner-cuts / missed solutions deviate far more and are tallied separately.
 >
+> **Parallel execution (doubles as a thread-safety test):** after each map is loaded and `Sync`'d once on a single thread, `CPU/2` threads run that map's cases **sharing one `JpsSystem`** (cases striped across threads, non-overlapping) — speeding up the whole run while continuously validating JPS's [lock-free shared-cache thread safety](#4-lock-free-multithreading) over millions of real queries. Results are identical to single-threaded, field for field. If `JPS.Core` doesn't define `JPS_CONCURRENT_CACHE` (shared cache not thread-safe), it automatically falls back to a single thread.
+>
 > **Latest run** (`corner-cutting=off`, all 1354 `.scen` / **1.423M** cases): **0 missed solutions, 0 integer-cost mismatches vs A\*, 0 illegal paths, 0 shorter-than-official** — i.e. JPS is complete, fully optimal under this project's metric, with all paths legal and zero corner-cut leakage. Against the official optimal lengths: **1.423034M cases match exactly**, with only 4 cases affected by the `1414≈√2` accumulation on long diagonal paths (max deviation just **0.0315 cell**); this is not an algorithm defect — `subopt=0` (JPS integer cost identical to A\*) already proves optimality under the project's metric.
 
 ## Run
@@ -865,6 +884,17 @@ The legend (between the toolbar and the grid) maps every overlay color to its me
 
 **MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked). You can sanity-check a single map from the CLI: `dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`; or **benchmark JPS vs A\* recursively across all of `movingai/` (562 maps), each with random solvable start/goal pairs**: `dotnet run -c Release --project JPS.Benchmark -- mapbench 100` (samples-per-map is configurable; an optional second arg limits to one subset, e.g. `mapbench 100 sc1-map`; prints per-map size/walkable%/expanded/time/speedup/A*-match plus a grand total, and also writes a timestamped report under `benchmark-results/`).
 
+### Dynamic Mode
+
+Click **Dynamic** in the Playground toolbar to switch to a fixed-size stress scene built around one shared `JpsSystem`.
+
+- Arrow keys move the large user-controlled obstacle; edits from the wall brush update the same live `GridMap`, and `JpsSystem.Sync()` runs before monster pathfinding.
+- Irregular environment obstacles drift slowly in a small random range without overlapping monsters or the user-controlled block.
+- Monsters are animated bitmap actors, not map obstacles. They avoid each other with a per-frame reservation table.
+- Each monster keeps its cached path and only re-paths when it reaches the target, the next step becomes blocked/reserved, the target becomes invalid, or the random re-path chance fires.
+- Parallel monster pathfinding shares the same jump cache and rents `JpsPathfinder` instances from a reusable pool; the pool grows if one frame needs more concurrent finders than are currently available.
+- Monster paths are drawn in per-monster colors. The status bar reports average pathfinding wall time only across frames that actually submitted path requests, plus the latest request count and accumulated failure count.
+
 ## Project Structure
 
 The `JPS.slnx` solution splits into **clearly-scoped projects**:
@@ -882,11 +912,11 @@ JPS.slnx                         # solution
 │
 ├── JPS.Core/                    # ① algorithm core (netstandard2.1 / C# 9, integer pathfinding, no UI deps)
 │   ├── Models/
-│   │   └── GridMap.cs           # Pure terrain: size + bit-packed obstacles (ulong[]) + version
+│   │   └── GridMap.cs           # Pure terrain: size + row-aligned bit-packed obstacles (ulong[], enables word-at-a-time horizontal scan) + version
 │   └── Pathfinding/
 │       ├── JpsDirections.cs     # 8 directions, integer cost (1000/1414), octile heuristic, diagonal legality (no corner-cut)
 │       ├── JpsRules.cs          # Jump-point / forced-neighbor rules (take GridMap directly, no delegate)
-│       ├── JumpPointCache.cs    # Lazy cardinal jump cache (generation-stamp bulk invalidate; Volatile publish gated by JPS_CONCURRENT_CACHE)
+│       ├── JumpPointCache.cs    # Lazy cardinal jump cache (generation-stamp bulk invalidate; word-at-a-time 64-cell horizontal scan; Volatile publish gated by JPS_CONCURRENT_CACHE)
 │       ├── JpsSystem.cs         # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
 │       ├── JpsPathfinder.cs     # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
 │       ├── AStarPathfinder.cs   # A* baseline (packed state: came-dir sbyte + merged mark)
@@ -911,7 +941,7 @@ JPS.slnx                         # solution
 │   └── Program.cs               # `-- bench`/`-- mt`/`-- map <path>`/`-- mapbench [q] [subdir]`/`-- scenbench [subdir]` per-map .scen perf; `-- combo [q] [subdir]` random + .scen combined benchmark
 │
 └── JPS.Accuracy/                # ⑤ MovingAI .scen batch correctness test (references Core/Data)
-    └── Program.cs               # `-- [subdir] [maxPerScen]` validate JPS/A* against official optima (optimality + legal path + true length)
+    └── Program.cs               # `-- [subdir] [maxPerScen]` validate JPS/A* against official optima (optimality + legal path + true length); per map, CPU/2 threads share one JpsSystem in parallel (also a thread-safety test)
 ```
 
 > **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.

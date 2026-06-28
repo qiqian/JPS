@@ -71,7 +71,7 @@ public sealed class GridControl : ScrollableControl
         public bool ContainsWorldCell(int x, int y) => CellSet.Contains((x - X, y - Y));
     }
 
-    private readonly record struct DynamicMonsterSnapshot(int Index, int X, int Y, int TargetX, int TargetY, JpsPathfinder Pathfinder);
+    private readonly record struct DynamicMonsterSnapshot(int Index, int X, int Y, int TargetX, int TargetY);
     private readonly record struct DynamicPlan(int Index, bool Success, List<(int X, int Y)> Path, SearchOverlay Overlay);
 
     private int _cellSize;               // 当前格像素尺寸
@@ -516,7 +516,6 @@ public sealed class GridControl : ScrollableControl
 
         _system.Sync();
         var requests = new List<DynamicMonsterSnapshot>();
-        var rentedFinders = new List<JpsPathfinder>();
 
         for (int i = 0; i < _monsters.Length; i++)
         {
@@ -530,30 +529,14 @@ public sealed class GridControl : ScrollableControl
             bool randomRepath = !noPath && !nextBlocked && _dynamicRng.NextDouble() < DynamicRandomRepathChance;
             if (noPath || nextBlocked || randomRepath)
             {
-                var finder = RentDynamicPathfinder();
-                rentedFinders.Add(finder);
-                requests.Add(new DynamicMonsterSnapshot(i, monster.X, monster.Y, monster.TargetX, monster.TargetY, finder));
+                requests.Add(new DynamicMonsterSnapshot(i, monster.X, monster.Y, monster.TargetX, monster.TargetY));
             }
         }
 
         var sw = requests.Count > 0 ? Stopwatch.StartNew() : null;
-        var tasks = new Task<DynamicPlan>[requests.Count];
-        for (int i = 0; i < requests.Count; i++)
-        {
-            var request = requests[i];
-            tasks[i] = Task.Run(() => PlanMonsterStep(_system, request));
-        }
-
-        DynamicPlan[] plans;
-        try
-        {
-            plans = await Task.WhenAll(tasks);
-        }
-        finally
-        {
-            for (int i = 0; i < rentedFinders.Count; i++)
-                ReturnDynamicPathfinder(rentedFinders[i]);
-        }
+        var plans = JpsBuildInfo.ConcurrentCache
+            ? await RunDynamicPlansParallelAsync(requests)
+            : RunDynamicPlansSingleThread(requests);
 
         if (sw != null)
         {
@@ -625,18 +608,61 @@ public sealed class GridControl : ScrollableControl
         _overlay.AddFrom(merged);
     }
 
-    private DynamicPlan PlanMonsterStep(JpsSystem system, DynamicMonsterSnapshot monster)
+    private DynamicPlan PlanMonsterStep(JpsSystem system, DynamicMonsterSnapshot monster, JpsPathfinder finder)
     {
         var overlay = new SearchOverlay();
         overlay.SetWidth(DynamicWidth);
         overlay.BeginCollect();
-        var result = monster.Pathfinder.FindPath(system, (monster.X, monster.Y), (monster.TargetX, monster.TargetY), overlay);
+        var result = finder.FindPath(system, (monster.X, monster.Y), (monster.TargetX, monster.TargetY), overlay);
 
         return new DynamicPlan(
             monster.Index,
             result.Success,
             result.Success ? result.Path : new List<(int X, int Y)>(),
             overlay);
+    }
+
+    private async Task<DynamicPlan[]> RunDynamicPlansParallelAsync(List<DynamicMonsterSnapshot> requests)
+    {
+        var rentedFinders = new List<JpsPathfinder>(requests.Count);
+        var tasks = new Task<DynamicPlan>[requests.Count];
+        try
+        {
+            for (int i = 0; i < requests.Count; i++)
+            {
+                var request = requests[i];
+                var finder = RentDynamicPathfinder();
+                rentedFinders.Add(finder);
+                tasks[i] = Task.Run(() => PlanMonsterStep(_system, request, finder));
+            }
+
+            return await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            for (int i = 0; i < rentedFinders.Count; i++)
+                ReturnDynamicPathfinder(rentedFinders[i]);
+        }
+    }
+
+    private DynamicPlan[] RunDynamicPlansSingleThread(List<DynamicMonsterSnapshot> requests)
+    {
+        var plans = new DynamicPlan[requests.Count];
+        if (requests.Count == 0)
+            return plans;
+
+        var finder = RentDynamicPathfinder();
+        try
+        {
+            for (int i = 0; i < requests.Count; i++)
+                plans[i] = PlanMonsterStep(_system, requests[i], finder);
+        }
+        finally
+        {
+            ReturnDynamicPathfinder(finder);
+        }
+
+        return plans;
     }
 
     private void EnsureDynamicPathfinderPool()
