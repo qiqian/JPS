@@ -174,16 +174,27 @@ namespace JPS.Pathfinding
                 return _cells[idx0].Dist[dir];
 #endif
 
-            // 扫描：从 (x,y) 沿方向找最近跳点或墙
-            int s = 0, rx = x, ry = y;
-            bool jumpFound = false;
-            while (true)
+            // 扫描：从 (x,y) 沿方向找最近跳点或墙。
+            // 水平（dy==0）走按字（ulong）批扫描：一次处理 64 格的“撞墙/强迫邻居”判定（HorizontalScan）。
+            // 垂直（dx==0）仍逐格扫描——行主序下垂直相邻格不同字，无法按字批处理，也非本次优化目标。
+            int s;
+            bool jumpFound;
+            if (dy == 0)
             {
-                rx += dx;
-                ry += dy;
-                s++;
-                if (!map.IsWalkable(rx, ry)) { jumpFound = false; break; }
-                if (JpsRules.IsJumpPoint(map, rx, ry, dx, dy)) { jumpFound = true; break; }
+                (s, jumpFound) = HorizontalScan(map, x, y, dx);
+            }
+            else
+            {
+                s = 0;
+                int ry = y;
+                jumpFound = false;
+                while (true)
+                {
+                    ry += dy;
+                    s++;
+                    if (!map.IsWalkable(x, ry)) { jumpFound = false; break; }
+                    if (JpsRules.IsJumpPoint(map, x, ry, dx, dy)) { jumpFound = true; break; }
+                }
             }
 
             // 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ short.MaxValue，安全转 short。
@@ -204,6 +215,124 @@ namespace JPS.Pathfinding
             }
 
             return _cells[idx0].Dist[dir];   // 本线程自己刚写的值，程序序可见，无需屏障
+        }
+
+        // ---------------- 水平按字（ulong）跳点扫描 ----------------
+        //
+        // 从 (x,y) 沿水平方向 dx∈{+1,-1} 找最近的“停点”，语义与逐格扫描完全一致：
+        //   · 撞墙（含越界/padding）→ 返回 (到墙步数, jumpFound=false)
+        //   · 出现强迫邻居（该格是跳点）→ 返回 (到跳点步数, jumpFound=true)
+        // 取两者中“先到”的那个（逐格循环里墙判定在前，故同列同时成立时按墙处理；本实现两掩码天然互斥）。
+        //
+        // 一次处理一个 64 位字：在“当前行 y / 上行 y-1 / 下行 y+1”的可走位图上做位运算，
+        // 用 de Bruijn 找字内最近的置位，从而把“逐格 IsWalkable + IsJumpPoint”压成按字批处理。
+        // 行按 64 对齐（见 GridMap）保证同一行的 64 格落在同一个字内、不跨行，扫描才能纯按字推进。
+        private static (int s, bool jumpFound) HorizontalScan(GridMap map, int x, int y, int dx)
+        {
+            if (dx > 0)
+            {
+                int startCol = x + 1;                  // 逐格循环先 +dx 再判，故从 x+1 起
+                int w = startCol >> 6;
+                ulong sub = ~0UL << (startCol & 63);   // 首字内只看 ≥ 起始位的列
+                while (true)
+                {
+                    ulong walkY = map.WalkableWord(w, y);
+                    ulong wall = ~walkY;               // 行 y 的阻挡位（含越界/padding）
+                    ulong jump = ForcedRight(map, w, y, walkY);
+                    ulong m = (wall | jump) & sub;
+                    if (m != 0UL)
+                    {
+                        int b = Bits.LowestSet(m);
+                        int col = (w << 6) + b;
+                        bool isJump = ((jump >> b) & 1UL) != 0UL;
+                        return (col - x, isJump);      // 越界字会令 wall 命中，循环必然终止
+                    }
+                    w++;
+                    sub = ~0UL;                        // 后续字看满 64 列
+                }
+            }
+            else
+            {
+                int startCol = x - 1;
+                if (startCol < 0) return (1, false);   // 左邻即越界 → 墙，步数 1
+                int w = startCol >> 6;
+                int sb = startCol & 63;
+                ulong sub = sb == 63 ? ~0UL : ((1UL << (sb + 1)) - 1);   // 首字内只看 ≤ 起始位的列
+                while (true)
+                {
+                    ulong walkY = map.WalkableWord(w, y);
+                    ulong wall = ~walkY;
+                    ulong jump = ForcedLeft(map, w, y, walkY);
+                    ulong m = (wall | jump) & sub;
+                    if (m != 0UL)
+                    {
+                        int b = Bits.HighestSet(m);
+                        int col = (w << 6) + b;
+                        bool isJump = ((jump >> b) & 1UL) != 0UL;
+                        return (x - col, isJump);
+                    }
+                    w--;
+                    if (w < 0) return (x + 1, false);  // 越过第 0 列 → 第 -1 列是墙，步数 x+1
+                    sub = ~0UL;
+                }
+            }
+        }
+
+        // 向右（dx=+1）时，行 y 的字 w 内每列 c 的“强迫邻居跳点”掩码：
+        //   jump(c) = walk(c,y) ∧ [ (walk(c,y-1) ∧ block(c-1,y-1)) ∨ (walk(c,y+1) ∧ block(c-1,y+1)) ]
+        // 其中 block(c-1) = 该行阻挡位左移 1（c-1→c），跨字时低位从前一个字（w-1）的最高位补入。
+        private static ulong ForcedRight(GridMap map, int w, int y, ulong walkY)
+        {
+            ulong walkUp = map.WalkableWord(w, y - 1);
+            ulong walkDn = map.WalkableWord(w, y + 1);
+            ulong upPrevMsb = (~map.WalkableWord(w - 1, y - 1)) >> 63;   // 前一字最高位 = 列 (w*64-1) 的阻挡
+            ulong dnPrevMsb = (~map.WalkableWord(w - 1, y + 1)) >> 63;
+            ulong blkUpShift = (~walkUp << 1) | upPrevMsb;              // block(c-1, y-1)
+            ulong blkDnShift = (~walkDn << 1) | dnPrevMsb;              // block(c-1, y+1)
+            return ((walkUp & blkUpShift) | (walkDn & blkDnShift)) & walkY;
+        }
+
+        // 向左（dx=-1）时对称：邻居取 c+1 → 阻挡位右移 1（c+1→c），跨字时高位从后一个字（w+1）的最低位补入。
+        private static ulong ForcedLeft(GridMap map, int w, int y, ulong walkY)
+        {
+            ulong walkUp = map.WalkableWord(w, y - 1);
+            ulong walkDn = map.WalkableWord(w, y + 1);
+            ulong upNextLsb = (~map.WalkableWord(w + 1, y - 1) & 1UL) << 63;   // 后一字最低位 = 列 ((w+1)*64) 的阻挡
+            ulong dnNextLsb = (~map.WalkableWord(w + 1, y + 1) & 1UL) << 63;
+            ulong blkUpShift = (~walkUp >> 1) | upNextLsb;             // block(c+1, y-1)
+            ulong blkDnShift = (~walkDn >> 1) | dnNextLsb;             // block(c+1, y+1)
+            return ((walkUp & blkUpShift) | (walkDn & blkDnShift)) & walkY;
+        }
+    }
+
+    /// <summary>
+    /// 64 位位扫描（de Bruijn 序列实现）。手写而非用 <c>System.Numerics.BitOperations</c>，
+    /// 以兼容 netstandard2.1 / Unity 2022（避免 .NET Core 专属 API）。
+    /// </summary>
+    internal static class Bits
+    {
+        private const ulong DeBruijn = 0x03f79d71b4cb0a89UL;
+        private static readonly int[] Index =
+        {
+             0,  1, 48,  2, 57, 49, 28,  3,
+            61, 58, 50, 42, 38, 29, 17,  4,
+            62, 55, 59, 36, 53, 51, 43, 22,
+            45, 39, 33, 30, 24, 18, 12,  5,
+            63, 47, 56, 27, 60, 41, 37, 16,
+            54, 35, 52, 21, 44, 32, 23, 11,
+            46, 26, 40, 15, 34, 20, 31, 10,
+            25, 14, 19,  9, 13,  8,  7,  6,
+        };
+
+        /// <summary>最低置位的下标（要求 x != 0）。</summary>
+        public static int LowestSet(ulong x) => Index[((x & (~x + 1)) * DeBruijn) >> 58];
+
+        /// <summary>最高置位的下标（要求 x != 0）。</summary>
+        public static int HighestSet(ulong x)
+        {
+            x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+            x &= ~(x >> 1);   // 仅保留最高位
+            return Index[(x * DeBruijn) >> 58];
         }
     }
 }
