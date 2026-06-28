@@ -151,7 +151,11 @@ namespace JPS.Pathfinding
                 return false;
             if (_mapVersion != map.Version)
                 return false;
+#if JPS_CONCURRENT_CACHE
+            return System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[y * _w + x].Gen, dir)) == _validGen;
+#else
             return _cells[y * _w + x].Gen[dir] == _validGen;
+#endif
         }
 
         /// <summary>

@@ -122,9 +122,10 @@ namespace JPS.Pathfinding
                     int idx = _dirBuf[i];
                     var (dx, dy) = JpsDirections.All[idx];
 
-                    JumpEntry jump = JpsDirections.IsDiagonal(dx, dy)
+                    bool diagonal = JpsDirections.IsDiagonalIndex(idx);
+                    JumpEntry jump = diagonal
                         ? DiagonalJump(map, cx, cy, dx, dy, gx, gy)
-                        : CardinalJump(map, cx, cy, dx, dy, gx, gy);
+                        : CardinalJump(map, cx, cy, dx, dy, idx, gx, gy);
 
                     if (!jump.HasJump)
                     {
@@ -138,8 +139,8 @@ namespace JPS.Pathfinding
                     if (_mark[nbId] == closedMark)
                         continue;
 
-                    long moveCost = (long)jump.Steps *
-                        (JpsDirections.IsDiagonal(dx, dy) ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost);
+                    long moveCost = (long)jump.Steps * 
+                        (diagonal ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost);
                     long tentative = _g[current] + moveCost;
 
                     bool firstSeen = _mark[nbId] < openMark;
@@ -153,8 +154,7 @@ namespace JPS.Pathfinding
 
                     if (firstSeen) obs?.OnFrontier(jump.X, jump.Y);
 
-                    long f = tentative + JpsDirections.OctileHeuristic(jump.X, jump.Y, gx, gy);
-                    _open.Enqueue(nbId, f);
+                    _open.Enqueue(nbId, tentative + JpsDirections.OctileHeuristic(jump.X, jump.Y, gx, gy));
                 }
             }
 
@@ -168,9 +168,8 @@ namespace JPS.Pathfinding
         // 中间格不入队、不展开，只“扫一眼”。这里用惰性正交缓存 CardinalDist 把
         // “到下一个跳点/墙的带符号距离”O(1) 复用，避免每次重复逐格扫描。
 
-        private JumpEntry CardinalJump(GridMap map, int x, int y, int dx, int dy, int gx, int gy)
+        private JumpEntry CardinalJump(GridMap map, int x, int y, int dx, int dy, int dir, int gx, int gy)
         {
-            int dir = JpsDirections.IndexOf(dx, dy);   // 正交方向 → 0..3
             int dist = _cache.CardinalDist(map, x, y, dx, dy, dir);
             int maxTravel = dist > 0 ? dist : -dist;
 
@@ -201,6 +200,8 @@ namespace JPS.Pathfinding
         private JumpEntry DiagonalJump(GridMap map, int x, int y, int dx, int dy, int gx, int gy)
         {
             int cx = x, cy = y, steps = 0;
+            int horizontalDir = JpsDirections.IndexOf(dx, 0);
+            int verticalDir = JpsDirections.IndexOf(0, dy);
             while (true)
             {
                 // 默认禁止斜穿角：从当前格斜走一步需目标格 + 两侧正交格都可走
@@ -217,8 +218,8 @@ namespace JPS.Pathfinding
                     return new JumpEntry(cx, cy, steps);
 
                 // 正交分量子检测（含终点拦截），命中正交 memo 时为 O(1)
-                if (CardinalJump(map, cx, cy, dx, 0, gx, gy).HasJump ||
-                    CardinalJump(map, cx, cy, 0, dy, gx, gy).HasJump)
+                if (CardinalJump(map, cx, cy, dx, 0, horizontalDir, gx, gy).HasJump ||
+                    CardinalJump(map, cx, cy, 0, dy, verticalDir, gx, gy).HasJump)
                     return new JumpEntry(cx, cy, steps);
             }
         }
@@ -293,9 +294,17 @@ namespace JPS.Pathfinding
             // 起点没有父（parentDir<0）：没有“来向”可供剪枝，必须探索全部 8 个方向。
             if (parentDir < 0)
             {
+                int startCount = 0;
                 for (int i = 0; i < JpsDirections.Count; i++)
-                    _dirBuf[i] = i;
-                return JpsDirections.Count;
+                {
+                    var (dx, dy) = JpsDirections.All[i];
+                    bool allowed = JpsDirections.IsDiagonalIndex(i)
+                        ? JpsDirections.DiagonalAllowed(map, x, y, dx, dy)
+                        : map.IsWalkable(x + dx, y + dy);
+                    if (allowed)
+                        _dirBuf[startCount++] = i;
+                }
+                return startCount;
             }
 
             // pdx,pdy = 父→x 的移动方向（“来向”，也即 x 当前的前进方向）。
@@ -395,12 +404,21 @@ namespace JPS.Pathfinding
         private static void ScanFailedRay(GridMap map, int x, int y, int dx, int dy, ISearchObserver obs)
         {
             int cx = x, cy = y;
+            bool diagonal = JpsDirections.IsDiagonal(dx, dy);
             while (true)
             {
+                if (diagonal)
+                {
+                    if (!JpsDirections.DiagonalAllowed(map, cx, cy, dx, dy))
+                        return;
+                }
+                else if (!map.IsWalkable(cx + dx, cy + dy))
+                {
+                    return;
+                }
+
                 cx += dx;
                 cy += dy;
-                if (!map.IsWalkable(cx, cy))
-                    return;
                 obs.OnScan(cx, cy);
             }
         }

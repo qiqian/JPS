@@ -194,7 +194,7 @@ flowchart TD
 - **跨查询复用**：两次障碍变化之间的多次寻路，会不断复用已洗白的跳点，越用越快——明显优于纯逐格扫描。
 - 用**世代计数器**而非 bool 数组，使"整体置脏"真正 O(1)（无需遍历清零）。
 
-> 实现见 [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs) 的 `CardinalDist`（惰性正交 memo）与 `DiagonalJump`（复用 memo 的经典对角扫描）。
+> 实现见 [`JumpPointCache`](JPS.Core/Pathfinding/JumpPointCache.cs) 的 `CardinalDist`（惰性正交 memo）与 [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs) 的 `DiagonalJump`（复用 memo 的经典对角扫描）。
 
 ### 2. 静态 / 动态障碍的兼容设计
 
@@ -627,7 +627,7 @@ flowchart TD
 - **Cross-query reuse:** between two obstacle changes, multiple searches keep reusing whitened jump points, getting faster the more they run — clearly better than pure per-cell scanning.
 - A **generation counter** rather than a bool array makes "bulk invalidate" truly O(1) (no clearing pass).
 
-> See `CardinalDist` (lazy cardinal memo) and `DiagonalJump` (classic diagonal scan reusing the memo) in [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs).
+> See `CardinalDist` (lazy cardinal memo) in [`JumpPointCache`](JPS.Core/Pathfinding/JumpPointCache.cs), and `DiagonalJump` (classic diagonal scan reusing the memo) in [`JpsPathfinder`](JPS.Core/Pathfinding/JpsPathfinder.cs).
 
 ### 2. Unified Obstacle Model
 

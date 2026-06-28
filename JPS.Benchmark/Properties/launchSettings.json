@@ -2,7 +2,7 @@
   "profiles": {
     "JPS.Benchmark": {
       "commandName": "Project",
-      "commandLineArgs": "mapbench 1000"
+      "commandLineArgs": "combo 1000"
     }
   }
 }
