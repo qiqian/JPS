@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Threading.Tasks;
 using JPS.Data;
 using JPS.Models;
 using JPS.Pathfinding;
@@ -122,10 +123,16 @@ namespace JPS.Accuracy
             var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
             void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
+            // JPS.Core 未定义 JPS_CONCURRENT_CACHE 时共享缓存非线程安全 → 强制单线程，避免数据竞争。
+            int threadCount = JpsBuildInfo.ConcurrentCache ? Math.Max(1, Environment.ProcessorCount / 2) : 1;
+
             Console.WriteLine($"# JPS / A* · MovingAI .scen 正确性报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}");
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             Console.WriteLine($"范围：{scope}，共 {files.Length} 个 .scen 文件，每个 {(maxPerScen == 0 ? "全部用例" : $"最多 {maxPerScen} 例")}");
+            Console.WriteLine(JpsBuildInfo.ConcurrentCache
+                ? $"并行：每张图加载后用 {threadCount} 线程（CPU {Environment.ProcessorCount} 的 1/2）共享同一 JpsSystem 跑该图的用例（兼测 JPS 多线程安全）"
+                : "并行：JPS.Core 未定义 JPS_CONCURRENT_CACHE（共享缓存非线程安全）→ 强制单线程");
             Console.WriteLine();
             Console.WriteLine("校验项：① JPS整数代价==A*整数代价（最优性）  ② JPS路径合法（相邻/可走/不切角）  ③ JPS真实长度≈官方最优");
             Console.WriteLine("列说明：n=测试用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短");
@@ -135,117 +142,150 @@ namespace JPS.Accuracy
 
             // 跨 scen 复用已加载的地图与共享缓存（同一张图被多个 scen 引用时直接命中、且缓存已预热）
             var mapCache = new Dictionary<string, (GridMap map, JpsSystem sys)>(StringComparer.OrdinalIgnoreCase);
-            var jps = new JpsPathfinder();
-            var astar = new AStarPathfinder();
             bool allowCorner = JpsBuildInfo.CornerCutting;
 
-            long tN = 0, tPass = 0, tJFail = 0, tSubopt = 0, tInval = 0, tRefL = 0, tRefS = 0, tTrivial = 0, tBadCell = 0;
-            long exactCnt = 0, artifactCnt = 0;
-            double maxDevOk = 0;     // 通过项里的最大 |真实长度-官方|（应为舍入量级）
-            double worstBad = 0;     // 失败项里的最大 |偏差|
+            Stats total = default;
             var sw = Stopwatch.StartNew();
 
-            int total = files.Length;
+            int totalFiles = files.Length;
+            var parOpt = new ParallelOptions { MaxDegreeOfParallelism = threadCount };
             for (int fi = 0; fi < files.Length; fi++)
             {
                 var f = files[fi];
                 string rel = Path.GetRelativePath(root, f).Replace('\\', '/');
                 string name = rel.EndsWith(".scen", StringComparison.OrdinalIgnoreCase) ? rel[..^5] : rel;
                 string scenDir = Path.GetDirectoryName(f)!;
-                progress.Show($"[{fi + 1}/{total}] {Trunc(name, 44)}");
+                progress.Show($"[{fi + 1}/{totalFiles}] {Trunc(name, 44)}");
 
                 List<Entry> entries;
                 try { entries = ParseScen(f); }
                 catch (Exception ex) { Emit($"{name,-44}  解析失败：{ex.Message}"); continue; }
                 if (maxPerScen > 0 && entries.Count > maxPerScen) entries = entries.GetRange(0, maxPerScen);
 
-                int n = 0, pass = 0, jFail = 0, subopt = 0, inval = 0, refL = 0, refS = 0;
-
-                // 一个 .scen 内所有用例几乎总是引用同一张图：只在 map 字段变化时才解析/解析路径，
-                // 其余用例直接复用上次的 GridMap + 预热好的 JpsSystem（跨文件再由 mapCache 复用）。
-                GridMap? map = null;
-                JpsSystem? sys = null;
-                string? curMapField = null;
-
-                for (int ei = 0; ei < entries.Count; ei++)
+                // 预解析本 scen 引用的所有地图（**单线程**完成加载与 JpsSystem.Sync——满足“并行寻路前
+                // 必须由单线程 Sync 一次”的前提；几乎总是单张图）。缺失的图存 null，其用例随后被跳过。
+                var localMaps = new Dictionary<string, (GridMap map, JpsSystem sys)?>(StringComparer.Ordinal);
+                foreach (var e in entries)
                 {
-                    if ((ei & 23) == 0)
-                        progress.Show($"[{fi + 1}/{total}] {Trunc(name, 40)}  {ei}/{entries.Count}");
-                    var e = entries[ei];
-                    if (!string.Equals(curMapField, e.Map, StringComparison.Ordinal))
-                    {
-                        curMapField = e.Map;
-                        try { (map, sys) = GetMap(scenDir, e.Map, root, mapCache); }
-                        catch { map = null; sys = null; }   // 地图缺失：置空，引用它的用例随后被跳过
-                    }
-                    if (map is null || sys is null) continue;   // 该图缺失，跳过（不影响其余；下方 map/sys 已收窄为非空）
-
-                    var s = (e.Sx, e.Sy);
-                    var g = (e.Gx, e.Gy);
-
-                    // 越界 / 起终点在阻挡上：场景/地图不匹配，单独计数，不进入算法校验
-                    if (!InBounds(map, s) || !InBounds(map, g) || !map.IsWalkable(s.Item1, s.Item2) || !map.IsWalkable(g.Item1, g.Item2))
-                    { tBadCell++; continue; }
-
-                    if (s == g) { tTrivial++; continue; }   // 平凡用例（首尾同格）跳过
-
-                    n++;
-                    var rj = jps.FindPath(sys, s, g);
-                    var ra = astar.FindPath(map, s, g);
-
-                    // ① 最优性：与 A*（同度量 ground truth）整数代价必须一致
-                    if (rj.Success != ra.Success)
-                    {
-                        if (!rj.Success) jFail++;       // A* 有解而 JPS 无解 → JPS 漏解
-                        else subopt++;                  // JPS 有解而 A* 无解 → 异常（计入 subopt）
-                        continue;
-                    }
-                    if (!rj.Success) { jFail++; continue; }   // 两者都无解（可解场景里属异常）
-
-                    var (jCard, jDiag) = CountSteps(rj.Path);
-                    var (aCard, aDiag) = CountSteps(ra.Path);
-                    long jInt = jCard * 1000L + jDiag * 1414L;
-                    long aInt = aCard * 1000L + aDiag * 1414L;
-                    if (jInt != aInt) { subopt++; worstBad = Math.Max(worstBad, Math.Abs(jInt - aInt) / 1000.0); continue; }
-
-                    // ② 路径合法性
-                    if (!ValidPath(map, rj.Path, s, g, allowCorner, out _)) { inval++; continue; }
-
-                    // ③ 与官方最优比对（真实 octile 长度）
-                    double jLen = jCard + jDiag * Sqrt2;
-                    double dev = jLen - e.Optimal;
-                    if (dev > RefTol) { refL++; worstBad = Math.Max(worstBad, dev); continue; }
-                    if (dev < -RefTol) { refS++; worstBad = Math.Max(worstBad, -dev); continue; }
-
-                    double ad = Math.Abs(dev);
-                    if (ad <= 1e-6) exactCnt++; else artifactCnt++;
-                    maxDevOk = Math.Max(maxDevOk, ad);
-                    pass++;
+                    if (localMaps.ContainsKey(e.Map)) continue;
+                    try { localMaps[e.Map] = GetMap(scenDir, e.Map, root, mapCache); }
+                    catch { localMaps[e.Map] = null; }
                 }
 
-                if (n > 0)
-                    Emit($"{Trunc(name, 44),-44}{n,8}{pass,8}{jFail,7}{subopt,8}{inval,7}{refL,7}{refS,7}");
+                // 把本 scen（≈同一张图）的用例按步长切给 threadCount 个线程**并行**验证；所有线程共享
+                // 同一 JpsSystem（地图 + 跳点缓存）——既跑正确性，也压测 JPS 的多线程安全（共享缓存无锁补写）。
+                // 每线程持有自己的 JpsPathfinder/AStarPathfinder（搜索态线程私有）；并行期间地图只读、不再 Sync。
+                var partial = new Stats[threadCount];
+                Parallel.For(0, threadCount, parOpt, t =>
+                {
+                    var jps = new JpsPathfinder();
+                    var astar = new AStarPathfinder();
+                    Stats st = default;
+                    // 步长划分：线程 t 只取下标 t, t+threadCount, t+2*threadCount …（即 entry i 归线程 i%threadCount）。
+                    // 各线程拿到不相交的 1/threadCount 份用例，合起来恰好覆盖全部、不重不漏——这是把 entries
+                    // 拆给各线程并行的地方（不是每线程都跑全部）。交错取还能让长/短查询均摊、避免某线程拖尾。
+                    for (int i = t; i < entries.Count; i += threadCount)
+                    {
+                        var e = entries[i];
+                        if (!localMaps.TryGetValue(e.Map, out var mm) || mm is null) continue;
+                        ClassifyEntry(mm.Value.map, mm.Value.sys, jps, astar, e, allowCorner, ref st);
+                    }
+                    partial[t] = st;
+                });
 
-                tN += n; tPass += pass; tJFail += jFail; tSubopt += subopt; tInval += inval; tRefL += refL; tRefS += refS;
+                Stats scen = default;
+                for (int t = 0; t < threadCount; t++) scen.Merge(partial[t]);
+
+                if (scen.N > 0)
+                    Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}");
+
+                total.Merge(scen);
             }
 
             sw.Stop();
             progress.Clear();
             Console.WriteLine(new string('-', 94));
-            Console.WriteLine($"{"合计",-44}{tN,8}{tPass,8}{tJFail,7}{tSubopt,8}{tInval,7}{tRefL,7}{tRefS,7}");
+            Console.WriteLine($"{"合计",-44}{total.N,8}{total.Pass,8}{total.JFail,7}{total.Subopt,8}{total.Inval,7}{total.RefL,7}{total.RefS,7}");
             Console.WriteLine();
-            long fails = tJFail + tSubopt + tInval + tRefL + tRefS;
-            Console.WriteLine($"用例 {tN}（平凡 {tTrivial}，无效起终点 {tBadCell} 已跳过），用时 {sw.Elapsed.TotalSeconds:F1}s");
-            Console.WriteLine($"通过项中：精确匹配 {exactCnt}，整数度量舍入 {artifactCnt}（最大偏差 {maxDevOk:E2}）");
+            long fails = total.JFail + total.Subopt + total.Inval + total.RefL + total.RefS;
+            Console.WriteLine($"用例 {total.N}（平凡 {total.Trivial}，无效起终点 {total.BadCell} 已跳过），用时 {sw.Elapsed.TotalSeconds:F1}s");
+            Console.WriteLine($"通过项中：精确匹配 {total.Exact}，整数度量舍入 {total.Artifact}（最大偏差 {total.MaxDevOk:E2}）");
             Console.WriteLine(fails == 0
-                ? $"正确性：全部 {tN} 例三项校验通过，✓ 通过"
-                : $"正确性：⚠ {fails} 例未通过（jFail={tJFail} subopt={tSubopt} inval={tInval} refL={tRefL} refS={tRefS}，最大偏差 {worstBad:F4}）");
+                ? $"正确性：全部 {total.N} 例三项校验通过，✓ 通过"
+                : $"正确性：⚠ {fails} 例未通过（jFail={total.JFail} subopt={total.Subopt} inval={total.Inval} refL={total.RefL} refS={total.RefS}，最大偏差 {total.WorstBad:F4}）");
 
             Console.Out.Flush();
             Console.SetOut(consoleOut);
             fileOut.Dispose();
             Console.WriteLine($"报告已保存：{reportPath}");
             return fails == 0 ? 0 : 2;
+        }
+
+        // ---------------- 校验（线程私有 jps/astar，可并行）----------------
+
+        // 每线程累计的统计量；并行后各线程结果通过 Merge 汇总（计数取和、偏差取最大，与顺序无关）。
+        private struct Stats
+        {
+            public long N, Pass, JFail, Subopt, Inval, RefL, RefS, Trivial, BadCell, Exact, Artifact;
+            public double MaxDevOk;   // 通过项里的最大 |真实长度-官方|（应为舍入量级）
+            public double WorstBad;   // 失败项里的最大 |偏差|
+
+            public void Merge(in Stats o)
+            {
+                N += o.N; Pass += o.Pass; JFail += o.JFail; Subopt += o.Subopt; Inval += o.Inval;
+                RefL += o.RefL; RefS += o.RefS; Trivial += o.Trivial; BadCell += o.BadCell;
+                Exact += o.Exact; Artifact += o.Artifact;
+                if (o.MaxDevOk > MaxDevOk) MaxDevOk = o.MaxDevOk;
+                if (o.WorstBad > WorstBad) WorstBad = o.WorstBad;
+            }
+        }
+
+        // 对单条用例做三项校验，结果累加进调用线程私有的 <paramref name="st"/>（无共享写，故并行安全）。
+        // jps/astar 为线程私有实例；map/sys 为线程间共享只读（sys 已在并行前单线程 Sync 过）。
+        private static void ClassifyEntry(
+            GridMap map, JpsSystem sys, JpsPathfinder jps, AStarPathfinder astar, in Entry e, bool allowCorner, ref Stats st)
+        {
+            var s = (e.Sx, e.Sy);
+            var g = (e.Gx, e.Gy);
+
+            // 越界 / 起终点在阻挡上：场景/地图不匹配，单独计数，不进入算法校验
+            if (!InBounds(map, s) || !InBounds(map, g) || !map.IsWalkable(s.Item1, s.Item2) || !map.IsWalkable(g.Item1, g.Item2))
+            { st.BadCell++; return; }
+
+            if (s == g) { st.Trivial++; return; }   // 平凡用例（首尾同格）跳过
+
+            st.N++;
+            var rj = jps.FindPath(sys, s, g);
+            var ra = astar.FindPath(map, s, g);
+
+            // ① 最优性：与 A*（同度量 ground truth）整数代价必须一致
+            if (rj.Success != ra.Success)
+            {
+                if (!rj.Success) st.JFail++;   // A* 有解而 JPS 无解 → JPS 漏解
+                else st.Subopt++;              // JPS 有解而 A* 无解 → 异常（计入 subopt）
+                return;
+            }
+            if (!rj.Success) { st.JFail++; return; }   // 两者都无解（可解场景里属异常）
+
+            var (jCard, jDiag) = CountSteps(rj.Path);
+            var (aCard, aDiag) = CountSteps(ra.Path);
+            long jInt = jCard * 1000L + jDiag * 1414L;
+            long aInt = aCard * 1000L + aDiag * 1414L;
+            if (jInt != aInt) { st.Subopt++; st.WorstBad = Math.Max(st.WorstBad, Math.Abs(jInt - aInt) / 1000.0); return; }
+
+            // ② 路径合法性
+            if (!ValidPath(map, rj.Path, s, g, allowCorner, out _)) { st.Inval++; return; }
+
+            // ③ 与官方最优比对（真实 octile 长度）
+            double jLen = jCard + jDiag * Sqrt2;
+            double dev = jLen - e.Optimal;
+            if (dev > RefTol) { st.RefL++; st.WorstBad = Math.Max(st.WorstBad, dev); return; }
+            if (dev < -RefTol) { st.RefS++; st.WorstBad = Math.Max(st.WorstBad, -dev); return; }
+
+            double ad = Math.Abs(dev);
+            if (ad <= 1e-6) st.Exact++; else st.Artifact++;
+            st.MaxDevOk = Math.Max(st.MaxDevOk, ad);
+            st.Pass++;
         }
 
         // ---------------- 解析 / 工具 ----------------
