@@ -1,7 +1,7 @@
 ﻿/*
  * Form1.Designer.cs
  * JPS Pathfinding
- * Copyright (c) 2026 Qian Qian. MIT License.
+ * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  */
 
 namespace JPS
