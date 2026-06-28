@@ -227,6 +227,9 @@ namespace JPS.Pathfinding
         // 一次处理一个 64 位字：在“当前行 y / 上行 y-1 / 下行 y+1”的可走位图上做位运算，
         // 用 de Bruijn 找字内最近的置位，从而把“逐格 IsWalkable + IsJumpPoint”压成按字批处理。
         // 行按 64 对齐（见 GridMap）保证同一行的 64 格落在同一个字内、不跨行，扫描才能纯按字推进。
+        // 每个字需要“当前行 y / 上行 y-1 / 下行 y+1”三行的可走位，外加强迫邻居判定中 block(c∓1) 的跨字进位
+        // ——而进位来源正是“相邻字”的 y±1 两行。沿扫描方向推进时，本字的 walkUp/walkDn 恰好就是下一字的进位源，
+        // 故跨迭代缓存它（prevUp/prevDn 或 nextUp/nextDn），把每字 5 次 WalkableWord 取字降到 3 次（仅取本字 y/y-1/y+1）。
         private static (int s, bool jumpFound) HorizontalScan(GridMap map, int x, int y, int dx)
         {
             if (dx > 0)
@@ -234,19 +237,24 @@ namespace JPS.Pathfinding
                 int startCol = x + 1;                  // 逐格循环先 +dx 再判，故从 x+1 起
                 int w = startCol >> 6;
                 ulong sub = ~0UL << (startCol & 63);   // 首字内只看 ≥ 起始位的列
+                // 进位源 = 前一字（w-1）的 y±1 两行；首次取一遍，之后由上一轮的 walkUp/walkDn 滚动复用。
+                ulong prevUp = map.WalkableWord(w - 1, y - 1);
+                ulong prevDn = map.WalkableWord(w - 1, y + 1);
                 while (true)
                 {
                     ulong walkY = map.WalkableWord(w, y);
-                    ulong wall = ~walkY;               // 行 y 的阻挡位（含越界/padding）
-                    ulong jump = ForcedRight(map, w, y, walkY);
-                    ulong m = (wall | jump) & sub;
+                    ulong walkUp = map.WalkableWord(w, y - 1);
+                    ulong walkDn = map.WalkableWord(w, y + 1);
+                    ulong jump = ForcedRight(walkY, walkUp, walkDn, prevUp, prevDn);
+                    ulong m = (~walkY | jump) & sub;   // ~walkY = 行 y 阻挡位（含越界/padding）；与 jump 天然互斥
                     if (m != 0UL)
                     {
                         int b = Bits.LowestSet(m);
                         int col = (w << 6) + b;
                         bool isJump = ((jump >> b) & 1UL) != 0UL;
-                        return (col - x, isJump);      // 越界字会令 wall 命中，循环必然终止
+                        return (col - x, isJump);      // 越界字会令 ~walkY 命中，循环必然终止
                     }
+                    prevUp = walkUp; prevDn = walkDn;  // 本字 y±1 行即下一字的进位源
                     w++;
                     sub = ~0UL;                        // 后续字看满 64 列
                 }
@@ -258,12 +266,16 @@ namespace JPS.Pathfinding
                 int w = startCol >> 6;
                 int sb = startCol & 63;
                 ulong sub = sb == 63 ? ~0UL : ((1UL << (sb + 1)) - 1);   // 首字内只看 ≤ 起始位的列
+                // 进位源 = 后一字（w+1）的 y±1 两行；首次取一遍，之后由上一轮的 walkUp/walkDn 滚动复用。
+                ulong nextUp = map.WalkableWord(w + 1, y - 1);
+                ulong nextDn = map.WalkableWord(w + 1, y + 1);
                 while (true)
                 {
                     ulong walkY = map.WalkableWord(w, y);
-                    ulong wall = ~walkY;
-                    ulong jump = ForcedLeft(map, w, y, walkY);
-                    ulong m = (wall | jump) & sub;
+                    ulong walkUp = map.WalkableWord(w, y - 1);
+                    ulong walkDn = map.WalkableWord(w, y + 1);
+                    ulong jump = ForcedLeft(walkY, walkUp, walkDn, nextUp, nextDn);
+                    ulong m = (~walkY | jump) & sub;
                     if (m != 0UL)
                     {
                         int b = Bits.HighestSet(m);
@@ -271,6 +283,7 @@ namespace JPS.Pathfinding
                         bool isJump = ((jump >> b) & 1UL) != 0UL;
                         return (x - col, isJump);
                     }
+                    nextUp = walkUp; nextDn = walkDn;  // 本字 y±1 行即下一字（更小列）的进位源
                     w--;
                     if (w < 0) return (x + 1, false);  // 越过第 0 列 → 第 -1 列是墙，步数 x+1
                     sub = ~0UL;
@@ -278,29 +291,21 @@ namespace JPS.Pathfinding
             }
         }
 
-        // 向右（dx=+1）时，行 y 的字 w 内每列 c 的“强迫邻居跳点”掩码：
+        // 向右（dx=+1）时，行 y 的字内每列 c 的“强迫邻居跳点”掩码：
         //   jump(c) = walk(c,y) ∧ [ (walk(c,y-1) ∧ block(c-1,y-1)) ∨ (walk(c,y+1) ∧ block(c-1,y+1)) ]
-        // 其中 block(c-1) = 该行阻挡位左移 1（c-1→c），跨字时低位从前一个字（w-1）的最高位补入。
-        private static ulong ForcedRight(GridMap map, int w, int y, ulong walkY)
+        // block(c-1) = 该行阻挡位左移 1（c-1→c）；跨字时低位从前一字（prevUp/prevDn）的最高位补入。
+        private static ulong ForcedRight(ulong walkY, ulong walkUp, ulong walkDn, ulong prevUp, ulong prevDn)
         {
-            ulong walkUp = map.WalkableWord(w, y - 1);
-            ulong walkDn = map.WalkableWord(w, y + 1);
-            ulong upPrevMsb = (~map.WalkableWord(w - 1, y - 1)) >> 63;   // 前一字最高位 = 列 (w*64-1) 的阻挡
-            ulong dnPrevMsb = (~map.WalkableWord(w - 1, y + 1)) >> 63;
-            ulong blkUpShift = (~walkUp << 1) | upPrevMsb;              // block(c-1, y-1)
-            ulong blkDnShift = (~walkDn << 1) | dnPrevMsb;              // block(c-1, y+1)
+            ulong blkUpShift = (~walkUp << 1) | ((~prevUp) >> 63);   // block(c-1, y-1)
+            ulong blkDnShift = (~walkDn << 1) | ((~prevDn) >> 63);   // block(c-1, y+1)
             return ((walkUp & blkUpShift) | (walkDn & blkDnShift)) & walkY;
         }
 
-        // 向左（dx=-1）时对称：邻居取 c+1 → 阻挡位右移 1（c+1→c），跨字时高位从后一个字（w+1）的最低位补入。
-        private static ulong ForcedLeft(GridMap map, int w, int y, ulong walkY)
+        // 向左（dx=-1）时对称：邻居取 c+1 → 阻挡位右移 1（c+1→c）；跨字时高位从后一字（nextUp/nextDn）的最低位补入。
+        private static ulong ForcedLeft(ulong walkY, ulong walkUp, ulong walkDn, ulong nextUp, ulong nextDn)
         {
-            ulong walkUp = map.WalkableWord(w, y - 1);
-            ulong walkDn = map.WalkableWord(w, y + 1);
-            ulong upNextLsb = (~map.WalkableWord(w + 1, y - 1) & 1UL) << 63;   // 后一字最低位 = 列 ((w+1)*64) 的阻挡
-            ulong dnNextLsb = (~map.WalkableWord(w + 1, y + 1) & 1UL) << 63;
-            ulong blkUpShift = (~walkUp >> 1) | upNextLsb;             // block(c+1, y-1)
-            ulong blkDnShift = (~walkDn >> 1) | dnNextLsb;             // block(c+1, y+1)
+            ulong blkUpShift = (~walkUp >> 1) | ((~nextUp & 1UL) << 63);   // block(c+1, y-1)
+            ulong blkDnShift = (~walkDn >> 1) | ((~nextDn & 1UL) << 63);   // block(c+1, y+1)
             return ((walkUp & blkUpShift) | (walkDn & blkDnShift)) & walkY;
         }
     }
