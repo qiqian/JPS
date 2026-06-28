@@ -1,5 +1,5 @@
 /*
- * Program.cs
+ * Accuracy.cs
  * JPS Pathfinding
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  */
@@ -31,7 +31,7 @@ namespace JPS.Accuracy
     /// 注：算法内部用整数 1414 近似 √2(=1.41421356…)，故第 3 项可能有 ~1e-4·斜步 的舍入偏差，
     /// 属正常现象；真正的 bug（次优 / 斜穿角 / 不可达）会产生远大于此的偏差，会被单独计入。
     /// </summary>
-    internal static class Program
+    internal static class Accuracy
     {
         private readonly record struct Entry(string Map, int Sx, int Sy, int Gx, int Gy, double Optimal);
 

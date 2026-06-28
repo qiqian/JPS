@@ -1,5 +1,5 @@
 /*
- * Program.cs
+ * Benchmark.cs
  * JPS Pathfinding
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  */
@@ -23,7 +23,7 @@ namespace JPS.Benchmark
     ///   dotnet run -- scenbench [子目录]     按地图归并所有 .scen 用例做性能测试：每图只解析一次、每个起终点对只跑一次（不校验路径）
     ///   dotnet run -- combo [q] [子目录]     合并基准：先归并去重所有 .scen，再对每张图（只解析一次）先随机投点基准、后 scen 基准
     /// </summary>
-    internal static class Program
+    internal static class Benchmark
     {
         static int Main(string[] args)
         {
