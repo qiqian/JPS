@@ -2,23 +2,23 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-一个**工程化、可直接复用的 Jump Point Search 寻路实现**。算法核心是 UI 无关、可整体拷入 **Unity 2022** 的可移植库（`netstandard2.1` / C# 9），严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则，以 A\* 为对照在全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集上做了**大规模性能基准**与**逐条正确性验证**（百万级官方场景）。仓库同时附带一个 Windows Forms **Playground**，把"跳点表更新过程"实时可视化，方便理解算法内部机理。
+一个**工程化、可直接复用的 Jump Point Search 寻路实现**。算法核心是 UI 无关、可整体拷入 **Unity 2022** 的可移植库（`netstandard2.1` / C# 9），严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则，以 A\* 为对照在全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集上做了**大规模性能基准**与**逐条正确性验证**（百万级官方场景）。仓库同时附带一个 Windows Forms **Playground**，把"跳点表更新过程"实时可视化，方便理解算法内部机理。<br>
 _A **production-ready, reusable Jump Point Search implementation**. The core is a UI-agnostic, portable library (`netstandard2.1` / C# 9) that drops into **Unity 2022** wholesale, strictly follows the no-corner-cutting rules of Harabor & Grastien (SoCS'12), and is validated at scale against A\* across all 7 [MovingAI](https://movingai.com/benchmarks/) map sets — large performance benchmarks plus per-case correctness checks over millions of official scenarios. The repo also ships a Windows Forms **Playground** that visualizes the jump-table update process in real time._
 
 **核心技术亮点 · Core Highlights**
 
-- **惰性跳点表（本项目核心）**：不做任何预计算，跳点距离"用到哪格才算哪格"；障碍变化只需 `O(1)` 整体置脏，并跨查询持续复用已洗白的跳点，越跑越快。
+- **惰性跳点表（本项目核心）**：不做任何预计算，跳点距离"用到哪格才算哪格"；障碍变化只需 `O(1)` 整体置脏，并跨查询持续复用已洗白的跳点，越跑越快。<br>
   _**Lazy jump table (the core idea):** no precomputation — jump distances are filled on demand; obstacle changes invalidate in `O(1)`, and whitened jump points are reused across queries, getting faster the more it runs._
-- **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。
+- **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。<br>
   _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
-- **无锁多线程共享缓存（默认开启）**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布保证可见性与次序，免锁并行（x86 上额外开销可忽略；可移除 `JPS_CONCURRENT_CACHE` 退回单线程极速）。
+- **无锁多线程共享缓存（默认开启）**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布保证可见性与次序，免锁并行（x86 上额外开销可忽略；可移除 `JPS_CONCURRENT_CACHE` 退回单线程极速）。<br>
   _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
-- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；与 A\* 同样最优——562 张图 **56.2 万组**随机查询与 A\* **0 不符**、**142 万条**官方 `.scen` 场景三重校验全过；扩展节点平均少约 **55×**、墙钟平均快约 **54×**（大开阔图可达 100–170×）。
+- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用；与 A\* 同样最优——562 张图 **56.2 万组**随机查询与 A\* **0 不符**、**142 万条**官方 `.scen` 场景三重校验全过；扩展节点平均少约 **55×**、墙钟平均快约 **54×**（大开阔图可达 100–170×）。<br>
   _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse; just as optimal as A\* — **0 mismatches** across **562,000** random queries (562 maps) plus **1.42M** official `.scen` cases triple-checked; averaging ~**55×** fewer expanded nodes and ~**54×** faster wall-clock (up to 100–170× on large open maps)._
-- **工程化分层、可移植、有测试背书**：拆分为 `JPS.Core`（纯算法）/ `JPS.Data`（地图 I/O）/ `JPS.Playground`（界面）/ `JPS.Benchmark`（性能基准）/ `JPS.Accuracy`（正确性）五个工程；核心锁定 `netstandard2.1` / C# 9、不依赖 WinForms，可整体拷入 Unity 2022。
+- **工程化分层、可移植、有测试背书**：拆分为 `JPS.Core`（纯算法）/ `JPS.Data`（地图 I/O）/ `JPS.Playground`（界面）/ `JPS.Benchmark`（性能基准）/ `JPS.Accuracy`（正确性）五个工程；核心锁定 `netstandard2.1` / C# 9、不依赖 WinForms，可整体拷入 Unity 2022。<br>
   _**Layered engineering, portable, test-backed:** split into `JPS.Core` (pure algorithm) / `JPS.Data` (map I/O) / `JPS.Playground` (UI) / `JPS.Benchmark` (perf) / `JPS.Accuracy` (correctness); the core targets `netstandard2.1` / C# 9, has no WinForms dependency, and drops into Unity 2022 wholesale._
 
-> Playground 用法：刷阻挡 → 设起点/终点 → `JPS寻路` / `A*寻路`，即可看到搜索过程、最终路径、平滑路径，以及每个格子各方向跳点缓存的更新状态。
+> Playground 用法：刷阻挡 → 设起点/终点 → `JPS寻路` / `A*寻路`，即可看到搜索过程、最终路径、平滑路径，以及每个格子各方向跳点缓存的更新状态。<br>
 > _In the Playground: brush obstacles → set start/goal → `JPS寻路` / `A*寻路` to watch the search process, final path, smoothed path, and each cell's per-direction jump-cache update state._
 
 > 中文正文在前，**English translation of the full body is appended after the Chinese sections** (see the right-hand links in the table of contents).
