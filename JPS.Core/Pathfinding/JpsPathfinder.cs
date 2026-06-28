@@ -214,8 +214,12 @@ namespace JPS.Pathfinding
 
                 if (cx == gx && cy == gy)
                     return new JumpEntry(cx, cy, steps);
+#if JPS_ALLOW_CORNER_CUTTING
+                // 只有切角模型下对角才可能产生强迫邻居；默认禁止切角时 HasDiagonalForcedNeighbor 恒为 false
+                // （见 JpsRules），故编译期剔除这次调用——每个对角步省一次空判定。
                 if (JpsRules.HasDiagonalForcedNeighbor(map, cx, cy, dx, dy))
                     return new JumpEntry(cx, cy, steps);
+#endif
 
                 // 正交分量子检测（含终点拦截），命中正交 memo 时为 O(1)
                 if (CardinalJump(map, cx, cy, dx, 0, horizontalDir, gx, gy).HasJump ||
