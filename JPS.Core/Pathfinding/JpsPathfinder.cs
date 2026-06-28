@@ -1,3 +1,9 @@
+/*
+ * JpsPathfinder.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System;
 using System.Collections.Generic;
 using JPS.Models;

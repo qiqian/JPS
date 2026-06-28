@@ -1,3 +1,9 @@
+/*
+ * Program.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;

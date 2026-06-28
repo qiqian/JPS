@@ -1,3 +1,9 @@
+/*
+ * JpsBuildInfo.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 namespace JPS.Pathfinding
 {
     /// <summary>

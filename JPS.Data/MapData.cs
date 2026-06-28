@@ -1,3 +1,9 @@
+/*
+ * MapData.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System.Collections.Generic;
 
 namespace JPS.Data

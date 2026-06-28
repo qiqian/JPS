@@ -1,3 +1,9 @@
+/*
+ * MovingAiMap.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System;
 using System.IO;
 using JPS.Models;

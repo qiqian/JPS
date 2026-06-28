@@ -1,4 +1,10 @@
-﻿namespace JPS
+﻿/*
+ * Form1.Designer.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
+namespace JPS
 {
     partial class Form1
     {

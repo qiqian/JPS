@@ -1,3 +1,9 @@
+/*
+ * Form1.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System.Drawing.Drawing2D;
 using System.Text.Json;
 using System.Text.Json.Serialization;

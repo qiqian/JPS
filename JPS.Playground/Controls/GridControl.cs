@@ -1,3 +1,9 @@
+/*
+ * GridControl.cs
+ * JPS Pathfinding
+ * Copyright (c) 2026 Qian Qian. MIT License.
+ */
+
 using System.Diagnostics;
 using JPS.Data;
 using JPS.Models;
