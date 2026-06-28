@@ -227,9 +227,21 @@ namespace JPS.Pathfinding
                     return new JumpEntry(cx, cy, steps);
 #endif
 
-                // 正交分量子检测（含终点拦截），命中正交 memo 时为 O(1)
-                if (CardinalJump(map, cx, cy, dx, 0, horizontalDir, gx, gy).HasJump ||
-                    CardinalJump(map, cx, cy, 0, dy, verticalDir, gx, gy).HasJump)
+                // 正交分量子检测：直接读正交 memo（命中为 O(1)），等价于 CardinalJump(...).HasJump，
+                // 但避免每步构造 JumpEntry。短路顺序与原来一致（横向先于纵向，任一成立即返回）。
+                //
+                // 终点拦截只可能发生在“对角恰好走到终点所在行(cy==gy → 横向射线)或列(cx==gx → 纵向射线)”的
+                // 那唯一一步——因为 cy/cx 每步只变 1，最多各跨过 gy/gx 一次。故把 goalOnRay 的 Math.Sign/Abs
+                // 从“每步、每个子检测都算”降为“仅在跨到该行/列时算一次”，长对角上省下成片判定。
+                // 可达性沿用 CardinalJump 的口径：maxTravel = |memo dist|，此处 memo ≤ 0（>0 已先返回）故 = -dist。
+                int hd = _cache.CardinalDist(map, cx, cy, dx, 0, horizontalDir);
+                if (hd > 0) return new JumpEntry(cx, cy, steps);                       // 横向有正交跳点
+                if (cy == gy && Math.Sign(gx - cx) == dx && Math.Abs(gx - cx) <= -hd) // 终点在横向射线上且可达
+                    return new JumpEntry(cx, cy, steps);
+
+                int vd = _cache.CardinalDist(map, cx, cy, 0, dy, verticalDir);
+                if (vd > 0) return new JumpEntry(cx, cy, steps);                       // 纵向有正交跳点
+                if (cx == gx && Math.Sign(gy - cy) == dy && Math.Abs(gy - cy) <= -vd) // 终点在纵向射线上且可达
                     return new JumpEntry(cx, cy, steps);
             }
         }
