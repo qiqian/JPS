@@ -1,20 +1,23 @@
-using System;
+using JPS.Models;
 
 namespace JPS.Pathfinding
 {
     /// <summary>
     /// JPS 跳点 / 强迫邻居判定规则。默认禁止斜穿角（no-corner-cutting）；
     /// 定义条件编译符号 JPS_ALLOW_CORNER_CUTTING 可恢复“允许斜穿拐角”。
-    /// 用一个 walkable 委托抽象“可走”判定，规则在预计算/运行时保持一致。
+    ///
+    /// 直接对 <see cref="GridMap"/> 做“可走”判定（map.IsWalkable），不经过任何委托，
+    /// 因此在热路径上零额外分配。规则被 <see cref="JpsPathfinder"/> 与
+    /// <see cref="JumpPointCache"/> 共用，故独立成一个静态 helper。
     /// </summary>
     internal static class JpsRules
     {
-        public static bool IsJumpPoint(Func<int, int, bool> walkable, int x, int y, int dx, int dy)
+        public static bool IsJumpPoint(GridMap map, int x, int y, int dx, int dy)
         {
             if (JpsDirections.IsDiagonal(dx, dy))
-                return HasDiagonalForcedNeighbor(walkable, x, y, dx, dy);
+                return HasDiagonalForcedNeighbor(map, x, y, dx, dy);
 
-            return HasCardinalForcedNeighbor(walkable, x, y, dx, dy);
+            return HasCardinalForcedNeighbor(map, x, y, dx, dy);
         }
 
         // ──────────────────────────────────────────────────────────────────────────
@@ -34,12 +37,12 @@ namespace JPS.Pathfinding
         //     p ·          要从 p(左上) 对角到 x，左邻和上邻必须都开，
         //     · x          所以障碍逼出的转向只会由“直线移动”的强迫邻居捕获。
         // 论文原文："only straight steps from p to x may produce forced neighbours"。
-        public static bool HasDiagonalForcedNeighbor(Func<int, int, bool> w, int x, int y, int dx, int dy)
+        public static bool HasDiagonalForcedNeighbor(GridMap map, int x, int y, int dx, int dy)
         {
 #if JPS_ALLOW_CORNER_CUTTING
             // 允许斜穿角：旁边正交格被挡、对应斜向可走即强迫邻居
-            return (!w(x - dx, y) && w(x - dx, y + dy)) ||
-                   (!w(x, y - dy) && w(x + dx, y - dy));
+            return (!map.IsWalkable(x - dx, y) && map.IsWalkable(x - dx, y + dy)) ||
+                   (!map.IsWalkable(x, y - dy) && map.IsWalkable(x + dx, y - dy));
 #else
             // 禁止斜穿角（Harabor & Grastien, SoCS'12）：对角移动不产生强迫邻居。
             // 论文明确："only straight steps from p to x may produce forced neighbours"。
@@ -58,29 +61,29 @@ namespace JPS.Pathfinding
         //     # F ·        身后上方 # 是墙、当前上方 F 刚露出；不许切角时只能 x→F 竖直过去
         //     p x →        规则: w(x, y±1) && !w(x-dx, y±1)
         //     · · ·
-        public static bool HasCardinalForcedNeighbor(Func<int, int, bool> w, int x, int y, int dx, int dy)
+        public static bool HasCardinalForcedNeighbor(GridMap map, int x, int y, int dx, int dy)
         {
 #if JPS_ALLOW_CORNER_CUTTING
             // 允许斜穿角：当前侧被挡、其斜前方可走 → 斜前方是强迫邻居
             if (dy == 0)
             {
-                return (!w(x, y + 1) && w(x + dx, y + 1)) ||
-                       (!w(x, y - 1) && w(x + dx, y - 1));
+                return (!map.IsWalkable(x, y + 1) && map.IsWalkable(x + dx, y + 1)) ||
+                       (!map.IsWalkable(x, y - 1) && map.IsWalkable(x + dx, y - 1));
             }
 
-            return (!w(x + 1, y) && w(x + 1, y + dy)) ||
-                   (!w(x - 1, y) && w(x - 1, y + dy));
+            return (!map.IsWalkable(x + 1, y) && map.IsWalkable(x + 1, y + dy)) ||
+                   (!map.IsWalkable(x - 1, y) && map.IsWalkable(x - 1, y + dy));
 #else
             // 禁止斜穿角：强迫邻居是“墙刚结束”的正交格——身后侧被挡、当前侧可走，
             // 该侧正交格只能经过 (x,y) 到达（绕开身后的墙）。
             if (dy == 0)   // 水平移动
             {
-                return (w(x, y + 1) && !w(x - dx, y + 1)) ||
-                       (w(x, y - 1) && !w(x - dx, y - 1));
+                return (map.IsWalkable(x, y + 1) && !map.IsWalkable(x - dx, y + 1)) ||
+                       (map.IsWalkable(x, y - 1) && !map.IsWalkable(x - dx, y - 1));
             }
 
-            return (w(x + 1, y) && !w(x + 1, y - dy)) ||
-                   (w(x - 1, y) && !w(x - 1, y - dy));
+            return (map.IsWalkable(x + 1, y) && !map.IsWalkable(x + 1, y - dy)) ||
+                   (map.IsWalkable(x - 1, y) && !map.IsWalkable(x - 1, y - dy));
 #endif
         }
     }

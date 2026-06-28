@@ -40,10 +40,7 @@ namespace JPS.Pathfinding
         private int _gen;
         private readonly MinHeap _open = new MinHeap();
 
-        private readonly List<int> _expandedIds = new List<int>();
-        private readonly List<int> _generatedIds = new List<int>();
-
-        public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, bool collectDebug = true)
+        public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
         {
             if (start.X < 0 || start.Y < 0 || goal.X < 0 || goal.Y < 0)
                 return new PathResult { Message = "请先设置起点和终点。" };
@@ -56,12 +53,6 @@ namespace JPS.Pathfinding
 
             int openMark = _gen * 2;          // 本代“已生成/在 open”标记
             int closedMark = openMark + 1;     // 本代“已展开/closed”标记
-
-            if (collectDebug)
-            {
-                _expandedIds.Clear();
-                _generatedIds.Clear();
-            }
 
             int gx = goal.X, gy = goal.Y;
             int startId = Id(start.X, start.Y);
@@ -82,14 +73,14 @@ namespace JPS.Pathfinding
 
                 _mark[current] = closedMark;
                 expandedCount++;
-                if (collectDebug)
-                    _expandedIds.Add(current);
-
-                if (current == goalId)
-                    return Success(startId, goalId, expandedCount, collectDebug, openMark);
 
                 int cx = current % _w;
                 int cy = current / _w;
+                obs?.OnExpand(cx, cy);
+
+                if (current == goalId)
+                    return Success(startId, goalId, expandedCount);
+
                 long gCur = _g[current];
 
                 for (int i = 0; i < JpsDirections.Count; i++)
@@ -116,77 +107,29 @@ namespace JPS.Pathfinding
                     _mark[nbId] = openMark;
                     _cameDir[nbId] = (sbyte)i;
 
-                    if (collectDebug && firstSeen)
-                        _generatedIds.Add(nbId);
+                    if (firstSeen) obs?.OnFrontier(nx, ny);
 
                     _open.Enqueue(nbId, tentative + JpsDirections.OctileHeuristic(nx, ny, gx, gy));
                 }
             }
 
-            return Failure(expandedCount, collectDebug, openMark);
+            return Failure(expandedCount);
         }
 
-        private PathResult Success(int startId, int goalId, int expandedCount, bool collectDebug, int openMark)
+        private PathResult Success(int startId, int goalId, int expandedCount)
         {
             var path = ReconstructPath(startId, goalId);
-
-            if (!collectDebug)
-            {
-                return new PathResult
-                {
-                    Success = true,
-                    Path = path,
-                    ExpandedNodes = expandedCount,
-                    Message = $"A*：扩展 {expandedCount}，路径 {path.Count} 格。"
-                };
-            }
-
-            var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints(openMark);
             return new PathResult
             {
                 Success = true,
                 Path = path,
-                Expanded = expanded,
-                Frontier = frontier,
                 ExpandedNodes = expandedCount,
-                Message = $"A*：扩展 {expanded.Count}，入队未扩展 {frontier.Count}，搜索合计 {expanded.Count + frontier.Count} 格，路径 {path.Count} 格。"
+                Message = $"A*：扩展 {expandedCount}，路径 {path.Count} 格。"
             };
         }
 
-        private PathResult Failure(int expandedCount, bool collectDebug, int openMark)
-        {
-            if (!collectDebug)
-                return new PathResult { ExpandedNodes = expandedCount, Message = $"A*：未找到路径（扩展 {expandedCount}）。" };
-
-            var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints(openMark);
-            return new PathResult
-            {
-                Expanded = expanded,
-                Frontier = frontier,
-                ExpandedNodes = expandedCount,
-                Message = $"A*：未找到路径（扩展 {expanded.Count} 格）。"
-            };
-        }
-
-        /// <summary>前沿 = 已生成但仍未展开（mark 仍为 open）的节点。</summary>
-        private List<(int X, int Y)> FrontierPoints(int openMark)
-        {
-            var frontier = new List<(int X, int Y)>();
-            foreach (int id in _generatedIds)
-                if (_mark[id] == openMark)
-                    frontier.Add((id % _w, id / _w));
-            return frontier;
-        }
-
-        private List<(int X, int Y)> ToPoints(List<int> ids)
-        {
-            var pts = new List<(int X, int Y)>(ids.Count);
-            foreach (int id in ids)
-                pts.Add((id % _w, id / _w));
-            return pts;
-        }
+        private static PathResult Failure(int expandedCount) =>
+            new PathResult { ExpandedNodes = expandedCount, Message = $"A*：未找到路径（扩展 {expandedCount}）。" };
 
         private void EnsureBuffers(GridMap map)
         {

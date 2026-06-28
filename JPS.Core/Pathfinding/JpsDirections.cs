@@ -41,13 +41,6 @@ namespace JPS.Pathfinding
         // 从 (x,y) 沿对角 (dx,dy) 走一步是否合法。
         // 默认（未定义 JPS_ALLOW_CORNER_CUTTING）：禁止斜穿角——目标格 + 两侧正交格都必须可走。
         // 定义 JPS_ALLOW_CORNER_CUTTING：恢复旧的“允许斜穿拐角”——只要目标格可走。
-        public static bool DiagonalAllowed(Func<int, int, bool> w, int x, int y, int dx, int dy) =>
-#if JPS_ALLOW_CORNER_CUTTING
-            w(x + dx, y + dy);
-#else
-            w(x + dx, y + dy) && w(x + dx, y) && w(x, y + dy);
-#endif
-
         public static bool DiagonalAllowed(GridMap map, int x, int y, int dx, int dy) =>
 #if JPS_ALLOW_CORNER_CUTTING
             map.IsWalkable(x + dx, y + dy);

@@ -28,16 +28,13 @@ namespace JPS.Pathfinding
     }
 
     /// <summary>
-    /// 寻路结果。除最终路径外，还带有用于可视化的三类格子集合：
-    /// Expanded=已出队展开的节点；Frontier=已入队但未展开的前沿；Scanned=跳跃扫描经过但未进 open 的格子。
+    /// 寻路结果（纯算法产物，不含任何可视化数据）。
+    /// 可视化所需的展开 / 前沿 / 扫描格子通过 <see cref="ISearchObserver"/> 在搜索过程中获取。
     /// </summary>
     public sealed class PathResult
     {
         public bool Success { get; set; }
         public List<(int X, int Y)> Path { get; set; } = new List<(int X, int Y)>();
-        public List<(int X, int Y)> Expanded { get; set; } = new List<(int X, int Y)>();
-        public List<(int X, int Y)> Frontier { get; set; } = new List<(int X, int Y)>();
-        public List<(int X, int Y)> Scanned { get; set; } = new List<(int X, int Y)>();
         public int ExpandedNodes { get; set; }
         public string Message { get; set; } = string.Empty;
     }
@@ -66,24 +63,15 @@ namespace JPS.Pathfinding
         private readonly MinHeap _open = new MinHeap();
         private readonly int[] _dirBuf = new int[JpsDirections.Count];
 
-        // ---- 仅可视化用，按需惰性分配（collectDebug=false 时完全不占用）----
-        private int[] _scanGen = new int[0];
-
-        // 当前查询用的共享跳点缓存与“可走”委托（每次 FindPath 入口绑定到传入的 JpsSystem）
+        // 当前查询用的共享跳点缓存（每次 FindPath 入口绑定到传入的 JpsSystem）
         private JumpPointCache _cache = null!;
-        private Func<int, int, bool> _walk = static (_, _) => false;
-
-        // 可视化收集
-        private readonly List<int> _expandedIds = new List<int>();
-        private readonly List<int> _generatedIds = new List<int>();
-        private readonly List<int> _scannedIds = new List<int>();
 
         /// <summary>
         /// 在共享的 <see cref="JpsSystem"/>（地图 + 跳点缓存）上寻路。
         /// 调用前需确保 system 已 <see cref="JpsSystem.Sync"/> 到当前地图（单线程同步缓存版本）。
         /// 每个 JpsPathfinder 只持有自己的逐节点搜索状态，故不同实例可在各自线程上共用同一个 system。
         /// </summary>
-        public PathResult FindPath(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, bool collectDebug = true)
+        public PathResult FindPath(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
         {
             var map = system.Map;
             _cache = system.Cache;
@@ -95,20 +83,10 @@ namespace JPS.Pathfinding
                 return new PathResult { Message = "起点或终点位于阻挡上。" };
 
             EnsureBuffers(map);
-            NextGeneration();
-            _walk = map.IsWalkable;   // 缓存同步由 JpsSystem.Sync 负责（调用方在寻路前完成）
+            NextGeneration();   // 缓存同步由 JpsSystem.Sync 负责（调用方在寻路前完成）
 
             int openMark = _gen * 2;          // 本代“已生成/在 open”标记
             int closedMark = openMark + 1;     // 本代“已展开/closed”标记
-
-            if (collectDebug)
-            {
-                if (_scanGen.Length != _size)   // 首次需要可视化时才分配
-                    _scanGen = new int[_size];
-                _expandedIds.Clear();
-                _generatedIds.Clear();
-                _scannedIds.Clear();
-            }
 
             int gx = goal.X, gy = goal.Y;
             int startId = Id(start.X, start.Y);
@@ -129,14 +107,13 @@ namespace JPS.Pathfinding
 
                 _mark[current] = closedMark;
                 expandedCount++;
-                if (collectDebug)
-                    _expandedIds.Add(current);
-
-                if (current == goalId)
-                    return Success(startId, goalId, expandedCount, collectDebug, openMark);
 
                 int cx = current % _w;
                 int cy = current / _w;
+                obs?.OnExpand(cx, cy);
+
+                if (current == goalId)
+                    return Success(startId, goalId, expandedCount);
 
                 int dirCount = FillDirections(map, cx, cy, _parentDir[current]);
 
@@ -151,13 +128,11 @@ namespace JPS.Pathfinding
 
                     if (!jump.HasJump)
                     {
-                        if (collectDebug)
-                            CollectFailedRay(map, cx, cy, dx, dy);
+                        if (obs != null) ScanFailedRay(map, cx, cy, dx, dy, obs);
                         continue;
                     }
 
-                    if (collectDebug)
-                        CollectSkippedRay(cx, cy, jump.X, jump.Y);
+                    if (obs != null) ScanSkippedRay(cx, cy, jump.X, jump.Y, obs);
 
                     int nbId = Id(jump.X, jump.Y);
                     if (_mark[nbId] == closedMark)
@@ -176,15 +151,14 @@ namespace JPS.Pathfinding
                     _parentDir[nbId] = (sbyte)idx;
                     _parentSteps[nbId] = (short)jump.Steps;   // 步数 ≤ 边长 ≤ short.MaxValue
 
-                    if (collectDebug && firstSeen)
-                        _generatedIds.Add(nbId);
+                    if (firstSeen) obs?.OnFrontier(jump.X, jump.Y);
 
                     long f = tentative + JpsDirections.OctileHeuristic(jump.X, jump.Y, gx, gy);
                     _open.Enqueue(nbId, f);
                 }
             }
 
-            return Failure(expandedCount, collectDebug, openMark);
+            return Failure(expandedCount);
         }
 
         // ---------------- 正交跳跃（查/更新惰性跳点缓存）----------------
@@ -239,7 +213,7 @@ namespace JPS.Pathfinding
 
                 if (cx == gx && cy == gy)
                     return new JumpEntry(cx, cy, steps);
-                if (JpsRules.HasDiagonalForcedNeighbor(_walk, cx, cy, dx, dy))
+                if (JpsRules.HasDiagonalForcedNeighbor(map, cx, cy, dx, dy))
                     return new JumpEntry(cx, cy, steps);
 
                 // 正交分量子检测（含终点拦截），命中正交 memo 时为 O(1)
@@ -251,70 +225,20 @@ namespace JPS.Pathfinding
 
         // ---------------- 结果构造 ----------------
 
-        private PathResult Success(int startId, int goalId, int expandedCount, bool collectDebug, int openMark)
+        private PathResult Success(int startId, int goalId, int expandedCount)
         {
             var path = ReconstructPath(startId, goalId);
-
-            if (!collectDebug)
-            {
-                return new PathResult
-                {
-                    Success = true,
-                    Path = path,
-                    ExpandedNodes = expandedCount,
-                    Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 格。"
-                };
-            }
-
-            var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints(openMark);
-            var scanned = ToPoints(_scannedIds);
             return new PathResult
             {
                 Success = true,
                 Path = path,
-                Expanded = expanded,
-                Frontier = frontier,
-                Scanned = scanned,
                 ExpandedNodes = expandedCount,
-                Message = $"JPS：扩展 {expanded.Count}，入队未扩展 {frontier.Count}，扫描跳过 {scanned.Count} 格，路径 {path.Count} 格。"
+                Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 格。"
             };
         }
 
-        private PathResult Failure(int expandedCount, bool collectDebug, int openMark)
-        {
-            if (!collectDebug)
-                return new PathResult { ExpandedNodes = expandedCount, Message = $"JPS：未找到路径（扩展 {expandedCount}）。" };
-
-            var expanded = ToPoints(_expandedIds);
-            var frontier = FrontierPoints(openMark);
-            var scanned = ToPoints(_scannedIds);
-            return new PathResult
-            {
-                Expanded = expanded,
-                Frontier = frontier,
-                Scanned = scanned,
-                ExpandedNodes = expandedCount,
-                Message = $"JPS：未找到路径（扩展 {expanded.Count}，扫描跳过 {scanned.Count} 格）。"
-            };
-        }
-
-        private List<(int X, int Y)> FrontierPoints(int openMark)
-        {
-            var frontier = new List<(int X, int Y)>();
-            foreach (int id in _generatedIds)
-                if (_mark[id] == openMark)   // 已生成但未被关闭
-                    frontier.Add((id % _w, id / _w));
-            return frontier;
-        }
-
-        private List<(int X, int Y)> ToPoints(List<int> ids)
-        {
-            var pts = new List<(int X, int Y)>(ids.Count);
-            foreach (int id in ids)
-                pts.Add((id % _w, id / _w));
-            return pts;
-        }
+        private static PathResult Failure(int expandedCount) =>
+            new PathResult { ExpandedNodes = expandedCount, Message = $"JPS：未找到路径（扩展 {expandedCount}）。" };
 
         // ---------------- 缓冲区与代次 ----------------
 
@@ -330,7 +254,6 @@ namespace JPS.Pathfinding
             _parentDir = new sbyte[_size];
             _parentSteps = new short[_size];
             _mark = new int[_size];
-            _scanGen = new int[0];   // 可视化用，按需在 collectDebug 时分配
             _gen = 0;
             // 跳点缓存由 JpsSystem/JumpPointCache 自行按尺寸/版本管理
         }
@@ -343,7 +266,6 @@ namespace JPS.Pathfinding
                 return;
 
             Array.Clear(_mark, 0, _mark.Length);
-            Array.Clear(_scanGen, 0, _scanGen.Length);
             _gen = 1;
         }
 
@@ -467,9 +389,10 @@ namespace JPS.Pathfinding
 #endif
         }
 
-        // ---------------- 可视化采集（不影响算法结果，仅供界面展示）----------------
+        // ---------------- 搜索可观测钩子（仅向 observer 发事件，自身不存储/不去重）----------------
 
-        private void CollectFailedRay(GridMap map, int x, int y, int dx, int dy)
+        // 失败方向：从 (x,y) 沿 (dx,dy) 一路扫到墙，沿途的可走格都是“扫过但被抛弃”的格子。
+        private static void ScanFailedRay(GridMap map, int x, int y, int dx, int dy, ISearchObserver obs)
         {
             int cx = x, cy = y;
             while (true)
@@ -478,11 +401,12 @@ namespace JPS.Pathfinding
                 cy += dy;
                 if (!map.IsWalkable(cx, cy))
                     return;
-                AddScanned(cx, cy);
+                obs.OnScan(cx, cy);
             }
         }
 
-        private void CollectSkippedRay(int x1, int y1, int x2, int y2)
+        // 成功跳跃：从 (x1,y1) 到跳点 (x2,y2) 之间被一笔跳过的中间格。
+        private static void ScanSkippedRay(int x1, int y1, int x2, int y2, ISearchObserver obs)
         {
             int dx = Math.Sign(x2 - x1);
             int dy = Math.Sign(y2 - y1);
@@ -491,17 +415,8 @@ namespace JPS.Pathfinding
             {
                 x += dx;
                 y += dy;
-                AddScanned(x, y);
+                obs.OnScan(x, y);
             }
-        }
-
-        private void AddScanned(int x, int y)
-        {
-            int id = Id(x, y);
-            if (_scanGen[id] == _gen)
-                return;
-            _scanGen[id] = _gen;
-            _scannedIds.Add(id);
         }
 
         // ---------------- 路径重建 ----------------

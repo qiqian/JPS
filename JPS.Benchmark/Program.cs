@@ -95,10 +95,10 @@ namespace JPS.Benchmark
 
             // 节点数（与计时分离）：JIT 预热后统计
             system.Sync();
-            for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g, false);
+            for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g);
             long jExp = 0, aExp = 0; int solved = 0;
-            for (int i = 0; i < Q; i++) { var r = jps.FindPath(system, qs[i].s, qs[i].g, false); jExp += r.ExpandedNodes; if (r.Success) solved++; }
-            for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g, false); aExp += r.ExpandedNodes; }
+            for (int i = 0; i < Q; i++) { var r = jps.FindPath(system, qs[i].s, qs[i].g); jExp += r.ExpandedNodes; if (r.Success) solved++; }
+            for (int i = 0; i < Q; i++) { var r = astar.FindPath(map, qs[i].s, qs[i].g); aExp += r.ExpandedNodes; }
 
             // 无复用基线：每次查询前翻转一个可走格(改回原状)使 Version 跳变→整表 dirty，
             // 模拟“每个 finder 各持私有冷缓存、彼此不预热”的总开销。
@@ -111,19 +111,19 @@ namespace JPS.Benchmark
             {
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 sw.Restart();
-                for (int i = 0; i < Q; i++) { ForceDirty(); jps.FindPath(system, qs[i].s, qs[i].g, false); }
+                for (int i = 0; i < Q; i++) { ForceDirty(); jps.FindPath(system, qs[i].s, qs[i].g); }
                 sw.Stop(); jColdMs = Math.Min(jColdMs, sw.Elapsed.TotalMilliseconds);
 
                 // 热缓存（共享/复用）：Sync 一次，整批复用已洗白的跳点
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 system.Sync();
                 sw.Restart();
-                for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g, false);
+                for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g);
                 sw.Stop(); jWarmMs = Math.Min(jWarmMs, sw.Elapsed.TotalMilliseconds);
 
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 sw.Restart();
-                for (int i = 0; i < Q; i++) astar.FindPath(map, qs[i].s, qs[i].g, false);
+                for (int i = 0; i < Q; i++) astar.FindPath(map, qs[i].s, qs[i].g);
                 sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
             }
 
@@ -224,7 +224,7 @@ namespace JPS.Benchmark
                     var s = walk[rng.Next(walk.Count)];
                     var g = walk[rng.Next(walk.Count)];
                     if (s.Equals(g)) continue;
-                    if (jps.FindPath(system, s, g, false).Success) qs.Add((s, g));
+                    if (jps.FindPath(system, s, g).Success) qs.Add((s, g));
                 }
                 int n = qs.Count;
                 if (n == 0) { Console.WriteLine($"{name,-34}{size,11}   (无可解样本)"); continue; }
@@ -235,8 +235,8 @@ namespace JPS.Benchmark
                 int mism = 0;
                 foreach (var p in qs)
                 {
-                    var rj = jps.FindPath(system, p.s, p.g, false);
-                    var ra = astar.FindPath(map, p.s, p.g, false);
+                    var rj = jps.FindPath(system, p.s, p.g);
+                    var ra = astar.FindPath(map, p.s, p.g);
                     jExp += rj.ExpandedNodes;
                     aExp += ra.ExpandedNodes;
                     if (rj.Success != ra.Success || (rj.Success && PathCost(rj.Path) != PathCost(ra.Path)))
@@ -250,12 +250,12 @@ namespace JPS.Benchmark
                 {
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
-                    foreach (var p in qs) jps.FindPath(system, p.s, p.g, false);
+                    foreach (var p in qs) jps.FindPath(system, p.s, p.g);
                     sw.Stop(); jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
 
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
-                    foreach (var p in qs) astar.FindPath(map, p.s, p.g, false);
+                    foreach (var p in qs) astar.FindPath(map, p.s, p.g);
                     sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
                 }
 
@@ -297,7 +297,7 @@ namespace JPS.Benchmark
             var system = new JpsSystem(map);
             system.Sync();
             var jps = new JpsPathfinder();
-            var r = jps.FindPath(system, first, last, false);
+            var r = jps.FindPath(system, first, last);
 
             Console.WriteLine($"{Path.GetFileName(path)}  {map.Width}x{map.Height}, 可走 {walk} 格");
             Console.WriteLine($"  JPS {first} -> {last}: success={r.Success}, expanded={r.ExpandedNodes}, path={r.Path.Count}");
@@ -321,7 +321,7 @@ namespace JPS.Benchmark
             for (int i = 0; i < Q; i++)
             {
                 var s = Free(); var g = Free();
-                var r = astar.FindPath(map, s, g, false);
+                var r = astar.FindPath(map, s, g);
                 pairs[i] = (s.X, s.Y, g.X, g.Y, r.Success ? PathCost(r.Path) : -1, r.Success);
             }
 
@@ -334,7 +334,7 @@ namespace JPS.Benchmark
                 for (int i = 0; i < Q; i++)
                 {
                     var p = pairs[i];
-                    var r = jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy), false);
+                    var r = jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
                     long cost = r.Success ? PathCost(r.Path) : -1;
                     if (r.Success != p.ok || cost != p.cost) local++;
                 }

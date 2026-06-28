@@ -161,11 +161,12 @@ public sealed class GridControl : ScrollableControl
         EnsureGrid();
         _system.Sync();         // 单线程把共享缓存同步到当前地图（按版本置脏）
         SnapshotCleanState();   // 记录寻路前的 clean 状态，供 UI 区分本次新更新的方向
+        _overlay.SetWidth(_map.Width);
+        _overlay.BeginCollect();
         var sw = Stopwatch.StartNew();
-        var result = _jps.FindPath(_system, (_startX, _startY), (_endX, _endY));
+        var result = _jps.FindPath(_system, (_startX, _startY), (_endX, _endY), _overlay);
         sw.Stop();
 
-        _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
         _overlay.SetPath(result.Path);
         _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
@@ -176,11 +177,12 @@ public sealed class GridControl : ScrollableControl
     public PathResult RunAStar()
     {
         EnsureGrid();
+        _overlay.SetWidth(_map.Width);
+        _overlay.BeginCollect();
         var sw = Stopwatch.StartNew();
-        var result = _astar.FindPath(_map, (_startX, _startY), (_endX, _endY));
+        var result = _astar.FindPath(_map, (_startX, _startY), (_endX, _endY), _overlay);
         sw.Stop();
 
-        _overlay.SetSearchCells(result.Expanded, result.Frontier, result.Scanned);
         _overlay.SetPath(result.Path);
         _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
         Invalidate();
@@ -188,8 +190,8 @@ public sealed class GridControl : ScrollableControl
         return result;
     }
 
-    // 按系统语言把寻路结果格式化为状态栏文案（中/英）。表现层负责本地化，
-    // 算法层（PathResult）只提供数据（扩展数、前沿、扫描、路径等），保持 UI 无关。
+    // 按系统语言把寻路结果格式化为状态栏文案（中/英）。表现层负责本地化：
+    // 算法层（PathResult）只提供纯数据（扩展数、路径等），可视化计数从 _overlay（采集器）读取。
     private string DescribeResult(string algo, PathResult r, Stopwatch sw)
     {
         if (!HasStart || !HasEnd)
@@ -198,21 +200,23 @@ public sealed class GridControl : ScrollableControl
             return Loc.T("起点或终点位于阻挡上。", "Start or goal is on an obstacle.");
 
         bool isAStar = algo == "A*";
+        int frontier = _overlay.FrontierCount;
+        int scanned = _overlay.ScannedCount;
         string body;
         if (r.Success)
         {
             string mid = isAStar
-                ? Loc.Zh ? $"搜索合计 {r.Expanded.Count + r.Frontier.Count} 格，" : $"searched {r.Expanded.Count + r.Frontier.Count} cells, "
-                : Loc.Zh ? $"扫描跳过 {r.Scanned.Count} 格，" : $"scanned-skipped {r.Scanned.Count} cells, ";
+                ? Loc.Zh ? $"搜索合计 {_overlay.ExpandedCount + frontier} 格，" : $"searched {_overlay.ExpandedCount + frontier} cells, "
+                : Loc.Zh ? $"扫描跳过 {scanned} 格，" : $"scanned-skipped {scanned} cells, ";
             body = Loc.Zh
-                ? $"{algo}：扩展 {r.ExpandedNodes}，入队未扩展 {r.Frontier.Count}，{mid}路径 {r.Path.Count} 格。"
-                : $"{algo}: expanded {r.ExpandedNodes}, frontier {r.Frontier.Count}, {mid}path {r.Path.Count} cells.";
+                ? $"{algo}：扩展 {r.ExpandedNodes}，入队未扩展 {frontier}，{mid}路径 {r.Path.Count} 格。"
+                : $"{algo}: expanded {r.ExpandedNodes}, frontier {frontier}, {mid}path {r.Path.Count} cells.";
         }
         else
         {
             string tail = isAStar
                 ? Loc.Zh ? " 格" : " cells"
-                : Loc.Zh ? $"，扫描跳过 {r.Scanned.Count} 格" : $", scanned-skipped {r.Scanned.Count} cells";
+                : Loc.Zh ? $"，扫描跳过 {scanned} 格" : $", scanned-skipped {scanned} cells";
             body = Loc.Zh
                 ? $"{algo}：未找到路径（扩展 {r.ExpandedNodes}{tail}）。"
                 : $"{algo}: no path found (expanded {r.ExpandedNodes}{tail}).";

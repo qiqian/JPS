@@ -112,7 +112,6 @@ namespace JPS.Pathfinding
         private CellJump[] _cells = new CellJump[0];
         private byte _validGen;
         private int _mapVersion = -1;
-        private Func<int, int, bool> _walk = static (_, _) => false;
 
         /// <summary>
         /// 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。
@@ -143,8 +142,6 @@ namespace JPS.Pathfinding
                 }
                 _mapVersion = map.Version;
             }
-
-            _walk = map.IsWalkable;
         }
 
         /// <summary>某格某正交方向当前是否 clean（可视化用）。尺寸/版本不符则视为 dirty。</summary>
@@ -182,7 +179,7 @@ namespace JPS.Pathfinding
                 ry += dy;
                 s++;
                 if (!map.IsWalkable(rx, ry)) { jumpFound = false; break; }
-                if (JpsRules.IsJumpPoint(_walk, rx, ry, dx, dy)) { jumpFound = true; break; }
+                if (JpsRules.IsJumpPoint(map, rx, ry, dx, dy)) { jumpFound = true; break; }
             }
 
             // 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ short.MaxValue，安全转 short。
