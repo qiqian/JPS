@@ -50,6 +50,55 @@ namespace JPS.Accuracy
             public override void Flush() { _a.Flush(); _b.Flush(); }
         }
 
+        // 进度行：只用 \r 在真实终端底部刷新（直接写真实 console，不经 TeeTextWriter，
+        // 因此绝不会进入报告文件）。输出被重定向（管道/文件）时自动关闭，避免污染。
+        private sealed class ConsoleProgress
+        {
+            private readonly TextWriter _console;
+            private readonly bool _enabled;
+            private int _lastLen;
+            private long _lastShownMs = -100000;          // 上次实际刷新时刻（Environment.TickCount64）
+            private const long MinIntervalMs = 5000;       // 限频：两次刷新至少间隔 5s，避免刷进度拖慢测试
+
+            public ConsoleProgress(TextWriter console)
+            {
+                _console = console;
+                _enabled = !Console.IsOutputRedirected;
+            }
+
+            public void Show(string text)
+            {
+                if (!_enabled) return;
+                long now = Environment.TickCount64;
+                if (now - _lastShownMs < MinIntervalMs) return;   // 距上次刷新不足 5s 直接跳过
+                _lastShownMs = now;
+                int max = SafeWidth();
+                if (text.Length > max) text = text.Substring(0, max);
+                _console.Write('\r');
+                _console.Write(text);
+                if (_lastLen > text.Length) _console.Write(new string(' ', _lastLen - text.Length));
+                _console.Write('\r');
+                _console.Flush();
+                _lastLen = text.Length;
+            }
+
+            public void Clear()
+            {
+                if (!_enabled || _lastLen == 0) return;
+                _console.Write('\r');
+                _console.Write(new string(' ', _lastLen));
+                _console.Write('\r');
+                _console.Flush();
+                _lastLen = 0;
+            }
+
+            private static int SafeWidth()
+            {
+                try { int w = Console.WindowWidth; return w > 1 ? w - 1 : 120; }
+                catch { return 120; }
+            }
+        }
+
         private static int Run(string? sub, int maxPerScen)
         {
             string root = FindDir("movingai");
@@ -70,6 +119,8 @@ namespace JPS.Accuracy
             var consoleOut = Console.Out;
             var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+            var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
+            void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
             Console.WriteLine($"# JPS / A* · MovingAI .scen 正确性报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}");
@@ -94,15 +145,18 @@ namespace JPS.Accuracy
             double worstBad = 0;     // 失败项里的最大 |偏差|
             var sw = Stopwatch.StartNew();
 
-            foreach (var f in files)
+            int total = files.Length;
+            for (int fi = 0; fi < files.Length; fi++)
             {
+                var f = files[fi];
                 string rel = Path.GetRelativePath(root, f).Replace('\\', '/');
                 string name = rel.EndsWith(".scen", StringComparison.OrdinalIgnoreCase) ? rel[..^5] : rel;
                 string scenDir = Path.GetDirectoryName(f)!;
+                progress.Show($"[{fi + 1}/{total}] {Trunc(name, 44)}");
 
                 List<Entry> entries;
                 try { entries = ParseScen(f); }
-                catch (Exception ex) { Console.WriteLine($"{name,-44}  解析失败：{ex.Message}"); continue; }
+                catch (Exception ex) { Emit($"{name,-44}  解析失败：{ex.Message}"); continue; }
                 if (maxPerScen > 0 && entries.Count > maxPerScen) entries = entries.GetRange(0, maxPerScen);
 
                 int n = 0, pass = 0, jFail = 0, subopt = 0, inval = 0, refL = 0, refS = 0;
@@ -113,8 +167,11 @@ namespace JPS.Accuracy
                 JpsSystem? sys = null;
                 string? curMapField = null;
 
-                foreach (var e in entries)
+                for (int ei = 0; ei < entries.Count; ei++)
                 {
+                    if ((ei & 23) == 0)
+                        progress.Show($"[{fi + 1}/{total}] {Trunc(name, 40)}  {ei}/{entries.Count}");
+                    var e = entries[ei];
                     if (!string.Equals(curMapField, e.Map, StringComparison.Ordinal))
                     {
                         curMapField = e.Map;
@@ -167,12 +224,13 @@ namespace JPS.Accuracy
                 }
 
                 if (n > 0)
-                    Console.WriteLine($"{Trunc(name, 44),-44}{n,8}{pass,8}{jFail,7}{subopt,8}{inval,7}{refL,7}{refS,7}");
+                    Emit($"{Trunc(name, 44),-44}{n,8}{pass,8}{jFail,7}{subopt,8}{inval,7}{refL,7}{refS,7}");
 
                 tN += n; tPass += pass; tJFail += jFail; tSubopt += subopt; tInval += inval; tRefL += refL; tRefS += refS;
             }
 
             sw.Stop();
+            progress.Clear();
             Console.WriteLine(new string('-', 94));
             Console.WriteLine($"{"合计",-44}{tN,8}{tPass,8}{tJFail,7}{tSubopt,8}{tInval,7}{tRefL,7}{tRefS,7}");
             Console.WriteLine();

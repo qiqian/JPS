@@ -152,6 +152,56 @@ namespace JPS.Benchmark
             public override void Flush() { _a.Flush(); _b.Flush(); }
         }
 
+        // 进度行：只用 \r 在真实终端底部刷新（直接写真实 console，不经 TeeTextWriter，
+        // 因此绝不会进入报告文件）。输出被重定向（管道/文件）时自动关闭，避免污染。
+        // 用法：耗时前 Show(...)；打印正式结果行前 Clear()，再走 Console.WriteLine（Tee）。
+        private sealed class ConsoleProgress
+        {
+            private readonly TextWriter _console;
+            private readonly bool _enabled;
+            private int _lastLen;
+            private long _lastShownMs = -100000;          // 上次实际刷新时刻（Environment.TickCount64）
+            private const long MinIntervalMs = 5000;       // 限频：两次刷新至少间隔 5s，避免刷进度拖慢测试
+
+            public ConsoleProgress(TextWriter console)
+            {
+                _console = console;
+                _enabled = !Console.IsOutputRedirected;
+            }
+
+            public void Show(string text)
+            {
+                if (!_enabled) return;
+                long now = Environment.TickCount64;
+                if (now - _lastShownMs < MinIntervalMs) return;   // 距上次刷新不足 5s 直接跳过
+                _lastShownMs = now;
+                int max = SafeWidth();
+                if (text.Length > max) text = text.Substring(0, max);
+                _console.Write('\r');
+                _console.Write(text);
+                if (_lastLen > text.Length) _console.Write(new string(' ', _lastLen - text.Length));
+                _console.Write('\r');
+                _console.Flush();
+                _lastLen = text.Length;
+            }
+
+            public void Clear()
+            {
+                if (!_enabled || _lastLen == 0) return;
+                _console.Write('\r');
+                _console.Write(new string(' ', _lastLen));
+                _console.Write('\r');
+                _console.Flush();
+                _lastLen = 0;
+            }
+
+            private static int SafeWidth()
+            {
+                try { int w = Console.WindowWidth; return w > 1 ? w - 1 : 120; }
+                catch { return 120; }
+            }
+        }
+
         private static void MapBench(int q, string? sub = null)
         {
             string root = FindDir("movingai");
@@ -174,6 +224,8 @@ namespace JPS.Benchmark
             var consoleOut = Console.Out;
             var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+            var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
+            void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
             Console.WriteLine($"# JPS vs A* · MovingAI 基准报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
@@ -199,8 +251,11 @@ namespace JPS.Benchmark
             double sumJms = 0, sumAms = 0;
             int sumPairs = 0, sumMism = 0;
 
-            foreach (var f in files)
+            for (int fi = 0; fi < files.Length; fi++)
             {
+                var f = files[fi];
+                progress.Show($"[{fi + 1}/{files.Length}] {Path.GetRelativePath(root, f).Replace('\\', '/')}");
+
                 var map = MovingAiMap.Parse(File.ReadAllText(f));
                 string rel = Path.GetRelativePath(root, f);
                 string name = (rel.EndsWith(".map", StringComparison.OrdinalIgnoreCase)
@@ -212,7 +267,7 @@ namespace JPS.Benchmark
                 for (int y = 0; y < map.Height; y++)
                     for (int x = 0; x < map.Width; x++)
                         if (map.IsWalkable(x, y)) walk.Add((x, y));
-                if (walk.Count < 2) { Console.WriteLine($"{name,-34}{size,11}   (可走格不足)"); continue; }
+                if (walk.Count < 2) { Emit($"{name,-34}{size,11}   (可走格不足)"); continue; }
 
                 var system = new JpsSystem(map);
                 system.Sync();
@@ -231,14 +286,16 @@ namespace JPS.Benchmark
                     if (jps.FindPath(system, s, g).Success) qs.Add((s, g));
                 }
                 int n = qs.Count;
-                if (n == 0) { Console.WriteLine($"{name,-34}{size,11}   (无可解样本)"); continue; }
+                if (n == 0) { Emit($"{name,-34}{size,11}   (无可解样本)"); continue; }
 
-                // 扩展节点 + 正确性校验（与耗时分离统计）：
+                // 扩展节点 + 正确性校验（本遍不计时，进度可细粒度刷新；仍受 5s 限频）：
                 // 逐样本对比 JPS 与 A* 的成败与“路径代价”是否一致（代价相等即最优；两者可走不同的等价最优路）。
                 long jExp = 0, aExp = 0;
                 int mism = 0;
-                foreach (var p in qs)
+                for (int k = 0; k < n; k++)
                 {
+                    if ((k & 23) == 0) progress.Show($"[{fi + 1}/{files.Length}] {name}  校验 {k}/{n}");
+                    var p = qs[k];
                     var rj = jps.FindPath(system, p.s, p.g);
                     var ra = astar.FindPath(map, p.s, p.g);
                     jExp += rj.ExpandedNodes;
@@ -252,11 +309,13 @@ namespace JPS.Benchmark
                 var sw = new Stopwatch();
                 for (int rep = 0; rep < 3; rep++)
                 {
+                    progress.Show($"[{fi + 1}/{files.Length}] JPS:{name}  计时 {rep + 1}/3（{n} 对）");   // 受 5s 限频
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
                     foreach (var p in qs) jps.FindPath(system, p.s, p.g);
                     sw.Stop(); jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
 
+                    progress.Show($"[{fi + 1}/{files.Length}] A*:{name}  计时 {rep + 1}/3（{n} 对）");   // 受 5s 限频
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
                     foreach (var p in qs) astar.FindPath(map, p.s, p.g);
@@ -264,13 +323,14 @@ namespace JPS.Benchmark
                 }
 
                 double jus = jMs / n * 1000, aus = aMs / n * 1000;
-                Console.WriteLine(
+                Emit(
                     $"{name,-34}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
                     $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{mism,6}");
 
                 sumJexp += jExp; sumAexp += aExp; sumJms += jMs; sumAms += aMs; sumPairs += n; sumMism += mism;
             }
 
+            progress.Clear();
             Console.WriteLine(new string('-', 113));
             if (sumPairs > 0)
             {
@@ -357,6 +417,8 @@ namespace JPS.Benchmark
             var consoleOut = Console.Out;
             var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+            var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
+            void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
@@ -377,8 +439,11 @@ namespace JPS.Benchmark
 
             // 2) 逐图测试：每张图只 Parse 一次，跑完它的全部（去重）用例
             var sw = new Stopwatch();
+            int total = groups.Count, gi = 0;
             foreach (var kv in groups.OrderBy(k => Path.GetRelativePath(root, k.Key), StringComparer.OrdinalIgnoreCase))
             {
+                gi++;
+                progress.Show($"[{gi}/{total}] {Path.GetRelativePath(root, kv.Key).Replace('\\', '/')}");
                 var g = kv.Value;
                 GridMap map;
                 try { map = MovingAiMap.Parse(File.ReadAllText(g.MapPath)); }
@@ -398,7 +463,7 @@ namespace JPS.Benchmark
                 string name = rel.EndsWith(".map", StringComparison.OrdinalIgnoreCase) ? rel.Substring(0, rel.Length - 4) : rel;
                 string size = $"{map.Width}x{map.Height}";
                 int n = valid.Count;
-                if (n == 0) { Console.WriteLine($"{Trunc(name, 34),-34}{size,11}   (无有效用例)"); continue; }
+                if (n == 0) { Emit($"{Trunc(name, 34),-34}{size,11}   (无有效用例)"); continue; }
 
                 var system = new JpsSystem(map);
                 system.Sync();
@@ -407,25 +472,37 @@ namespace JPS.Benchmark
 
                 long jExp = 0, aExp = 0;
 
-                // 每个坐标对只跑一次：JPS 整体一遍计时（含惰性缓存首次填充），A* 整体一遍计时
+                // 每个坐标对只跑一次：JPS 整体一遍计时（含惰性缓存首次填充），A* 整体一遍计时。
+                // 进度刷新在计时遍内，但「低频计数 &8191 + 5s 限频」使 console 实际写入极少，对耗时影响可忽略。
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 sw.Restart();
-                foreach (var p in valid) { var r = jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)); jExp += r.ExpandedNodes; }
+                for (int k = 0; k < n; k++)
+                {
+                    if ((k & 8191) == 0) progress.Show($"[{gi}/{total}] {name}  JPS {k}/{n}");
+                    var p = valid[k];
+                    jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                }
                 sw.Stop(); double jMs = sw.Elapsed.TotalMilliseconds;
 
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 sw.Restart();
-                foreach (var p in valid) { var r = astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)); aExp += r.ExpandedNodes; }
+                for (int k = 0; k < n; k++)
+                {
+                    if ((k & 61) == 0) progress.Show($"[{gi}/{total}] {name}  A* {k}/{n}");
+                    var p = valid[k];
+                    aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                }
                 sw.Stop(); double aMs = sw.Elapsed.TotalMilliseconds;
 
                 double jus = jMs / n * 1000, aus = aMs / n * 1000;
-                Console.WriteLine(
+                Emit(
                     $"{Trunc(name, 34),-34}{size,11}{g.ScenCount,7}{n,9}{jExp / n,9}{aExp / n,9}" +
                     $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
 
                 sumJexp += jExp; sumAexp += aExp; sumPairs += n; sumJms += jMs; sumAms += aMs;
             }
 
+            progress.Clear();
             Console.WriteLine(new string('-', 111));
             if (sumPairs > 0)
             {
@@ -464,6 +541,8 @@ namespace JPS.Benchmark
             var consoleOut = Console.Out;
             var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+            var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
+            void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
@@ -484,8 +563,11 @@ namespace JPS.Benchmark
             var sw = new Stopwatch();
 
             // 2) 逐图：每张只 Parse 一次，先随机投点、后 scen
+            int total = groups.Count, gi = 0;
             foreach (var kv in groups.OrderBy(k => Path.GetRelativePath(root, k.Key), StringComparer.OrdinalIgnoreCase))
             {
+                gi++;
+                progress.Show($"[{gi}/{total}] {Path.GetRelativePath(root, kv.Key).Replace('\\', '/')}");
                 var grp = kv.Value;
                 GridMap map;
                 try { map = MovingAiMap.Parse(File.ReadAllText(grp.MapPath)); }
@@ -522,20 +604,28 @@ namespace JPS.Benchmark
                     if (rn > 0)
                     {
                         long jExp = 0, aExp = 0;
-                        foreach (var p in qs) { jExp += jps.FindPath(system, p.s, p.g).ExpandedNodes; aExp += astar.FindPath(map, p.s, p.g).ExpandedNodes; }
+                        for (int k = 0; k < rn; k++)
+                        {
+                            if ((k & 23) == 0) progress.Show($"[{gi}/{total}] {name}  rand 节点 {k}/{rn}");
+                            var p = qs[k];
+                            jExp += jps.FindPath(system, p.s, p.g).ExpandedNodes;
+                            aExp += astar.FindPath(map, p.s, p.g).ExpandedNodes;
+                        }
 
                         double jMs = double.MaxValue, aMs = double.MaxValue;
                         for (int rep = 0; rep < 3; rep++)
                         {
+                            progress.Show($"[{gi}/{total}] JPS:{name}  rand 计时 {rep + 1}/3（{rn} 对）");   // 受 5s 限频
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart(); foreach (var p in qs) jps.FindPath(system, p.s, p.g); sw.Stop();
                             jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
+                            progress.Show($"[{gi}/{total}] A*:{name}  rand 计时 {rep + 1}/3（{rn} 对）");   // 受 5s 限频
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart(); foreach (var p in qs) astar.FindPath(map, p.s, p.g); sw.Stop();
                             aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
                         }
                         double jus = jMs / rn * 1000, aus = aMs / rn * 1000;
-                        Console.WriteLine(
+                        Emit(
                             $"{Trunc(name, 30),-30}{"rand",6}{walk.Count * 100.0 / tot,7:F1}{"%",1}{rn,8}{jExp / rn,9}{aExp / rn,9}" +
                             $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
                         rJexp += jExp; rAexp += aExp; rPairs += rn; rJms += jMs; rAms += aMs;
@@ -554,21 +644,35 @@ namespace JPS.Benchmark
                 int sn = valid.Count;
                 if (sn > 0)
                 {
+                    // scen 计时遍内刷新进度，「低频计数 &8191 + 5s 限频」使 console 实际写入极少，对耗时影响可忽略
                     long jExp = 0, aExp = 0;
                     GC.Collect(); GC.WaitForPendingFinalizers();
-                    sw.Restart(); foreach (var p in valid) jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes; sw.Stop();
-                    double jMs = sw.Elapsed.TotalMilliseconds;
+                    sw.Restart();
+                    for (int k = 0; k < sn; k++)
+                    {
+                        if ((k & 61) == 0) progress.Show($"[{gi}/{total}] {name}  scen JPS {k}/{sn}");
+                        var p = valid[k];
+                        jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                    }
+                    sw.Stop(); double jMs = sw.Elapsed.TotalMilliseconds;
                     GC.Collect(); GC.WaitForPendingFinalizers();
-                    sw.Restart(); foreach (var p in valid) aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes; sw.Stop();
-                    double aMs = sw.Elapsed.TotalMilliseconds;
+                    sw.Restart();
+                    for (int k = 0; k < sn; k++)
+                    {
+                        if ((k & 61) == 0) progress.Show($"[{gi}/{total}] {name}  scen A* {k}/{sn}");
+                        var p = valid[k];
+                        aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                    }
+                    sw.Stop(); double aMs = sw.Elapsed.TotalMilliseconds;
                     double jus = jMs / sn * 1000, aus = aMs / sn * 1000;
-                    Console.WriteLine(
+                    Emit(
                         $"{Trunc(name, 30),-30}{"scen",6}{grp.ScenCount,8}{sn,8}{jExp / sn,9}{aExp / sn,9}" +
                         $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
                     sJexp += jExp; sAexp += aExp; sPairs += sn; sJms += jMs; sAms += aMs;
                 }
             }
 
+            progress.Clear();
             Console.WriteLine(new string('-', 102));
             if (rPairs > 0)
                 Console.WriteLine($"[rand] 合计 {rPairs} 组：扩展节点 A*/JPS={(double)rAexp / Math.Max(1, rJexp):F1}x，耗时 A*/JPS={rAms / Math.Max(0.001, rJms):F1}x（JPS {rJms:F0}ms / A* {rAms:F0}ms）");

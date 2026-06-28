@@ -356,7 +356,16 @@ Parallel.For(0, threads, _ =>
 
 ### JPS vs A\* 性能开销对比（实测）
 
-JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**——扩展节点数直接决定堆操作与总工作量。下表是本机 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` 在 **全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集、共 562 张图、每图 1000 组随机可解起终点（合计 56.2 万组）** 的汇总实测（在**允许斜穿拐角**模式下测得；当前默认禁止斜穿角，整体趋势一致、绝对加速比略变。`speed` = A\* 耗时 / JPS 耗时；区间为该集合内逐图实测的最小~最大）：
+JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数极少"**——扩展节点数直接决定堆操作与总工作量。下表汇总本机在 **全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集、共 562 张图** 上的实测（**默认禁止斜穿角**，严格按 SoCS'12；`speed` = A\* 耗时 / JPS 耗时）。两种口径并列：① **随机投点**——每图 1000 组随机可解起终点（合计 56.2 万组，热缓存）；② **官方 `.scen` 场景**——全部 141 万条真实（多为长距离）查询。
+
+| 口径 | 组数 | 扩展节点 A\*/JPS | 墙钟 A\*/JPS | JPS 总耗时 | A\* 总耗时 |
+|---|---|---|---|---|---|
+| 随机投点（热缓存） | 56.2 万 | **55.4×** | **54.0×** | 11.2 s | 607 s |
+| 官方 .scen（真实长查询） | 141 万 | **40.5×** | **38.3×** | 101 s | 3857 s |
+
+> 同机对比：早期**允许切角**口径的整体墙钟加速是 43.9×，**禁止切角后升到 54.0×**——不切角下 A\* 每个对角邻居都要多判合法性、JPS 剪枝也更彻底，故 JPS 相对优势更大（与论文预期一致）。`.scen` 是官方长距离查询，路径更长、JPS 单次更贵，加速比自然回落到 ~38×，但仍稳省一个量级，且 141 万条全部正确（由 `JPS.Accuracy` 保证）。
+
+下表是**随机投点口径**下各地图集的逐图 `speed` 区间（最小~最大，趋势参考）：
 
 | 地图集 | 张数 | 典型尺寸 | 加速 speed 区间 | 集合特征 |
 |---|---|---|---|---|
@@ -367,9 +376,9 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 | `dao-map` | 156 | 含 1024–1491 巨图 | 3–62× | 龙腾世纪起源，尺寸跨度大 |
 | `bgmaps-map` | 120 | 50–320 | 2.5–38× | 小~中图，绝对差距小 |
 | `mapf-map` | 33 | 8–1491（混合） | 1.4–73× | MAPF 基准，含随机散点（最弱） |
-| **全部合计** | **562** | — | **节点 54.4× / 墙钟 43.9×** | **56.2 万组，JPS 总 11.8 s vs A\* 总 518 s** |
+| **全部合计** | **562** | — | **节点 55.4× / 墙钟 54.0×** | **56.2 万组，JPS 总 11.2 s vs A\* 总 607 s** |
 
-- **正确性**：**562000 组全部与 A\* 一致（成败 + 最短路径代价），0 不符** ✓——在 7 类真实基准上验证了 JPS 的完备性与最优性。
+- **正确性**：随机 56.2 万组经 `mapbench` 与 A\* 逐组比对（成败 + 最短路径代价）**0 不符** ✓；官方 `.scen` 全 **142 万条**再由 `JPS.Accuracy` 三重校验确认（见下）——共同验证 JPS 的完备性与最优性。
 
 解读要点：
 
@@ -380,9 +389,11 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 - **任何场景都不输 A\***：最差的随机散点也有 ~1.4×，没有一张图 JPS 慢于 A\*，且结果始终一致。
 - **缓存复用 / 单次更贵但堆更省**：表中 JPS 为**热缓存**（同图跨查询持续洗白跳点；单独在 `test2.json` 实测"复用"比"每次冷缓存"快约 **10×**，是[多线程互相预热](#4-无锁多线程共享惰性缓存的并行寻路)的来源）；JPS 单次扩展更贵（剪枝 + 跳跃扫描），但扩展次数锐减、只把跳点入队（堆"清爽"，A\* 入队 ≈ 扩展数×邻居数），综合净赢一个量级。
 
-> 复现：全量 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000`（递归遍历 `movingai/` 全部子集，结果同时写入 `benchmark-results/` 报告）；只测某子集加第二参数，如 `mapbench 1000 sc1-map`；单图基准 `dotnet run -c Release --project JPS.Benchmark -- bench`（`test2.json`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
+> 复现：上表两口径由 `dotnet run -c Release --project JPS.Benchmark -- combo 1000` 一次跑出（每张图先随机投点、再跑该图全部 `.scen`，地图只解析一次）；也可只跑随机 `mapbench 1000` 或只跑场景 `scenbench`（均可加子集参数，如 `combo 1000 sc1-map`）；单图基准 `bench`（`test2.json`）。结果同时写入 `benchmark-results/` 报告。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
 >
 > **正确性（.scen 基准）**：`dotnet run -c Release --project JPS.Accuracy` 递归读取 `movingai/` 下所有 MovingAI **`.scen` 场景**，对每条用例用官方最优解长度（octile：直 1 / 斜 √2、不切角）三重校验 JPS 与 A\*：① JPS 整数代价 == A\* 整数代价（最优性硬校验）；② JPS 路径合法（逐格相邻 / 可走 / 按当前构建不切角）；③ JPS 真实长度 ≈ 官方 `optimal`。可加参数限定范围与每场景用例数，如 `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`；结果同时写入 `accuracy-results/` 报告。整数 1414 近似 √2 会带来 ~1e-4·斜步 的舍入偏差（正常），真实次优 / 切角 / 漏解会产生远大于此的偏差并被单列。
+>
+> **最新实测**（`斜穿角=禁止`，全部 1354 个 `.scen` / **142.3 万条**用例）：**漏解 0、与 A\* 整数代价不一致 0、路径非法 0、比官方更短 0**——即 JPS 完备、与 A\* 同度量完全最优、路径全合法、零切角泄漏。与官方最优长度逐条比对：**142.3034 万条精确吻合**，仅 4 条受整数 `1414≈√2` 在长对角路径上的累积影响（最大偏差仅 **0.0315 格**）；这并非算法缺陷——`subopt=0`（JPS 整数代价与 A\* 完全相等）已证明在本项目度量下处处最优。
 
 ---
 
@@ -785,7 +796,16 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 ### JPS vs A\* Performance (measured)
 
-JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"** — expanded-node count directly drives heap ops and total work. The table below summarizes `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` over **all 7 [MovingAI](https://movingai.com/benchmarks/) map sets, 562 maps, 1000 random solvable start/goal pairs each (562,000 total)** (measured in corner-cutting mode; the default now forbids corner-cutting — same overall trend, slightly different absolute ratios. `speed` = A\* time / JPS time; the range is the per-map min–max within each set):
+JPS essentially **trades "more expensive per expansion (jump/scan)" for "far fewer expansions"** — expanded-node count directly drives heap ops and total work. The table below summarizes measurements over **all 7 [MovingAI](https://movingai.com/benchmarks/) map sets, 562 maps** (default **no-corner-cutting**, strictly per SoCS'12; `speed` = A\* time / JPS time), under two regimes: ① **random sampling** — 1000 random solvable start/goal pairs per map (562k total, hot cache); ② **official `.scen` scenarios** — all 1.41M real (mostly long-distance) queries.
+
+| Regime | Pairs | Nodes A\*/JPS | Wall-clock A\*/JPS | JPS total | A\* total |
+|---|---|---|---|---|---|
+| Random sampling (hot cache) | 562k | **55.4×** | **54.0×** | 11.2 s | 607 s |
+| Official .scen (long queries) | 1.41M | **40.5×** | **38.3×** | 101 s | 3857 s |
+
+> Same-machine note: the earlier **corner-cutting** regime gave 43.9× overall wall-clock; **forbidding corner-cutting raises it to 54.0×** — without corner-cutting A\* must check legality on every diagonal neighbor and JPS prunes more aggressively, so JPS's relative edge grows (as the paper predicts). `.scen` are official long-distance queries (longer paths, costlier per JPS call), so the ratio settles to ~38×, still a solid order-of-magnitude win, and all 1.41M are correct (guaranteed by `JPS.Accuracy`).
+
+The table below is the per-map `speed` range (min–max) under the **random-sampling** regime (trend reference):
 
 | Map set | Maps | Typical size | speed range | Set character |
 |---|---|---|---|---|
@@ -796,9 +816,9 @@ JPS essentially **trades "more expensive per expansion (jump/scan)" for "far few
 | `dao-map` | 156 | incl. 1024–1491 huge | 3–62× | Dragon Age Origins, wide size range |
 | `bgmaps-map` | 120 | 50–320 | 2.5–38× | small–medium, smaller absolute gap |
 | `mapf-map` | 33 | 8–1491 (mixed) | 1.4–73× | MAPF set, incl. random scatter (weakest) |
-| **All combined** | **562** | — | **nodes 54.4× / wall-clock 43.9×** | **562k pairs, JPS 11.8 s vs A\* 518 s total** |
+| **All combined** | **562** | — | **nodes 55.4× / wall-clock 54.0×** | **562k pairs, JPS 11.2 s vs A\* 607 s total** |
 
-- **Correctness:** **all 562,000 pairs agree with A\* on success/failure and shortest-path cost — 0 mismatches** ✓ — validating JPS's completeness and optimality across 7 families of real benchmarks.
+- **Correctness:** the random 562k pairs are compared against A\* per pair by `mapbench` (success/failure + shortest-path cost) — **0 mismatches** ✓; the full **1.42M** official `.scen` pairs are further triple-checked by `JPS.Accuracy` (see below) — together validating JPS's completeness and optimality across 7 families of real benchmarks.
 
 Interpretation:
 
@@ -809,9 +829,11 @@ Interpretation:
 - **Never loses to A\*:** even the worst random scatter is ~1.4×; no single map has JPS slower than A\*, and results always match.
 - **Cache reuse / costlier expansion but leaner heap:** JPS times are **warm-cache** (jump points whitened across queries; measured separately on `test2.json`, "reuse" is ~**10×** faster than "cold every time" — the source of [multithreaded mutual warming](#4-lock-free-multithreading)); each JPS expansion is costlier (pruning + jump scanning) but expansions plummet and only jump points are enqueued (clean heap, vs A\*'s ≈ expansions × neighbors), netting an order-of-magnitude win.
 
-> Reproduce: full suite `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` (recurses over all of `movingai/`; results are also written to a report under `benchmark-results/`); limit to one subset with a second arg, e.g. `mapbench 1000 sc1-map`; single-map benchmark `dotnet run -c Release --project JPS.Benchmark -- bench` (`test2.json`). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
+> Reproduce: both regimes above come from a single `dotnet run -c Release --project JPS.Benchmark -- combo 1000` (per map: random sampling first, then all of that map's `.scen`, parsing the map only once); or run only random `mapbench 1000` / only scenarios `scenbench` (each accepts a subset arg, e.g. `combo 1000 sc1-map`); single-map benchmark `bench` (`test2.json`). Results are also written under `benchmark-results/`. Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
 >
 > **Correctness (.scen suite):** `dotnet run -c Release --project JPS.Accuracy` recursively reads every MovingAI **`.scen`** scenario under `movingai/` and validates JPS and A* against the official optimal length (octile: 1 / √2, no corner-cutting) with three checks per case: ① JPS integer cost == A* integer cost (hard optimality check); ② JPS path is legal (cell-adjacent / walkable / no corner-cut for the current build); ③ JPS true length ≈ official `optimal`. Scope and per-scen cap are optional args, e.g. `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`; results are also written under `accuracy-results/`. The integer-1414 approximation of √2 yields a ~1e-4·diag-steps rounding deviation (normal); genuine suboptimality / corner-cuts / missed solutions deviate far more and are tallied separately.
+>
+> **Latest run** (`corner-cutting=off`, all 1354 `.scen` / **1.423M** cases): **0 missed solutions, 0 integer-cost mismatches vs A\*, 0 illegal paths, 0 shorter-than-official** — i.e. JPS is complete, fully optimal under this project's metric, with all paths legal and zero corner-cut leakage. Against the official optimal lengths: **1.423034M cases match exactly**, with only 4 cases affected by the `1414≈√2` accumulation on long diagonal paths (max deviation just **0.0315 cell**); this is not an algorithm defect — `subopt=0` (JPS integer cost identical to A\*) already proves optimality under the project's metric.
 
 ## Run
 
