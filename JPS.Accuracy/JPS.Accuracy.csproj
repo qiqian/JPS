@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- MovingAI .scen 批量正确性测试：用官方场景的最优解长度校验 JPS / A*。引用核心算法库与数据解析库。 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>JPS.Accuracy</RootNamespace>
+    <AssemblyName>JPS.Accuracy</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
+    <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
+  </ItemGroup>
+
+</Project>

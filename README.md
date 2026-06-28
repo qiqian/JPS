@@ -381,6 +381,8 @@ JPS 的本质是**用"每次扩展更贵（要跳跃/扫描）"换"扩展次数�
 - **缓存复用 / 单次更贵但堆更省**：表中 JPS 为**热缓存**（同图跨查询持续洗白跳点；单独在 `test2.json` 实测"复用"比"每次冷缓存"快约 **10×**，是[多线程互相预热](#4-无锁多线程共享惰性缓存的并行寻路)的来源）；JPS 单次扩展更贵（剪枝 + 跳跃扫描），但扩展次数锐减、只把跳点入队（堆"清爽"，A\* 入队 ≈ 扩展数×邻居数），综合净赢一个量级。
 
 > 复现：全量 `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000`（递归遍历 `movingai/` 全部子集，结果同时写入 `benchmark-results/` 报告）；只测某子集加第二参数，如 `mapbench 1000 sc1-map`；单图基准 `dotnet run -c Release --project JPS.Benchmark -- bench`（`test2.json`）。绝对耗时随硬件而变，但**节点比**与**趋势**稳定可估。
+>
+> **正确性（.scen 基准）**：`dotnet run -c Release --project JPS.Accuracy` 递归读取 `movingai/` 下所有 MovingAI **`.scen` 场景**，对每条用例用官方最优解长度（octile：直 1 / 斜 √2、不切角）三重校验 JPS 与 A\*：① JPS 整数代价 == A\* 整数代价（最优性硬校验）；② JPS 路径合法（逐格相邻 / 可走 / 按当前构建不切角）；③ JPS 真实长度 ≈ 官方 `optimal`。可加参数限定范围与每场景用例数，如 `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`；结果同时写入 `accuracy-results/` 报告。整数 1414 近似 √2 会带来 ~1e-4·斜步 的舍入偏差（正常），真实次优 / 切角 / 漏解会产生远大于此的偏差并被单列。
 
 ---
 
@@ -426,6 +428,7 @@ dotnet run --project JPS.Playground
 | **JPS.Data** | 类库 · `netstandard2.1` / C# 9 | 地图数据 I/O：JSON 存档 + MovingAI `.map` 解析，引用 Core |
 | **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core/Data |
 | **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core/Data |
+| **JPS.Accuracy** | 控制台 · `net10.0` | MovingAI `.scen` 批量正确性测试（用官方最优解校验 JPS/A*），引用 Core/Data |
 
 ```
 JPS.slnx                         # 解决方案
@@ -434,12 +437,13 @@ JPS.slnx                         # 解决方案
 │   ├── Models/
 │   │   └── GridMap.cs           # 纯地形：尺寸 + 位压缩阻挡(ulong[]) + 版本号
 │   └── Pathfinding/
-│       ├── JpsDirections.cs     # 8 方向、整数代价(横1000/斜1414)、octile 启发
-│       ├── JpsRules.cs          # 跳点 / 强迫邻居规则（neighbor / forced neighbor）
+│       ├── JpsDirections.cs     # 8 方向、整数代价(横1000/斜1414)、octile 启发、斜走合法性(不切角)
+│       ├── JpsRules.cs          # 跳点 / 强迫邻居规则（直接吃 GridMap，无委托）
 │       ├── JumpPointCache.cs    # 惰性正交跳点缓存（世代戳整体置脏；JPS_CONCURRENT_CACHE 宏控 Volatile 发布）
 │       ├── JpsSystem.cs         # JPS 运行环境：共享的 GridMap + JumpPointCache（多线程共享单位）
 │       ├── JpsPathfinder.cs     # JPS：查/更新惰性正交缓存 + 经典对角扫描（搜索态线程私有）
 │       ├── AStarPathfinder.cs   # A* 对照（位压缩状态：来向 sbyte + 合并 mark）
+│       ├── ISearchObserver.cs   # 搜索可观测钩子（展开/入队/扫描事件；可视化数据不进算法核心）
 │       ├── PathSmoother.cs      # 前向增量视线拉直平滑（Vector2 按构建条件编译）
 │       └── MinHeap.cs           # 二叉最小堆（替代 PriorityQueue，兼容 Unity）
 │
@@ -450,14 +454,17 @@ JPS.slnx                         # 解决方案
 ├── JPS.Playground/              # ③ WinForms 演示界面（引用 Core/Data）
 │   ├── Controls/
 │   │   ├── GridControl.cs       # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
-│   │   ├── SearchOverlay.cs     # 寻路可视化叠加（与模型分离的视图状态）
+│   │   ├── SearchOverlay.cs     # 寻路可视化叠加：实现 ISearchObserver 作为采集器（视图状态）
 │   │   ├── EditMode.cs          # 编辑模式枚举（刷阻挡 / 起点 / 终点）
 │   │   └── Loc.cs               # 界面本地化（按系统语言中/英二选一，仅 UI 层）
 │   ├── Form1.cs / Form1.Designer.cs   # 工具栏、图例、存档对话框
 │   └── Program.cs               # WinForms 入口
 │
-└── JPS.Benchmark/               # ④ 命令行基准 / 压测（引用 Core/Data）
-    └── Program.cs               # `-- bench` 单图基准；`-- mt` 并发压测；`-- map <path>` 单图自检；`-- mapbench [q] [子目录]` 递归遍历 movingai/ 全量基准
+├── JPS.Benchmark/               # ④ 命令行基准 / 压测（引用 Core/Data）
+│   └── Program.cs               # `-- bench`/`-- mt`/`-- map <path>`/`-- mapbench [q] [子目录]`/`-- scenbench [子目录]` 按地图归并 .scen 性能；`-- combo [q] [子目录]` 随机投点+ .scen 合并基准
+│
+└── JPS.Accuracy/                # ⑤ MovingAI .scen 批量正确性测试（引用 Core/Data）
+    └── Program.cs               # `-- [子目录] [每scen最多用例数]` 用官方最优解校验 JPS/A*（最优性 + 路径合法 + 真实长度）
 ```
 
 > **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity；Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
@@ -803,6 +810,8 @@ Interpretation:
 - **Cache reuse / costlier expansion but leaner heap:** JPS times are **warm-cache** (jump points whitened across queries; measured separately on `test2.json`, "reuse" is ~**10×** faster than "cold every time" — the source of [multithreaded mutual warming](#4-lock-free-multithreading)); each JPS expansion is costlier (pruning + jump scanning) but expansions plummet and only jump points are enqueued (clean heap, vs A\*'s ≈ expansions × neighbors), netting an order-of-magnitude win.
 
 > Reproduce: full suite `dotnet run -c Release --project JPS.Benchmark -- mapbench 1000` (recurses over all of `movingai/`; results are also written to a report under `benchmark-results/`); limit to one subset with a second arg, e.g. `mapbench 1000 sc1-map`; single-map benchmark `dotnet run -c Release --project JPS.Benchmark -- bench` (`test2.json`). Absolute time varies by hardware, but the **node ratio** and **trend** are stable and estimable.
+>
+> **Correctness (.scen suite):** `dotnet run -c Release --project JPS.Accuracy` recursively reads every MovingAI **`.scen`** scenario under `movingai/` and validates JPS and A* against the official optimal length (octile: 1 / √2, no corner-cutting) with three checks per case: ① JPS integer cost == A* integer cost (hard optimality check); ② JPS path is legal (cell-adjacent / walkable / no corner-cut for the current build); ③ JPS true length ≈ official `optimal`. Scope and per-scen cap are optional args, e.g. `dotnet run -c Release --project JPS.Accuracy -- mapf-map 50`; results are also written under `accuracy-results/`. The integer-1414 approximation of √2 yields a ~1e-4·diag-steps rounding deviation (normal); genuine suboptimality / corner-cuts / missed solutions deviate far more and are tallied separately.
 
 ## Run
 
@@ -836,7 +845,7 @@ The legend (between the toolbar and the grid) maps every overlay color to its me
 
 ## Project Structure
 
-The `JPS.slnx` solution splits into **three clearly-scoped projects**:
+The `JPS.slnx` solution splits into **clearly-scoped projects**:
 
 | Project | Type / TFM | Responsibility |
 |---|---|---|
@@ -844,6 +853,7 @@ The `JPS.slnx` solution splits into **three clearly-scoped projects**:
 | **JPS.Data** | class library · `netstandard2.1` / C# 9 | map data I/O: JSON save + MovingAI `.map` parsing, references Core |
 | **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core/Data |
 | **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core/Data |
+| **JPS.Accuracy** | console · `net10.0` | MovingAI `.scen` batch correctness test (validates JPS/A* against official optima), references Core/Data |
 
 ```
 JPS.slnx                         # solution
@@ -852,12 +862,13 @@ JPS.slnx                         # solution
 │   ├── Models/
 │   │   └── GridMap.cs           # Pure terrain: size + bit-packed obstacles (ulong[]) + version
 │   └── Pathfinding/
-│       ├── JpsDirections.cs     # 8 directions, integer cost (1000/1414), octile heuristic
-│       ├── JpsRules.cs          # Jump-point / forced-neighbor rules
+│       ├── JpsDirections.cs     # 8 directions, integer cost (1000/1414), octile heuristic, diagonal legality (no corner-cut)
+│       ├── JpsRules.cs          # Jump-point / forced-neighbor rules (take GridMap directly, no delegate)
 │       ├── JumpPointCache.cs    # Lazy cardinal jump cache (generation-stamp bulk invalidate; Volatile publish gated by JPS_CONCURRENT_CACHE)
 │       ├── JpsSystem.cs         # JPS runtime: shared GridMap + JumpPointCache (the multithread sharing unit)
 │       ├── JpsPathfinder.cs     # JPS: query/update lazy cardinal cache + classic diagonal scan (search state is thread-private)
 │       ├── AStarPathfinder.cs   # A* baseline (packed state: came-dir sbyte + merged mark)
+│       ├── ISearchObserver.cs   # Search observability hook (expand/enqueue/scan events; visualization data stays out of the core)
 │       ├── PathSmoother.cs      # Forward-incremental LOS smoothing (Vector2 chosen by build conditional)
 │       └── MinHeap.cs           # Binary min-heap (replaces PriorityQueue, Unity-compatible)
 │
@@ -868,14 +879,17 @@ JPS.slnx                         # solution
 ├── JPS.Playground/              # ③ WinForms demo UI (references Core/Data)
 │   ├── Controls/
 │   │   ├── GridControl.cs       # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
-│   │   ├── SearchOverlay.cs     # Search visualization overlay (view state separated from the model)
+│   │   ├── SearchOverlay.cs     # Search visualization overlay: implements ISearchObserver as the collector (view state)
 │   │   ├── EditMode.cs          # Edit-mode enum (brush / start / goal)
 │   │   └── Loc.cs               # UI localization (Chinese/English by system locale; UI layer only)
 │   ├── Form1.cs / Form1.Designer.cs   # Toolbar, legend, save/load dialogs
 │   └── Program.cs               # WinForms entry
 │
-└── JPS.Benchmark/               # ④ CLI benchmark / stress test (references Core/Data)
-    └── Program.cs               # `-- bench` single-map benchmark; `-- mt` concurrency stress; `-- map <path>` self-check; `-- mapbench [q] [subdir]` recursive MovingAI benchmark
+├── JPS.Benchmark/               # ④ CLI benchmark / stress test (references Core/Data)
+│   └── Program.cs               # `-- bench`/`-- mt`/`-- map <path>`/`-- mapbench [q] [subdir]`/`-- scenbench [subdir]` per-map .scen perf; `-- combo [q] [subdir]` random + .scen combined benchmark
+│
+└── JPS.Accuracy/                # ⑤ MovingAI .scen batch correctness test (references Core/Data)
+    └── Program.cs               # `-- [subdir] [maxPerScen]` validate JPS/A* against official optima (optimality + legal path + true length)
 ```
 
 > **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale; Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
