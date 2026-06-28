@@ -46,18 +46,6 @@ namespace JPS.Pathfinding
         private int _gen;
         private readonly MinHeap _open = new MinHeap();
 
-        // f 相同时偏好更大的 g（更接近终点）以减少扩展。做法：把 f 放高位、低 TieBits 位放 g 的“补”作为次级键，
-        // 打进 MinHeap 唯一的 long 优先级里（不改 MinHeap、不影响 JPS）。f 为主序严格保留 → 最优性不变，仅改出队顺序。
-        //   · 取 g 的低 TieBits 位即可：同 f 的前沿节点 g 跨度通常 ≤ 边长量级；22 位窗口 = 2^22 ≈ 420 万 scaled
-        //     ≈ 4200 直步，足以覆盖任何现实 / benchmark 图的等 f g 跨度。偶发别名（g 差为窗口的整数倍）只是没区分开，
-        //     退回堆原序——只略降剪枝，绝不影响正确性。
-        //   · TieBits 的硬上限就是 22：优先级必须保持正数（< 2^63，否则有符号比较会把溢出的负值排到最前、堆序全乱）。
-        //     f 的硬上限 = W·H·1414 + 对角 ≤ 1414 × 32767 × 32768 ≈ 1.52e12（边长 ≤ short.MaxValue）；
-        //     f << 22 ≤ 1.52e12 × 2^22 ≈ 6.4e18 < 2^63 ≈ 9.2e18 ✓。再大（23↑，更别说 26）会让大图 f<<bits 溢出变负 → A* 出错。
-        private const int TieBits = 22;
-        private const long TieMask = (1L << TieBits) - 1;
-        private static long Priority(long f, long g) => (f << TieBits) + g;
-
         public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
         {
             if (start.X < 0 || start.Y < 0 || goal.X < 0 || goal.Y < 0)
@@ -80,7 +68,7 @@ namespace JPS.Pathfinding
             _g[startId] = 0;
             _mark[startId] = openMark;
             _cameDir[startId] = -1;
-            _open.Enqueue(startId, Priority(JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy), 0));   // 起点 g=0
+            _open.Enqueue(startId, JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy));   // 起点 g=0
 
             int expandedCount = 0;
 
@@ -127,8 +115,7 @@ namespace JPS.Pathfinding
 
                     if (firstSeen) obs?.OnFrontier(nx, ny);
 
-                    long f = tentative + JpsDirections.OctileHeuristic(nx, ny, gx, gy);
-                    _open.Enqueue(nbId, Priority(f, tentative));   // tentative = 邻居的 g
+                    _open.Enqueue(nbId, tentative + JpsDirections.OctileHeuristic(nx, ny, gx, gy));
                 }
             }
 
