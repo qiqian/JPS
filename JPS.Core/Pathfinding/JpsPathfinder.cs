@@ -458,6 +458,11 @@ namespace JPS.Pathfinding
             }
             nodes.Reverse();
 
+            // start==goal 退化：只有一个节点，段循环会跑 0 次而漏掉它——直接补回该格
+            // （与 A* 一致：到自身的路径应含该格本身，否则返回空路径）。
+            if (nodes.Count == 1)
+                return new List<(int X, int Y)> { (goalId % _w, goalId / _w) };
+
             var path = new List<(int X, int Y)>();
             for (int i = 0; i < nodes.Count - 1; i++)
             {
