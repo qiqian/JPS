@@ -56,7 +56,7 @@ namespace JPS.Pathfinding
         //     f << 22 ≤ 1.52e12 × 2^22 ≈ 6.4e18 < 2^63 ≈ 9.2e18 ✓。再大（23↑，更别说 26）会让大图 f<<bits 溢出变负 → A* 出错。
         private const int TieBits = 22;
         private const long TieMask = (1L << TieBits) - 1;
-        private static long Priority(long f, long g) => (f << TieBits) | (TieMask - (g & TieMask));
+        private static long Priority(long f, long g) => (f << TieBits) + g;
 
         public PathResult FindPath(GridMap map, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
         {
