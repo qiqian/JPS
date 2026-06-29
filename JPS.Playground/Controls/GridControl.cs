@@ -168,6 +168,8 @@ public sealed class GridControl : ScrollableControl
                  ControlStyles.ResizeRedraw |
                  ControlStyles.OptimizedDoubleBuffer, true);
 
+        AutoScroll = true;   // 所有模式都启用滚动：内容超出视口（放大后/大图）即出现滚动条
+
         BackColor = Color.FromArgb(60, 60, 64);
         _system = new JpsSystem(new GridMap(80, 50));
         _map = _system.Map;
@@ -964,20 +966,25 @@ public sealed class GridControl : ScrollableControl
 
     public void Import(MapData data)
     {
-        StopDynamicDemo();
-        // JSON 走沙盒模式：随窗口自适应（关闭滚动，恢复默认格尺寸）
-        _fixedSize = false;
-        _cellSize = _baseCellSize;
-        AutoScroll = false;
-        AutoScrollMinSize = Size.Empty;
+        // 按**存档里的真实尺寸**建图，再走“定尺 + 可滚动”模式（同打开 .map）。
+        // 之前用窗口自适应的沙盒网格载入，超出窗口的障碍会被 SetBlocked 当越界丢掉——
+        // 大图（如 sc1 512²+）只会载入屏幕内那一角。这里按 Width×Height 建图，配合滚动条查看，不再裁剪。
+        int w = data.Width, h = data.Height;
+        if (w <= 0 || h <= 0)
+        {
+            // 兼容缺少尺寸的旧/手写存档：由障碍与起终点的最大坐标推断尺寸
+            w = h = 1;
+            foreach (var o in data.Obstacles) { w = Math.Max(w, o.X + 1); h = Math.Max(h, o.Y + 1); }
+            if (data.Start != null) { w = Math.Max(w, data.Start.X + 1); h = Math.Max(h, data.Start.Y + 1); }
+            if (data.End != null) { w = Math.Max(w, data.End.X + 1); h = Math.Max(h, data.End.Y + 1); }
+        }
 
-        EnsureGrid();
-        _map.ClearAll();
-
+        var map = new GridMap(w, h);
         foreach (var o in data.Obstacles)
-            _map.SetBlocked(o.X, o.Y, true);   // 越界坐标会被 SetBlocked 自动忽略
+            map.SetBlocked(o.X, o.Y, true);   // 网格 = 存档尺寸，障碍不再被裁
 
-        _startX = _startY = _endX = _endY = -1;
+        LoadFixedMap(map);   // 定尺、保持原始格子大小、AutoScroll 可滚动；会把起终点重置为 -1
+
         if (data.Start != null && _map.IsWalkable(data.Start.X, data.Start.Y))
         {
             _startX = data.Start.X;
@@ -989,7 +996,6 @@ public sealed class GridControl : ScrollableControl
             _endY = data.End.Y;
         }
 
-        _overlay.Clear();
         Invalidate();
     }
 
@@ -1172,25 +1178,19 @@ public sealed class GridControl : ScrollableControl
         next = Math.Min(MaxCell, Math.Max(MinCell, next));
         if (next == old) return;
 
-        if (_fixedSize)
-        {
-            // 记录鼠标处对应的“浮点格坐标”，缩放后把它重新对回鼠标位置，做到锚点缩放
-            var ap = AutoScrollPosition;                         // <= 0
-            double fx = (mouse.X - ap.X) / (double)old;
-            double fy = (mouse.Y - ap.Y) / (double)old;
+        // 锚点缩放（所有模式统一）：记录鼠标处的“浮点格坐标”，缩放后把它对回鼠标位置。
+        // 放大后网格像素超出视口即由 AutoScroll 出滚动条；沙盒模式此时维度被 EnsureGrid 冻结（见其注释），
+        // 故不会被重排回去。
+        var ap = AutoScrollPosition;                         // <= 0
+        double fx = (mouse.X - ap.X) / (double)old;
+        double fy = (mouse.Y - ap.Y) / (double)old;
 
-            _cellSize = next;
-            AutoScrollMinSize = new Size(_map.Width * next, _map.Height * next);
+        _cellSize = next;
+        AutoScrollMinSize = new Size(_map.Width * next, _map.Height * next);
 
-            int targetX = (int)Math.Round(fx * next) - mouse.X;
-            int targetY = (int)Math.Round(fy * next) - mouse.Y;
-            AutoScrollPosition = new Point(Math.Max(0, targetX), Math.Max(0, targetY));
-        }
-        else
-        {
-            _cellSize = next;
-            EnsureGrid();   // 沙盒模式：按新格尺寸重排网格密度
-        }
+        int targetX = (int)Math.Round(fx * next) - mouse.X;
+        int targetY = (int)Math.Round(fy * next) - mouse.Y;
+        AutoScrollPosition = new Point(Math.Max(0, targetX), Math.Max(0, targetY));
 
         Invalidate();
         NotifyStatus(Loc.Zh ? $"缩放：{next}px / 格" : $"Zoom: {next}px/cell");
@@ -1206,7 +1206,7 @@ public sealed class GridControl : ScrollableControl
 
         int cs = _cellSize;
 
-        // 按滚动位置平移，之后所有绘制都用“世界坐标”(x*cs)。沙盒模式 AutoScroll=false 时偏移为 0。
+        // 按滚动位置平移，之后所有绘制都用“世界坐标”(x*cs)。未滚动（基准缩放/小图）时偏移为 0。
         var ap = AutoScrollPosition;            // x,y <= 0
         g.TranslateTransform(ap.X, ap.Y);
 
@@ -1410,16 +1410,29 @@ public sealed class GridControl : ScrollableControl
         if (_fixedSize)
             return;   // 定尺地图：网格固定为地图尺寸，不随窗口重排
 
+        // 放大（格尺寸 > 基准）时不重排维度：冻结当前维度、只长像素，由 AutoScroll 出滚动条（见 ZoomAt），
+        // 否则会被重排回去。基准缩放及“缩小”时仍随窗口自适应重排（改密度、铺满窗口、不出滚动条）——
+        // 保留原有“缩小看更多”的手感。
+        if (_cellSize > _baseCellSize)
+        {
+            UpdateSandboxScrollSize();
+            return;
+        }
+
         int w = ClientSize.Width;
         int h = ClientSize.Height;
 
+        // 基准/缩小：按当前格尺寸铺满视口（cols*_cellSize ≤ 视口 → AutoScrollMinSize ≤ 视口 → 不出滚动条）。
         int cols = w > 1 ? (w - 1) / _cellSize : _map.Width;
         int rows = h > 1 ? (h - 1) / _cellSize : _map.Height;
         cols = Math.Max(2, cols);
         rows = Math.Max(2, rows);
 
         if (_map.Width == cols && _map.Height == rows)
+        {
+            UpdateSandboxScrollSize();
             return;
+        }
 
         var next = new GridMap(cols, rows);
 
@@ -1440,6 +1453,16 @@ public sealed class GridControl : ScrollableControl
             _startX = _startY = -1;
         if (HasEnd && !_map.IsWalkable(_endX, _endY))
             _endX = _endY = -1;
+
+        UpdateSandboxScrollSize();
+    }
+
+    /// <summary>沙盒模式下把滚动尺寸同步为“网格维度 × 当前格尺寸”。基准缩放时 ≤ 视口（无滚动条），放大后超出即出条。</summary>
+    private void UpdateSandboxScrollSize()
+    {
+        var want = new Size(_map.Width * _cellSize, _map.Height * _cellSize);
+        if (AutoScrollMinSize != want)
+            AutoScrollMinSize = want;
     }
 
     private void PaintObstacleBlock(int cx, int cy)

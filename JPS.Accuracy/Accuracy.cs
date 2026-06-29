@@ -7,6 +7,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using JPS.Data;
 using JPS.Models;
@@ -35,8 +37,11 @@ namespace JPS.Accuracy
     {
         private readonly record struct Entry(string Map, int Sx, int Sy, int Gx, int Gy, double Optimal);
 
-        private const double Sqrt2 = 1.4142135623730951;
         private const double RefTol = 1e-2;   // 与官方最优的容差：远大于整数度量舍入、远小于任何真实次优
+
+        // 失败用例自动存盘（地图+起终点 → Playground 可载入的 MapData JSON）。限量，避免回归把每条都判失败时写爆磁盘。
+        private const int MaxFailDumps = 100;
+        private static int _failDumpCount;
 
         static int Main(string[] args)
         {
@@ -121,7 +126,10 @@ namespace JPS.Accuracy
             string reportsDir = Path.Combine(repoRoot, "accuracy-results");
             Directory.CreateDirectory(reportsDir);
             string scopeTag = string.IsNullOrEmpty(sub) ? "all" : sub!.Replace('/', '-').Replace('\\', '-');
-            string reportPath = Path.Combine(reportsDir, $"scen-{scopeTag}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string reportPath = Path.Combine(reportsDir, $"scen-{scopeTag}-{stamp}.txt");
+            string failDir = Path.Combine(reportsDir, $"failures-{scopeTag}-{stamp}");   // 失败用例 JSON（惰性创建：全通过则不留目录）
+            _failDumpCount = 0;
 
             var consoleOut = Console.Out;
             var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
@@ -194,7 +202,7 @@ namespace JPS.Accuracy
                     {
                         var e = entries[i];
                         if (!localMaps.TryGetValue(e.Map, out var mm) || mm is null) continue;
-                        ClassifyEntry(mm.Value.map, mm.Value.sys, jps, astar, e, allowCorner, ref st);
+                        ClassifyEntry(mm.Value.map, mm.Value.sys, jps, astar, e, allowCorner, ref st, failDir, name);
                     }
                     partial[t] = st;
                 });
@@ -219,6 +227,14 @@ namespace JPS.Accuracy
             Console.WriteLine(fails == 0
                 ? $"正确性：全部 {total.N} 例三项校验通过，✓ 通过"
                 : $"正确性：⚠ {fails} 例未通过（jFail={total.JFail} subopt={total.Subopt} inval={total.Inval} refL={total.RefL} refS={total.RefS}，最大偏差 {total.WorstBad:F4}）");
+
+            if (fails > 0)
+            {
+                int saved = Math.Min(_failDumpCount, MaxFailDumps);
+                Console.WriteLine($"失败用例地图已存为 JSON：{saved} 个 → {failDir}" +
+                    (_failDumpCount > MaxFailDumps ? $"（达上限 {MaxFailDumps}，其余未存）" : "") +
+                    "；可在 Playground 用「载入」打开复现。");
+            }
 
             Console.Out.Flush();
             Console.SetOut(consoleOut);
@@ -249,10 +265,14 @@ namespace JPS.Accuracy
         // 对单条用例做三项校验，结果累加进调用线程私有的 <paramref name="st"/>（无共享写，故并行安全）。
         // jps/astar 为线程私有实例；map/sys 为线程间共享只读（sys 已在并行前单线程 Sync 过）。
         private static void ClassifyEntry(
-            GridMap map, JpsSystem sys, JpsPathfinder jps, AStarPathfinder astar, in Entry e, bool allowCorner, ref Stats st)
+            GridMap map, JpsSystem sys, JpsPathfinder jps, AStarPathfinder astar, in Entry e, bool allowCorner,
+            ref Stats st, string failDir, string scenName)
         {
             var s = (e.Sx, e.Sy);
             var g = (e.Gx, e.Gy);
+
+            // 失败时把"地图+起终点"存成 JSON（局部函数：只捕获非 ref 的 map/s/g/failDir/scenName，不碰 ref st）。
+            void Dump(string reason) => SaveFailureJson(map, s, g, reason, failDir, scenName);
 
             // 越界 / 起终点在阻挡上：场景/地图不匹配，单独计数，不进入算法校验
             if (!InBounds(map, s) || !InBounds(map, g) || !map.IsWalkable(s.Item1, s.Item2) || !map.IsWalkable(g.Item1, g.Item2))
@@ -267,31 +287,61 @@ namespace JPS.Accuracy
             // ① 最优性：与 A*（同度量 ground truth）整数代价必须一致
             if (rj.Success != ra.Success)
             {
-                if (!rj.Success) st.JFail++;   // A* 有解而 JPS 无解 → JPS 漏解
-                else st.Subopt++;              // JPS 有解而 A* 无解 → 异常（计入 subopt）
+                if (!rj.Success) { st.JFail++; Dump("jFail"); }    // A* 有解而 JPS 无解 → JPS 漏解
+                else { st.Subopt++; Dump("subopt"); }              // JPS 有解而 A* 无解 → 异常（计入 subopt）
                 return;
             }
-            if (!rj.Success) { st.JFail++; return; }   // 两者都无解（可解场景里属异常）
+            if (!rj.Success) { st.JFail++; Dump("jFail"); return; }   // 两者都无解（可解场景里属异常）
 
             var (jCard, jDiag) = CountSteps(rj.Path);
             var (aCard, aDiag) = CountSteps(ra.Path);
             long jInt = jCard * 1000L + jDiag * 1414L;
             long aInt = aCard * 1000L + aDiag * 1414L;
-            if (jInt != aInt) { st.Subopt++; st.WorstBad = Math.Max(st.WorstBad, Math.Abs(jInt - aInt) / 1000.0); return; }
+            if (jInt != aInt) { st.Subopt++; st.WorstBad = Math.Max(st.WorstBad, Math.Abs(jInt - aInt) / 1000.0); Dump("subopt"); return; }
 
             // ② 路径合法性
-            if (!ValidPath(map, rj.Path, s, g, allowCorner, out _)) { st.Inval++; return; }
+            if (!ValidPath(map, rj.Path, s, g, allowCorner, out _)) { st.Inval++; Dump("inval"); return; }
 
             // ③ 与官方最优比对（真实 octile 长度）
-            double jLen = jCard + jDiag * Sqrt2;
+            double jLen = jCard + Math.Sqrt(2) * jDiag;
             double dev = jLen - e.Optimal;
-            if (dev > RefTol) { st.RefL++; st.WorstBad = Math.Max(st.WorstBad, dev); return; }
-            if (dev < -RefTol) { st.RefS++; st.WorstBad = Math.Max(st.WorstBad, -dev); return; }
+            if (dev > RefTol) { st.RefL++; st.WorstBad = Math.Max(st.WorstBad, dev); Dump("refL"); return; }
+            if (dev < -RefTol) { st.RefS++; st.WorstBad = Math.Max(st.WorstBad, -dev); Dump("refS"); return; }
 
             double ad = Math.Abs(dev);
             if (ad <= 1e-6) st.Exact++; else st.Artifact++;
             st.MaxDevOk = Math.Max(st.MaxDevOk, ad);
             st.Pass++;
+        }
+
+        // 把失败用例的地图（位图→阻挡点列表）+ 起终点存成 Playground 可载入的 MapData JSON。
+        // 线程安全：唯一文件名（无共享文件）、Interlocked 限量、目录惰性创建；保存异常被吞掉，绝不影响测试。
+        private static void SaveFailureJson(
+            GridMap map, (int X, int Y) s, (int X, int Y) g, string reason, string failDir, string scenName)
+        {
+            int n = Interlocked.Increment(ref _failDumpCount);
+            if (n > MaxFailDumps) return;   // 超上限只计数、不再写盘
+
+            var data = new MapData
+            {
+                Width = map.Width,
+                Height = map.Height,
+                Start = new PointData { X = s.X, Y = s.Y },
+                End = new PointData { X = g.X, Y = g.Y },
+            };
+            for (int y = 0; y < map.Height; y++)
+                for (int x = 0; x < map.Width; x++)
+                    if (map.IsBlocked(x, y))
+                        data.Obstacles.Add(new PointData { X = x, Y = y });
+
+            try
+            {
+                Directory.CreateDirectory(failDir);   // 惰性：首个失败时才建目录
+                string tag = scenName.Replace('/', '-').Replace('\\', '-');
+                string file = Path.Combine(failDir, $"{n:D4}-{tag}-{s.X}_{s.Y}-to-{g.X}_{g.Y}-{reason}.json");
+                File.WriteAllText(file, JsonSerializer.Serialize(data));
+            }
+            catch { /* 存盘失败不影响正确性测试本身 */ }
         }
 
         // ---------------- 解析 / 工具 ----------------
