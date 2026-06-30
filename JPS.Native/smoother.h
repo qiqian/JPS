@@ -36,6 +36,12 @@ bool jps_line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1);
 int jps_smooth_path(const jps_grid_map *m, const jps_point *path, int path_count,
                     jps_point_f **out_points);
 
+/* 将平滑结果写入调用方提供的缓冲 out_points（容量 capacity_points）。
+ * 返回如果无限容量时产生的点数（即平滑后的实际点数）；实际写入不超过 capacity_points。
+ */
+int jps_smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
+                         jps_point_f *out_points, int capacity_points);
+
 #ifdef __cplusplus
 }
 #endif

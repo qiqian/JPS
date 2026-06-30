@@ -71,9 +71,11 @@ static jps_point_f jps__center(jps_point c)
 int jps_smooth_path(const jps_grid_map *m, const jps_point *path, int path_count,
                     jps_point_f **out_points)
 {
+    /* 为兼容旧 API，分配缓冲并调用 jps_smooth_path_into 写入，然后返回分配的数组。
+     * 这样既保持向后兼容，又避免复制核心逻辑。 */
+    int cap = path_count;
     jps_point_f *result;
-    int cap, count = 0;
-    int anchor, i;
+    int produced;
 
     if (path_count == 0)
     {
@@ -81,31 +83,47 @@ int jps_smooth_path(const jps_grid_map *m, const jps_point *path, int path_count
         return 0;
     }
 
-    cap = path_count;   /* 平滑后点数 ≤ 原路径点数 */
     result = (jps_point_f *)malloc((size_t)cap * sizeof(jps_point_f));
-
-    /* 起点一定保留 */
-    result[count++] = jps__center(path[0]);
-    if (path_count == 1)
+    if (result == NULL)
     {
-        *out_points = result;
-        return count;
+        *out_points = NULL;
+        return 0;
     }
 
+    produced = jps_smooth_path_into(m, path, path_count, result, cap);
+    *out_points = result;
+    return produced;
+}
+
+int jps_smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
+                         jps_point_f *out_points, int capacity_points)
+{
+    int count = 0;
+    int anchor, i;
+
+    if (path_count == 0)
+        return 0;
+
+    /* 起点一定保留 */
+    if (count < capacity_points) out_points[count] = jps__center(path[0]);
+    count++;
+    if (path_count == 1)
+        return count;
+
     anchor = 0;
-    /* 从 i=2 开始：锚点与其相邻点(anchor+1)必然通视，无需检测 */
     for (i = 2; i < path_count; i++)
     {
         if (!jps_line_of_sight(m, path[anchor].x, path[anchor].y, path[i].x, path[i].y))
         {
-            result[count++] = jps__center(path[i - 1]);
+            if (count < capacity_points) out_points[count] = jps__center(path[i - 1]);
+            count++;
             anchor = i - 1;
         }
     }
 
     /* 终点一定保留 */
-    result[count++] = jps__center(path[path_count - 1]);
+    if (count < capacity_points) out_points[count] = jps__center(path[path_count - 1]);
+    count++;
 
-    *out_points = result;
     return count;
 }

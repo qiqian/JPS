@@ -564,14 +564,9 @@ int jps_pathfinder_copy_smoothed_path(const jps_pathfinder *pf, const jps_system
         !pf->result.success || pf->result.path_count == 0)
         return 0;
 
-    produced = jps_smooth_path(system->map, pf->result.path, pf->result.path_count, &pts);
-
-    n = produced < capacity_points ? produced : capacity_points;
-    for (i = 0; i < n; i++)
-    {
-        out_xy[i * 2]     = pts[i].x;
-        out_xy[i * 2 + 1] = pts[i].y;
-    }
-    free(pts);   /* 内部 malloc 的中转缓冲在 C 侧释放，不跨边界 */
-    return n;
+    /* 直接将平滑结果写入调用者提供的 out_xy，避免内部 malloc。 */
+    produced = jps_smooth_path_into(system->map, pf->result.path, pf->result.path_count,
+                                     (jps_point_f *)out_xy, capacity_points);
+    /* produced 是理论产生的点数；实际写入已受 capacity_points 限制，返回写入点数（<= capacity_points） */
+    return produced < capacity_points ? produced : capacity_points;
 }
