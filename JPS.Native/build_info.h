@@ -1,4 +1,4 @@
-/*
+﻿/*
  * build_info.h
  * JPS Pathfinding — C port of JPS.Core/Pathfinding/JpsBuildInfo.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

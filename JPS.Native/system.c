@@ -1,4 +1,4 @@
-/*
+﻿/*
  * system.c
  * JPS Pathfinding — 公共句柄之一：jps_system 的实现。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * min_heap.c
  * JPS Pathfinding — C port of JPS.Core/Pathfinding/MinHeap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

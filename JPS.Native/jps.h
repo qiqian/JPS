@@ -1,4 +1,4 @@
-/*
+﻿/*
  * jps.h
  * JPS Pathfinding — DLL 公共总头（供 C# P/Invoke 调用）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

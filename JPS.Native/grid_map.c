@@ -1,4 +1,4 @@
-/*
+﻿/*
  * grid_map.c
  * JPS Pathfinding — C port of JPS.Core/Models/GridMap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -10,6 +10,36 @@
 
 /* int16 距离上限：边长不能超过 INT16_MAX。 */
 #define JPS_MAX_DIM 32767
+#define JPS_SIMD_ALIGNMENT 16
+
+static int jps__logical_stride(int width)
+{
+    return (width + 63) >> 6;
+}
+
+static int jps__simd_stride(int width)
+{
+    int words = jps__logical_stride(width);
+    return (words + 1) & ~1;   /* two uint64 words = 128 bits */
+}
+
+static void *jps__aligned_alloc16(size_t size)
+{
+    uintptr_t base, aligned;
+    void *raw = malloc(size + (JPS_SIMD_ALIGNMENT - 1) + sizeof(void *));
+    if (raw == NULL)
+        return NULL;
+    base = (uintptr_t)raw + sizeof(void *);
+    aligned = (base + (JPS_SIMD_ALIGNMENT - 1)) & ~(uintptr_t)(JPS_SIMD_ALIGNMENT - 1);
+    ((void **)aligned)[-1] = raw;
+    return (void *)aligned;
+}
+
+static void jps__aligned_free(void *p)
+{
+    if (p != NULL)
+        free(((void **)p)[-1]);
+}
 
 /*
  * 把每行行尾字中的 padding 位（列 ≥ Width）置 1（阻挡）。
@@ -17,20 +47,22 @@
  */
 static void jps__mark_padding_blocked(jps_grid_map *m)
 {
-    int valid_in_last_word = m->width - (m->stride - 1) * 64;   /* 行尾字里的有效列数 1..64 */
-    int last;
-    uint64_t padding_mask;
-    int y;
+    int words = jps__logical_stride(m->width);
+    int valid_in_last_word = m->width - (words - 1) * 64;
+    int last = words - 1;
+    int y, w;
 
-    if (valid_in_last_word == 64)
-        return;   /* 整除 64，无 padding */
-
-    padding_mask = ~((1ULL << valid_in_last_word) - 1);
-    last = m->stride - 1;
     for (y = 0; y < m->height; y++)
-        m->blocked[(size_t)y * m->stride + last] |= padding_mask;
+    {
+        if (valid_in_last_word != 64)
+        {
+            uint64_t padding_mask = ~((1ULL << valid_in_last_word) - 1);
+            m->blocked[(size_t)y * m->stride + last] |= padding_mask;
+        }
+        for (w = words; w < m->stride; w++)
+            m->blocked[(size_t)y * m->stride + w] = ~0ULL;
+    }
 }
-
 jps_grid_map *jps_grid_map_create(int width, int height)
 {
     jps_grid_map *m;
@@ -48,8 +80,8 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->width = width;
     m->height = height;
     m->version = 0;
-    m->stride = (width + 63) >> 6;                 /* 每行向上取整到整数个 64 位字 */
-    m->blocked = (uint64_t *)calloc((size_t)m->stride * height, sizeof(uint64_t));
+    m->stride = jps__simd_stride(width);           /* 128-bit aligned row stride */
+    m->blocked = (uint64_t *)jps__aligned_alloc16((size_t)m->stride * height * sizeof(uint64_t));
     if (m->blocked == NULL)
     {
         free(m);
@@ -64,7 +96,7 @@ void jps_grid_map_destroy(jps_grid_map *m)
 {
     if (m == NULL)
         return;
-    free(m->blocked);
+    jps__aligned_free(m->blocked);
     free(m);
 }
 

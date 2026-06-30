@@ -1,4 +1,4 @@
-/*
+﻿/*
  * jump_point_cache.h
  * JPS Pathfinding — C port of JPS.Core/Pathfinding/JumpPointCache.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -27,11 +27,9 @@ typedef struct jps_cell_jump
 } jps_cell_jump;
 
 /*
- * 惰性正交跳点缓存（JPS 加速结构）。
- *  - 障碍变化（Version 改变）→ 全局世代 +1，O(1) 整体置脏。
- *  - clean 命中 → O(1) 读。
- *  - dirty → 沿该方向扫一次到跳点/墙，并把整段 run 一起洗白。
- * 单线程语义（与 C# 不定义 JPS_CONCURRENT_CACHE 时的极速模式一致；输出完全相同）。
+ * Lazy cardinal jump-point cache. The C build always uses acquire/release
+ * generation stamps, so multiple pathfinders may share one system/cache while
+ * searching concurrently after a single-threaded sync.
  */
 typedef struct jps_jump_point_cache
 {

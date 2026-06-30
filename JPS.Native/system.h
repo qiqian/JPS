@@ -1,4 +1,4 @@
-/*
+﻿/*
  * system.h
  * JPS Pathfinding — 公共句柄之一：jps_system（C 端对应 JPS.Core/Pathfinding/JpsSystem.cs）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

@@ -50,6 +50,12 @@
     <ClInclude Include="jps_export.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="jps_atomic.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="jps_simd.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="jump_point_cache.h">
       <Filter>头文件</Filter>
     </ClInclude>

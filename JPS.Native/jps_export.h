@@ -1,4 +1,4 @@
-/*
+﻿/*
  * jps_export.h
  * JPS Pathfinding — DLL 导出宏与公共错误码（被各公共头共享）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

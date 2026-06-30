@@ -1,4 +1,4 @@
-/*
+﻿/*
  * grid_map.h
  * JPS Pathfinding — C port of JPS.Core/Models/GridMap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -30,7 +30,7 @@ typedef struct jps_grid_map
     int height;
     /* 阻挡布局的版本号：任何阻挡增删都自增。寻路器据此判断惰性跳点缓存是否失效。 */
     int version;
-    /* 每行的 uint64 数 = ceil(Width/64)。 */
+    /* 每行的 uint64 数，向上取整到偶数个 word，使行起点保持 128-bit 对齐。 */
     int stride;
     /* 阻挡位图，按行对齐：第 y 行第 (x>>6) 个字 = blocked[y*stride + (x>>6)]，位 = x&63。 */
     uint64_t *blocked;
