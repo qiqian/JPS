@@ -140,6 +140,9 @@ namespace JPS.Accuracy
             // JPS.Core 未定义 JPS_CONCURRENT_CACHE 时共享缓存非线程安全 → 强制单线程，避免数据竞争。
             int threadCount = JpsBuildInfo.ConcurrentCache ? Math.Max(1, Environment.ProcessorCount / 2) : 1;
 
+            // 原生 C 库（JPS.Native.dll）：可用则对每条用例额外做“C 版 JPS 路径 == C# 版 JPS 路径”强一致校验。
+            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+
             Console.WriteLine($"# JPS / A* · MovingAI .scen 正确性报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}");
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
@@ -147,15 +150,17 @@ namespace JPS.Accuracy
             Console.WriteLine(JpsBuildInfo.ConcurrentCache
                 ? $"并行：每张图加载后用 {threadCount} 线程（CPU {Environment.ProcessorCount} 的 1/2）共享同一 JpsSystem 跑该图的用例（兼测 JPS 多线程安全）"
                 : "并行：JPS.Core 未定义 JPS_CONCURRENT_CACHE（共享缓存非线程安全）→ 强制单线程");
+            Console.WriteLine(nativeEnabled
+                ? $"原生库：JPS.Native.dll 已加载（{nativeInfo}）→ 每条用例校验「C 版 JPS 路径 == C# 版 JPS 路径」"
+                : $"原生库：未启用（{nativeInfo}）→ 跳过 C/C# 强一致校验（先构建 JPS.Native 的 x64 DLL）");
             Console.WriteLine();
-            Console.WriteLine("校验项：① JPS整数代价==A*整数代价（最优性）  ② JPS路径合法（相邻/可走/不切角）  ③ JPS真实长度≈官方最优");
-            Console.WriteLine("列说明：n=测试用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短");
+            Console.WriteLine("校验项：① JPS整数代价==A*整数代价（最优性）  ② JPS路径合法（相邻/可走/不切角）  ③ JPS真实长度≈官方最优"
+                + (nativeEnabled ? "  ④ C版JPS路径==C#版JPS路径（强一致）" : ""));
+            Console.WriteLine("列说明：n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短  mism=C≠C#");
             Console.WriteLine();
-            Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}");
-            Console.WriteLine(new string('-', 94));
+            Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}");
+            Console.WriteLine(new string('-', 101));
 
-            // 跨 scen 复用已加载的地图与共享缓存（同一张图被多个 scen 引用时直接命中、且缓存已预热）
-            var mapCache = new Dictionary<string, (GridMap map, JpsSystem sys)>(StringComparer.OrdinalIgnoreCase);
             bool allowCorner = JpsBuildInfo.CornerCutting;
 
             Stats total = default;
@@ -176,50 +181,57 @@ namespace JPS.Accuracy
                 catch (Exception ex) { Emit($"{name,-44}  解析失败：{ex.Message}"); continue; }
                 if (maxPerScen > 0 && entries.Count > maxPerScen) entries = entries.GetRange(0, maxPerScen);
 
-                // 预解析本 scen 引用的所有地图（**单线程**完成加载与 JpsSystem.Sync——满足“并行寻路前
-                // 必须由单线程 Sync 一次”的前提；几乎总是单张图）。缺失的图存 null，其用例随后被跳过。
-                var localMaps = new Dictionary<string, (GridMap map, JpsSystem sys)?>(StringComparer.Ordinal);
-                foreach (var e in entries)
+                // 按 Map 字段分组（MovingAI 每个 .scen 几乎总是单张图，但稳妥起见按图分组）。
+                // 对每张图：单线程加载并 Sync → 并行跑该图全部用例 → 用完即销毁其 system，**不缓存**任何 system。
+                Stats scen = default;
+                foreach (var grp in entries.GroupBy(e => e.Map, StringComparer.Ordinal))
                 {
-                    if (localMaps.ContainsKey(e.Map)) continue;
-                    try { localMaps[e.Map] = GetMap(scenDir, e.Map, root, mapCache); }
-                    catch { localMaps[e.Map] = null; }
+                    // 单线程加载该图并 Sync（满足“并行寻路前必须单线程 Sync 一次”的前提）。缺失/失败则跳过该图用例。
+                    (GridMap map, JpsSystem sys) loaded;
+                    try { loaded = LoadMap(scenDir, grp.Key, root); }
+                    catch { continue; }
+                    var mapEntries = grp.ToList();
+
+                    // 原生侧与 C# 侧严格同构：单线程为这张图建一个原生 jps_system（灌阻挡 + Sync），
+                    // 各线程的 NativePathfinder 共享它并行寻路；这张图测完即销毁（异常路径也销毁）。
+                    NativeSystem? nsys = nativeEnabled ? new NativeSystem(loaded.map) : null;
+                    var partial = new Stats[threadCount];
+                    try
+                    {
+                        // 把该图用例按步长切给 threadCount 个线程**并行**验证；所有线程共享同一 JpsSystem / 原生 system
+                        // （地图 + 跳点缓存）——既跑正确性，也压测多线程安全。每线程持有自己的 Jps/AStar/NativePathfinder
+                        //（搜索态线程私有）；并行期间地图只读、不再 Sync。
+                        Parallel.For(0, threadCount, parOpt, t =>
+                        {
+                            var jps = new JpsPathfinder();
+                            var astar = new AStarPathfinder();
+                            var npf = nativeEnabled ? new NativePathfinder() : null;   // 每线程一个原生 pathfinder
+                            try
+                            {
+                                Stats st = default;
+                                // 步长划分：线程 t 取下标 t, t+threadCount, …（entry i 归线程 i%threadCount），不重不漏。
+                                for (int i = t; i < mapEntries.Count; i += threadCount)
+                                    ClassifyEntry(loaded.map, loaded.sys, jps, astar, nsys, npf, mapEntries[i], allowCorner, ref st, failDir, name);
+                                partial[t] = st;
+                            }
+                            finally { npf?.Dispose(); }   // 本线程原生 pathfinder 用完即销毁（异常路径也走到）
+                        });
+                    }
+                    finally { nsys?.Dispose(); }   // 这张图测完即销毁原生 system（用完即销毁，不缓存）
+
+                    for (int t = 0; t < threadCount; t++) scen.Merge(partial[t]);
                 }
 
-                // 把本 scen（≈同一张图）的用例按步长切给 threadCount 个线程**并行**验证；所有线程共享
-                // 同一 JpsSystem（地图 + 跳点缓存）——既跑正确性，也压测 JPS 的多线程安全（共享缓存无锁补写）。
-                // 每线程持有自己的 JpsPathfinder/AStarPathfinder（搜索态线程私有）；并行期间地图只读、不再 Sync。
-                var partial = new Stats[threadCount];
-                Parallel.For(0, threadCount, parOpt, t =>
-                {
-                    var jps = new JpsPathfinder();
-                    var astar = new AStarPathfinder();
-                    Stats st = default;
-                    // 步长划分：线程 t 只取下标 t, t+threadCount, t+2*threadCount …（即 entry i 归线程 i%threadCount）。
-                    // 各线程拿到不相交的 1/threadCount 份用例，合起来恰好覆盖全部、不重不漏——这是把 entries
-                    // 拆给各线程并行的地方（不是每线程都跑全部）。交错取还能让长/短查询均摊、避免某线程拖尾。
-                    for (int i = t; i < entries.Count; i += threadCount)
-                    {
-                        var e = entries[i];
-                        if (!localMaps.TryGetValue(e.Map, out var mm) || mm is null) continue;
-                        ClassifyEntry(mm.Value.map, mm.Value.sys, jps, astar, e, allowCorner, ref st, failDir, name);
-                    }
-                    partial[t] = st;
-                });
-
-                Stats scen = default;
-                for (int t = 0; t < threadCount; t++) scen.Merge(partial[t]);
-
                 if (scen.N > 0)
-                    Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}");
+                    Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}{scen.Mism,7}");
 
                 total.Merge(scen);
             }
 
             sw.Stop();
             progress.Clear();
-            Console.WriteLine(new string('-', 94));
-            Console.WriteLine($"{"合计",-44}{total.N,8}{total.Pass,8}{total.JFail,7}{total.Subopt,8}{total.Inval,7}{total.RefL,7}{total.RefS,7}");
+            Console.WriteLine(new string('-', 101));
+            Console.WriteLine($"{"合计",-44}{total.N,8}{total.Pass,8}{total.JFail,7}{total.Subopt,8}{total.Inval,7}{total.RefL,7}{total.RefS,7}{total.Mism,7}");
             Console.WriteLine();
             long fails = total.JFail + total.Subopt + total.Inval + total.RefL + total.RefS;
             Console.WriteLine($"用例 {total.N}（平凡 {total.Trivial}，无效起终点 {total.BadCell} 已跳过），用时 {sw.Elapsed.TotalSeconds:F1}s");
@@ -227,8 +239,13 @@ namespace JPS.Accuracy
             Console.WriteLine(fails == 0
                 ? $"正确性：全部 {total.N} 例三项校验通过，✓ 通过"
                 : $"正确性：⚠ {fails} 例未通过（jFail={total.JFail} subopt={total.Subopt} inval={total.Inval} refL={total.RefL} refS={total.RefS}，最大偏差 {total.WorstBad:F4}）");
+            if (nativeEnabled)
+                Console.WriteLine(total.Mism == 0
+                    ? $"C/C# 强一致：全部 {total.N} 例 C 版 JPS 路径与 C# 版逐格一致，✓ 通过"
+                    : $"C/C# 强一致：⚠ {total.Mism} 例 C 版与 C# 版 JPS 结果不一致（mism）");
 
-            if (fails > 0)
+            long allFails = fails + total.Mism;   // 退出码同时反映正确性失败与 C/C# 不一致
+            if (allFails > 0)
             {
                 int saved = Math.Min(_failDumpCount, MaxFailDumps);
                 Console.WriteLine($"失败用例地图已存为 JSON：{saved} 个 → {failDir}" +
@@ -240,7 +257,7 @@ namespace JPS.Accuracy
             Console.SetOut(consoleOut);
             fileOut.Dispose();
             Console.WriteLine($"报告已保存：{reportPath}");
-            return fails == 0 ? 0 : 2;
+            return allFails == 0 ? 0 : 2;
         }
 
         // ---------------- 校验（线程私有 jps/astar，可并行）----------------
@@ -249,6 +266,7 @@ namespace JPS.Accuracy
         private struct Stats
         {
             public long N, Pass, JFail, Subopt, Inval, RefL, RefS, Trivial, BadCell, Exact, Artifact;
+            public long Mism;        // C 版 JPS 与 C# 版 JPS 结果不一致的用例数（强一致校验）
             public double MaxDevOk;   // 通过项里的最大 |真实长度-官方|（应为舍入量级）
             public double WorstBad;   // 失败项里的最大 |偏差|
 
@@ -256,7 +274,7 @@ namespace JPS.Accuracy
             {
                 N += o.N; Pass += o.Pass; JFail += o.JFail; Subopt += o.Subopt; Inval += o.Inval;
                 RefL += o.RefL; RefS += o.RefS; Trivial += o.Trivial; BadCell += o.BadCell;
-                Exact += o.Exact; Artifact += o.Artifact;
+                Exact += o.Exact; Artifact += o.Artifact; Mism += o.Mism;
                 if (o.MaxDevOk > MaxDevOk) MaxDevOk = o.MaxDevOk;
                 if (o.WorstBad > WorstBad) WorstBad = o.WorstBad;
             }
@@ -265,8 +283,9 @@ namespace JPS.Accuracy
         // 对单条用例做三项校验，结果累加进调用线程私有的 <paramref name="st"/>（无共享写，故并行安全）。
         // jps/astar 为线程私有实例；map/sys 为线程间共享只读（sys 已在并行前单线程 Sync 过）。
         private static void ClassifyEntry(
-            GridMap map, JpsSystem sys, JpsPathfinder jps, AStarPathfinder astar, in Entry e, bool allowCorner,
-            ref Stats st, string failDir, string scenName)
+            GridMap map, JpsSystem sys, JpsPathfinder jps, AStarPathfinder astar,
+            NativeSystem? nsys, NativePathfinder? npf,
+            in Entry e, bool allowCorner, ref Stats st, string failDir, string scenName)
         {
             var s = (e.Sx, e.Sy);
             var g = (e.Gx, e.Gy);
@@ -282,6 +301,17 @@ namespace JPS.Accuracy
 
             st.N++;
             var rj = jps.FindPath(sys, s, g);
+
+            // ④ 强一致：C 版 JPS（DLL）必须与 C# 版 JPS 结果完全一致（有解性 + 逐格路径）。
+            // 这是独立维度，与下面 A*/官方 校验互不影响；不一致单独计入 mism 并存盘。
+            // 原生侧与 C# 侧同构：本线程私有的 npf 在本图共享的 nsys 上寻路。
+            if (npf != null && nsys != null)
+            {
+                var (nok, npath) = npf.Find(nsys, e.Sx, e.Sy, e.Gx, e.Gy);
+                if (nok != rj.Success || (rj.Success && !PathEqual(npath, rj.Path)))
+                { st.Mism++; Dump("native"); }
+            }
+
             var ra = astar.FindPath(map, s, g);
 
             // ① 最优性：与 A*（同度量 ground truth）整数代价必须一致
@@ -368,8 +398,8 @@ namespace JPS.Accuracy
             return list;
         }
 
-        private static (GridMap map, JpsSystem sys) GetMap(
-            string scenDir, string mapField, string root, Dictionary<string, (GridMap, JpsSystem)> cache)
+        // 加载一张图并 Sync（**不缓存**：每张图用完即由调用方丢弃/销毁其 system）。
+        private static (GridMap map, JpsSystem sys) LoadMap(string scenDir, string mapField, string root)
         {
             string p = Path.Combine(scenDir, mapField);
             if (!File.Exists(p))
@@ -379,19 +409,24 @@ namespace JPS.Accuracy
                 if (found.Length == 0) throw new FileNotFoundException(mapField);
                 p = found[0];
             }
-            string key = Path.GetFullPath(p);
-            if (cache.TryGetValue(key, out var v)) return v;
 
-            var map = MovingAiMap.Parse(File.ReadAllText(key));
+            var map = MovingAiMap.Parse(File.ReadAllText(Path.GetFullPath(p)));
             var sys = new JpsSystem(map);
             sys.Sync();
-            var tup = (map, sys);
-            cache[key] = tup;
-            return tup;
+            return (map, sys);
         }
 
         private static bool InBounds(GridMap map, (int X, int Y) p) =>
             p.X >= 0 && p.Y >= 0 && p.X < map.Width && p.Y < map.Height;
+
+        // C 版与 C# 版 JPS 路径逐格相等判定（强一致校验用）。
+        private static bool PathEqual(List<(int X, int Y)>? a, List<(int X, int Y)> b)
+        {
+            if (a is null || a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+                if (a[i].X != b[i].X || a[i].Y != b[i].Y) return false;
+            return true;
+        }
 
         private static (int card, int diag) CountSteps(List<(int X, int Y)> p)
         {

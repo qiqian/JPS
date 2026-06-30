@@ -3,3 +3,5 @@ obj
 bin
 tmp
 .claude
+/JPS.Native/x64
+/x64/Release

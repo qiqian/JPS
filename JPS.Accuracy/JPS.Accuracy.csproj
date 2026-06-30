@@ -8,6 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>JPS.Accuracy</RootNamespace>
     <AssemblyName>JPS.Accuracy</AssemblyName>
+    <!-- P/Invoke 进 JPS.Native（x64 原生 DLL），进程位数须为 x64。 -->
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>

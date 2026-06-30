@@ -103,6 +103,10 @@ namespace JPS.Benchmark
             var qs = new ((int X, int Y) s, (int X, int Y) g)[Q];
             for (int i = 0; i < Q; i++) qs[i] = (Free(), Free());
 
+            // 原生 C 版 JPS（同一张地图构建独立的原生 system+pathfinder）。
+            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+            using var nat = nativeEnabled ? new NativeMap(map) : null;
+
             // 节点数（与计时分离）：JIT 预热后统计
             system.Sync();
             for (int i = 0; i < Q; i++) jps.FindPath(system, qs[i].s, qs[i].g);
@@ -116,6 +120,7 @@ namespace JPS.Benchmark
             void ForceDirty() { map.SetBlocked(tx, ty, true); map.SetBlocked(tx, ty, false); system.Sync(); }
 
             double jColdMs = double.MaxValue, jWarmMs = double.MaxValue, aMs = double.MaxValue;
+            double nColdMs = double.MaxValue, nWarmMs = double.MaxValue;
             var sw = new Stopwatch();
             for (int rep = 0; rep < 6; rep++)
             {
@@ -135,13 +140,34 @@ namespace JPS.Benchmark
                 sw.Restart();
                 for (int i = 0; i < Q; i++) astar.FindPath(map, qs[i].s, qs[i].g);
                 sw.Stop(); aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
+
+                if (nat != null)
+                {
+                    GC.Collect(); GC.WaitForPendingFinalizers();
+                    sw.Restart();
+                    for (int i = 0; i < Q; i++) { nat.ForceDirty(tx, ty); nat.Find(qs[i].s.X, qs[i].s.Y, qs[i].g.X, qs[i].g.Y); }
+                    sw.Stop(); nColdMs = Math.Min(nColdMs, sw.Elapsed.TotalMilliseconds);
+
+                    GC.Collect(); GC.WaitForPendingFinalizers();
+                    nat.Sync();
+                    sw.Restart();
+                    for (int i = 0; i < Q; i++) nat.Find(qs[i].s.X, qs[i].s.Y, qs[i].g.X, qs[i].g.Y);
+                    sw.Stop(); nWarmMs = Math.Min(nWarmMs, sw.Elapsed.TotalMilliseconds);
+                }
             }
 
             sb.AppendLine($"构建配置（JPS.Core）：{BuildConfig()}");
+            sb.AppendLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
             sb.AppendLine($"[test2.json] {w}x{h}（结构化地图）, {Q} 组随机起终点, 可解 {solved}");
             sb.AppendLine($"  扩展节点 平均/次: JPS={jExp / (double)Q:F0}  A*={aExp / (double)Q:F0}  (A*/JPS={aExp / (double)Math.Max(1, jExp):F1}x)");
-            sb.AppendLine($"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F1}us  A*={aMs / Q * 1000:F1}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
-            sb.AppendLine($"  缓存无复用/复用:  无复用={jColdMs / Q * 1000:F1}us  复用={jWarmMs / Q * 1000:F1}us  (加速={jColdMs / Math.Max(0.001, jWarmMs):F2}x)");
+            sb.AppendLine(nat != null
+                ? $"  耗时 平均/次(热): JPS(C#)={jWarmMs / Q * 1000:F2}us  JPS(C)={nWarmMs / Q * 1000:F2}us  A*={aMs / Q * 1000:F2}us  (C#/C={jWarmMs / Math.Max(0.001, nWarmMs):F2}x, A*/JPS(C#)={aMs / Math.Max(0.001, jWarmMs):F1}x, A*/JPS(C)={aMs / Math.Max(0.001, nWarmMs):F1}x)"
+                : $"  耗时 平均/次(热): JPS={jWarmMs / Q * 1000:F2}us  A*={aMs / Q * 1000:F2}us  (A*/JPS={aMs / Math.Max(0.001, jWarmMs):F1}x)");
+            sb.AppendLine($"  缓存无复用/复用(JPS C#): 无复用={jColdMs / Q * 1000:F2}us  复用={jWarmMs / Q * 1000:F2}us  (加速={jColdMs / Math.Max(0.001, jWarmMs):F2}x)");
+            if (nat != null)
+            {
+                sb.AppendLine($"  缓存无复用/复用(JPS C):  无复用={nColdMs / Q * 1000:F2}us  复用={nWarmMs / Q * 1000:F2}us  (加速={nColdMs / Math.Max(0.001, nWarmMs):F2}x)");
+            }
             Console.WriteLine(sb.ToString());
         }
 
@@ -233,8 +259,11 @@ namespace JPS.Benchmark
             var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
             void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
+            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+
             Console.WriteLine($"# JPS vs A* · MovingAI 基准报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
+            Console.WriteLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）→ 同时测 C 版 JPS" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
             Console.WriteLine($"MovingAI 批量基准：{files.Length} 张图（{scope}），每图目标 {q} 组随机可解起终点（耗时取多轮最小，逐图输出）");
             Console.WriteLine();
             Console.WriteLine("列说明：");
@@ -245,16 +274,28 @@ namespace JPS.Benchmark
             Console.WriteLine("  JPSexp  JPS 平均每次寻路的扩展节点数");
             Console.WriteLine("  A*exp   A* 平均每次寻路的扩展节点数");
             Console.WriteLine("  ratio   扩展节点比 = A*exp / JPSexp（越大表示 JPS 越省）");
-            Console.WriteLine("  JPSus   JPS 平均每次寻路耗时（微秒，热缓存）");
+            Console.WriteLine(nativeEnabled
+                ? "  C#us    C# 版 JPS 平均每次寻路耗时（微秒，热缓存）"
+                : "  JPSus   JPS 平均每次寻路耗时（微秒，热缓存）");
+            if (nativeEnabled)
+            {
+                Console.WriteLine("  Cus     C 版 JPS（DLL）平均每次寻路耗时（微秒，热缓存）");
+                Console.WriteLine("  C#/C    C#us / Cus（>1 表示 C 版更快）");
+                Console.WriteLine("  A*/C    A*us / Cus（越大表示 C 版 JPS 越快）");
+            }
             Console.WriteLine("  A*us    A* 平均每次寻路耗时（微秒）");
             Console.WriteLine("  speed   墙钟加速比 = A*us / JPSus（越大表示 JPS 越快）");
             Console.WriteLine("  mism    与 A* 结果不一致的组数（成败不同或路径代价不等；正确应为 0）");
             Console.WriteLine();
-            Console.WriteLine($"{"map",-34}{"size",11}{"walk%",7}{"pairs",7}{"JPSexp",8}{"A*exp",8}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}{"mism",6}");
-            Console.WriteLine(new string('-', 113));
+            string mbHdr = nativeEnabled
+                ? $"{"map",-34}{"size",11}{"walk%",7}{"pairs",7}{"JPSexp",8}{"A*exp",8}{"ratio",7}{"C#us",9}{"Cus",9}{"C#/C",6}{"A*us",9}{"speed",7}{"A*/C",7}{"mism",6}"
+                : $"{"map",-34}{"size",11}{"walk%",7}{"pairs",7}{"JPSexp",8}{"A*exp",8}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}{"mism",6}";
+            int mbRule = nativeEnabled ? 135 : 113;
+            Console.WriteLine(mbHdr);
+            Console.WriteLine(new string('-', mbRule));
 
             long sumJexp = 0, sumAexp = 0;
-            double sumJms = 0, sumAms = 0;
+            double sumJms = 0, sumAms = 0, sumNms = 0;
             int sumPairs = 0, sumMism = 0;
 
             for (int fi = 0; fi < files.Length; fi++)
@@ -279,6 +320,9 @@ namespace JPS.Benchmark
                 system.Sync();
                 var jps = new JpsPathfinder();
                 var astar = new AStarPathfinder();
+                NativeMap? nat = nativeEnabled ? new NativeMap(map) : null;
+                try
+                {
                 var rng = new Random(12345);
 
                 // 用 JPS 随机采样“可解”起终点（顺便预热共享缓存）
@@ -311,7 +355,7 @@ namespace JPS.Benchmark
                 }
 
                 // 耗时：多轮取最小，抑制 GC/调度噪声
-                double jMs = double.MaxValue, aMs = double.MaxValue;
+                double jMs = double.MaxValue, aMs = double.MaxValue, nMs = double.MaxValue;
                 var sw = new Stopwatch();
                 for (int rep = 0; rep < 3; rep++)
                 {
@@ -321,6 +365,15 @@ namespace JPS.Benchmark
                     foreach (var p in qs) jps.FindPath(system, p.s, p.g);
                     sw.Stop(); jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
 
+                    if (nat != null)
+                    {
+                        progress.Show($"[{fi + 1}/{files.Length}] JPS(C):{name}  计时 {rep + 1}/3（{n} 对）");
+                        GC.Collect(); GC.WaitForPendingFinalizers();
+                        sw.Restart();
+                        foreach (var p in qs) nat.Find(p.s.X, p.s.Y, p.g.X, p.g.Y);
+                        sw.Stop(); nMs = Math.Min(nMs, sw.Elapsed.TotalMilliseconds);
+                    }
+
                     progress.Show($"[{fi + 1}/{files.Length}] A*:{name}  计时 {rep + 1}/3（{n} 对）");   // 受 5s 限频
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
@@ -329,20 +382,39 @@ namespace JPS.Benchmark
                 }
 
                 double jus = jMs / n * 1000, aus = aMs / n * 1000;
-                Emit(
-                    $"{name,-34}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
-                    $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{mism,6}");
+                if (nat != null)
+                {
+                    double nus = nMs / n * 1000;
+                    Emit(
+                        $"{name,-34}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
+                        $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{nus,9:F1}{jus / Math.Max(0.001, nus),6:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{aus / Math.Max(0.001, nus),7:F1}{mism,6}");
+                    sumNms += nMs;
+                }
+                else
+                {
+                    Emit(
+                        $"{name,-34}{size,11}{walk.Count * 100.0 / tot,7:F1}{n,7}{jExp / n,8}{aExp / n,8}" +
+                        $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{mism,6}");
+                }
 
                 sumJexp += jExp; sumAexp += aExp; sumJms += jMs; sumAms += aMs; sumPairs += n; sumMism += mism;
+                }
+                finally
+                {
+                    nat?.Dispose();
+                }
             }
 
             progress.Clear();
-            Console.WriteLine(new string('-', 113));
+            Console.WriteLine(new string('-', mbRule));
             if (sumPairs > 0)
             {
                 Console.WriteLine(
                     $"合计 {sumPairs} 组：扩展节点 A*/JPS = {(double)sumAexp / Math.Max(1, sumJexp):F1}x，" +
                     $"耗时 A*/JPS = {sumAms / Math.Max(0.001, sumJms):F1}x（JPS 总 {sumJms:F0}ms，A* 总 {sumAms:F0}ms）");
+                if (nativeEnabled)
+                    Console.WriteLine(
+                        $"C 版 JPS：耗时 C#/C = {sumJms / Math.Max(0.001, sumNms):F2}x，A*/C = {sumAms / Math.Max(0.001, sumNms):F2}x（C# 总 {sumJms:F0}ms，C 总 {sumNms:F0}ms）");
                 Console.WriteLine(sumMism == 0
                     ? $"正确性：{sumPairs} 组 JPS 与 A* 结果完全一致（成败 + 路径代价），✓ 通过"
                     : $"正确性：⚠ 有 {sumMism} 组与 A* 不一致！");
@@ -426,22 +498,31 @@ namespace JPS.Benchmark
             var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
             void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
+            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
             Console.WriteLine($"# JPS vs A* · MovingAI .scen 性能报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
+            Console.WriteLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）→ 同时测 C 版 JPS" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
             Console.WriteLine($"范围：{scope}，{scenFileCount} 个 .scen / {groups.Count} 张地图，去重后用例 {dedup}（原始 {totalEntries}）");
             Console.WriteLine("说明：按地图归并，每张图只解析一次；每个起终点对只跑一次（JPS 一遍 + A* 一遍）；不校验路径（由 JPS.Accuracy 负责）。");
             Console.WriteLine();
-            Console.WriteLine("列说明：scens=该图关联 scen 文件数  pairs=去重后有效起终点对  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  JPSus/A*us=平均耗时(微秒)  speed=A*us/JPSus");
+            Console.WriteLine(nativeEnabled
+                ? "列说明：scens=关联 scen 数  pairs=去重有效对  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  C#us/Cus/A*us=平均耗时(微秒)  C#/C=C#us/Cus  speed=A*us/C#us  A*/C=A*us/Cus"
+                : "列说明：scens=该图关联 scen 文件数  pairs=去重后有效起终点对  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  JPSus/A*us=平均耗时(微秒)  speed=A*us/JPSus");
             Console.WriteLine();
-            Console.WriteLine($"{"map",-34}{"size",11}{"scens",7}{"pairs",9}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}");
-            Console.WriteLine(new string('-', 111));
+            string sbHdr = nativeEnabled
+                ? $"{"map",-34}{"size",11}{"scens",7}{"pairs",9}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"C#us",9}{"Cus",9}{"C#/C",6}{"A*us",9}{"speed",7}{"A*/C",7}"
+                : $"{"map",-34}{"size",11}{"scens",7}{"pairs",9}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}";
+            int sbRule = nativeEnabled ? 133 : 111;
+            Console.WriteLine(sbHdr);
+            Console.WriteLine(new string('-', sbRule));
 
             WarmupJit();   // 触发 JIT 编译，避免首张图计时被编译开销污染
 
             long sumJexp = 0, sumAexp = 0, sumPairs = 0;
-            double sumJms = 0, sumAms = 0;
+            double sumJms = 0, sumAms = 0, sumNms = 0;
 
             // 2) 逐图测试：每张图只 Parse 一次，跑完它的全部（去重）用例
             var sw = new Stopwatch();
@@ -475,6 +556,9 @@ namespace JPS.Benchmark
                 system.Sync();
                 var jps = new JpsPathfinder();
                 var astar = new AStarPathfinder();
+                NativeMap? nat = nativeEnabled ? new NativeMap(map) : null;
+                try
+                {
 
                 long jExp = 0, aExp = 0;
 
@@ -490,6 +574,20 @@ namespace JPS.Benchmark
                 }
                 sw.Stop(); double jMs = sw.Elapsed.TotalMilliseconds;
 
+                double nMs = double.MaxValue;
+                if (nat != null)
+                {
+                    GC.Collect(); GC.WaitForPendingFinalizers();
+                    sw.Restart();
+                    for (int k = 0; k < n; k++)
+                    {
+                        if ((k & 8191) == 0) progress.Show($"[{gi}/{total}] {name}  JPS(C) {k}/{n}");
+                        var p = valid[k];
+                        nat.Find(p.sx, p.sy, p.gx, p.gy);
+                    }
+                    sw.Stop(); nMs = sw.Elapsed.TotalMilliseconds;
+                }
+
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 sw.Restart();
                 for (int k = 0; k < n; k++)
@@ -501,20 +599,41 @@ namespace JPS.Benchmark
                 sw.Stop(); double aMs = sw.Elapsed.TotalMilliseconds;
 
                 double jus = jMs / n * 1000, aus = aMs / n * 1000;
-                Emit(
-                    $"{Trunc(name, 34),-34}{size,11}{g.ScenCount,7}{n,9}{jExp / n,9}{aExp / n,9}" +
-                    $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                if (nat != null)
+                {
+                    double nus = nMs / n * 1000;
+                    Emit(
+                        $"{Trunc(name, 34),-34}{size,11}{g.ScenCount,7}{n,9}{jExp / n,9}{aExp / n,9}" +
+                        $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{nus,9:F1}{jus / Math.Max(0.001, nus),6:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{aus / Math.Max(0.001, nus),7:F1}");
+                    sumNms += nMs;
+                }
+                else
+                {
+                    Emit(
+                        $"{Trunc(name, 34),-34}{size,11}{g.ScenCount,7}{n,9}{jExp / n,9}{aExp / n,9}" +
+                        $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                }
 
                 sumJexp += jExp; sumAexp += aExp; sumPairs += n; sumJms += jMs; sumAms += aMs;
+                }
+                finally
+                {
+                    nat?.Dispose();
+                }
             }
 
             progress.Clear();
-            Console.WriteLine(new string('-', 111));
+            Console.WriteLine(new string('-', sbRule));
             if (sumPairs > 0)
             {
                 Console.WriteLine(
                     $"合计 {sumPairs} 组（{groups.Count} 图）：扩展节点 A*/JPS = {(double)sumAexp / Math.Max(1, sumJexp):F1}x，" +
                     $"耗时 A*/JPS = {sumAms / Math.Max(0.001, sumJms):F1}x（JPS 总 {sumJms:F0}ms，A* 总 {sumAms:F0}ms）");
+                if (nativeEnabled)
+                {
+                    Console.WriteLine(
+                        $"C 版 JPS：耗时 C#/C = {sumJms / Math.Max(0.001, sumNms):F2}x，A*/C = {sumAms / Math.Max(0.001, sumNms):F2}x（C# 总 {sumJms:F0}ms，C 总 {sumNms:F0}ms）");
+                }
             }
 
             Console.Out.Flush();
@@ -550,22 +669,31 @@ namespace JPS.Benchmark
             var progress = new ConsoleProgress(consoleOut);   // 仅刷新到真实终端，不写报告
             void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
 
+            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
             Console.WriteLine($"# JPS vs A* · 随机投点 + .scen 合并基准   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
+            Console.WriteLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）→ 同时测 C 版 JPS" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
             Console.WriteLine($"范围：{scope}，{scenFileCount} 个 .scen / {groups.Count} 张地图；随机投点每图目标 {q} 组，scen 去重后用例 {dedup}（原始 {totalEntries}）");
             Console.WriteLine("流程：每张图只解析一次 → 先随机投点(rand，多轮取最小=热缓存) → 再 scen(scen，每对一次，承接预热)。不校验路径（由 JPS.Accuracy 负责）。");
             Console.WriteLine();
-            Console.WriteLine("列说明：tag=rand/scen  aux=rand:可走率% / scen:关联scen数  pairs=用例对数  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  JPSus/A*us=平均耗时(微秒)  speed=A*us/JPSus");
+            Console.WriteLine(nativeEnabled
+                ? "列说明：tag=rand/scen  pairs=用例对数  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  C#us/Cus/A*us=平均耗时(微秒)  C#/C=C#us/Cus  speed=A*us/C#us  A*/C=A*us/Cus"
+                : "列说明：tag=rand/scen  pairs=用例对数  JPSexp/A*exp=平均扩展节点  ratio=A*exp/JPSexp  JPSus/A*us=平均耗时(微秒)  speed=A*us/JPSus");
             Console.WriteLine();
-            Console.WriteLine($"{"map",-30}{"tag",6}{"aux",8}{"pairs",8}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}");
-            Console.WriteLine(new string('-', 102));
+            string cbHdr = nativeEnabled
+                ? $"{"map",-30}{"tag",6}{"pairs",8}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"C#us",9}{"Cus",9}{"C#/C",6}{"A*us",9}{"speed",7}{"A*/C",7}"
+                : $"{"map",-30}{"tag",6}{"pairs",8}{"JPSexp",9}{"A*exp",9}{"ratio",7}{"JPSus",9}{"A*us",9}{"speed",7}";
+            int cbRule = nativeEnabled ? 116 : 94;
+            Console.WriteLine(cbHdr);
+            Console.WriteLine(new string('-', cbRule));
 
             WarmupJit();   // 触发 JIT 编译，避免首张图计时被编译开销污染
 
-            long rJexp = 0, rAexp = 0, rPairs = 0; double rJms = 0, rAms = 0;   // 随机投点累计
-            long sJexp = 0, sAexp = 0, sPairs = 0; double sJms = 0, sAms = 0;   // scen 累计
+            long rJexp = 0, rAexp = 0, rPairs = 0; double rJms = 0, rAms = 0, rNms = 0;   // 随机投点累计
+            long sJexp = 0, sAexp = 0, sPairs = 0; double sJms = 0, sAms = 0, sNms = 0;   // scen 累计
             var sw = new Stopwatch();
 
             // 2) 逐图：每张只 Parse 一次，先随机投点、后 scen
@@ -586,8 +714,11 @@ namespace JPS.Benchmark
                 system.Sync();
                 var jps = new JpsPathfinder();
                 var astar = new AStarPathfinder();
+                NativeMap? nat = nativeEnabled ? new NativeMap(map) : null;
+                try
+                {
 
-                long tot = (long)map.Width * map.Height;
+
                 var walk = new List<(int X, int Y)>();
                 for (int y = 0; y < map.Height; y++)
                     for (int x = 0; x < map.Width; x++)
@@ -618,22 +749,40 @@ namespace JPS.Benchmark
                             aExp += astar.FindPath(map, p.s, p.g).ExpandedNodes;
                         }
 
-                        double jMs = double.MaxValue, aMs = double.MaxValue;
+                        double jMs = double.MaxValue, aMs = double.MaxValue, nMs = double.MaxValue;
                         for (int rep = 0; rep < 3; rep++)
                         {
                             progress.Show($"[{gi}/{total}] JPS:{name}  rand 计时 {rep + 1}/3（{rn} 对）");   // 受 5s 限频
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart(); foreach (var p in qs) jps.FindPath(system, p.s, p.g); sw.Stop();
                             jMs = Math.Min(jMs, sw.Elapsed.TotalMilliseconds);
+                            if (nat != null)
+                            {
+                                progress.Show($"[{gi}/{total}] JPS(C):{name}  rand 计时 {rep + 1}/3（{rn} 对）");
+                                GC.Collect(); GC.WaitForPendingFinalizers();
+                                sw.Restart(); foreach (var p in qs) nat.Find(p.s.X, p.s.Y, p.g.X, p.g.Y); sw.Stop();
+                                nMs = Math.Min(nMs, sw.Elapsed.TotalMilliseconds);
+                            }
                             progress.Show($"[{gi}/{total}] A*:{name}  rand 计时 {rep + 1}/3（{rn} 对）");   // 受 5s 限频
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart(); foreach (var p in qs) astar.FindPath(map, p.s, p.g); sw.Stop();
                             aMs = Math.Min(aMs, sw.Elapsed.TotalMilliseconds);
                         }
                         double jus = jMs / rn * 1000, aus = aMs / rn * 1000;
-                        Emit(
-                            $"{Trunc(name, 30),-30}{"rand",6}{walk.Count * 100.0 / tot,7:F1}{"%",1}{rn,8}{jExp / rn,9}{aExp / rn,9}" +
-                            $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                        if (nat != null)
+                        {
+                            double nus = nMs / rn * 1000;
+                            Emit(
+                                $"{Trunc(name, 30),-30}{"rand",6}{rn,8}{jExp / rn,9}{aExp / rn,9}" +
+                                $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{nus,9:F1}{jus / Math.Max(0.001, nus),6:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{aus / Math.Max(0.001, nus),7:F1}");
+                            rNms += nMs;
+                        }
+                        else
+                        {
+                            Emit(
+                                $"{Trunc(name, 30),-30}{"rand",6}{rn,8}{jExp / rn,9}{aExp / rn,9}" +
+                                $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                        }
                         rJexp += jExp; rAexp += aExp; rPairs += rn; rJms += jMs; rAms += aMs;
                     }
                 }
@@ -661,6 +810,21 @@ namespace JPS.Benchmark
                         jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
                     }
                     sw.Stop(); double jMs = sw.Elapsed.TotalMilliseconds;
+
+                    double nMs = double.MaxValue;
+                    if (nat != null)
+                    {
+                        GC.Collect(); GC.WaitForPendingFinalizers();
+                        sw.Restart();
+                        for (int k = 0; k < sn; k++)
+                        {
+                            if ((k & 61) == 0) progress.Show($"[{gi}/{total}] {name}  scen JPS(C) {k}/{sn}");
+                            var p = valid[k];
+                            nat.Find(p.sx, p.sy, p.gx, p.gy);
+                        }
+                        sw.Stop(); nMs = sw.Elapsed.TotalMilliseconds;
+                    }
+
                     GC.Collect(); GC.WaitForPendingFinalizers();
                     sw.Restart();
                     for (int k = 0; k < sn; k++)
@@ -670,20 +834,39 @@ namespace JPS.Benchmark
                         aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
                     }
                     sw.Stop(); double aMs = sw.Elapsed.TotalMilliseconds;
+
                     double jus = jMs / sn * 1000, aus = aMs / sn * 1000;
-                    Emit(
-                        $"{Trunc(name, 30),-30}{"scen",6}{grp.ScenCount,8}{sn,8}{jExp / sn,9}{aExp / sn,9}" +
-                        $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                    if (nat != null)
+                    {
+                        double nus = nMs / sn * 1000;
+                        Emit(
+                            $"{Trunc(name, 30),-30}{"scen",6}{sn,8}{jExp / sn,9}{aExp / sn,9}" +
+                            $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{nus,9:F1}{jus / Math.Max(0.001, nus),6:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}{aus / Math.Max(0.001, nus),7:F1}");
+                        sNms += nMs;
+                    }
+                    else
+                    {
+                        Emit(
+                            $"{Trunc(name, 30),-30}{"scen",6}{sn,8}{jExp / sn,9}{aExp / sn,9}" +
+                            $"{(double)aExp / Math.Max(1, jExp),7:F1}{jus,9:F1}{aus,9:F1}{aus / Math.Max(0.001, jus),7:F1}");
+                    }
                     sJexp += jExp; sAexp += aExp; sPairs += sn; sJms += jMs; sAms += aMs;
+                }
+                }
+                finally
+                {
+                    nat?.Dispose();
                 }
             }
 
             progress.Clear();
-            Console.WriteLine(new string('-', 102));
+            Console.WriteLine(new string('-', cbRule));
             if (rPairs > 0)
-                Console.WriteLine($"[rand] 合计 {rPairs} 组：扩展节点 A*/JPS={(double)rAexp / Math.Max(1, rJexp):F1}x，耗时 A*/JPS={rAms / Math.Max(0.001, rJms):F1}x（JPS {rJms:F0}ms / A* {rAms:F0}ms）");
+                Console.WriteLine($"[rand] 合计 {rPairs} 组：扩展节点 A*/JPS={(double)rAexp / Math.Max(1, rJexp):F1}x，耗时 A*/JPS={rAms / Math.Max(0.001, rJms):F1}x（JPS {rJms:F0}ms / A* {rAms:F0}ms）"
+                    + (nativeEnabled ? $"，C#/C={rJms / Math.Max(0.001, rNms):F2}x，A*/C={rAms / Math.Max(0.001, rNms):F2}x（C {rNms:F0}ms）" : ""));
             if (sPairs > 0)
-                Console.WriteLine($"[scen] 合计 {sPairs} 组：扩展节点 A*/JPS={(double)sAexp / Math.Max(1, sJexp):F1}x，耗时 A*/JPS={sAms / Math.Max(0.001, sJms):F1}x（JPS {sJms:F0}ms / A* {sAms:F0}ms）");
+                Console.WriteLine($"[scen] 合计 {sPairs} 组：扩展节点 A*/JPS={(double)sAexp / Math.Max(1, sJexp):F1}x，耗时 A*/JPS={sAms / Math.Max(0.001, sJms):F1}x（JPS {sJms:F0}ms / A* {sAms:F0}ms）"
+                    + (nativeEnabled ? $"，C#/C={sJms / Math.Max(0.001, sNms):F2}x，A*/C={sAms / Math.Max(0.001, sNms):F2}x（C {sNms:F0}ms）" : ""));
 
             Console.Out.Flush();
             Console.SetOut(consoleOut);   // 还原标准输出
