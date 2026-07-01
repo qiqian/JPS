@@ -32,8 +32,18 @@ typedef struct jps_grid_map
     int version;
     /* 每行的 uint64 数，向上取整到偶数个 word，使行起点保持 128-bit 对齐。 */
     int stride;
-    /* 阻挡位图，按行对齐：第 y 行第 (x>>6) 个字 = blocked[y*stride + (x>>6)]，位 = x&63。 */
+    /* 每列的 uint64 数（列排布/转置位图用），同样偶数、128-bit 对齐。 */
+    int col_stride;
+    /*
+     * 行排布位图（按行对齐）：第 y 行第 (x>>6) 个字 = blocked[y*stride + (x>>6)]，位 = x&63。
+     * 供水平跳点扫描（同一行 128 格落在一个对齐单元内）。16 字节对齐分配。
+     */
     uint64_t *blocked;
+    /*
+     * 列排布位图（转置，按列对齐）：第 x 列第 (y>>6) 个字 = col_blocked[x*col_stride + (y>>6)]，位 = y&63。
+     * 与 blocked 内容等价、随之同步更新；供**垂直**跳点扫描把 128 格 y 落在一个对齐单元内，复用同一套 SIMD。
+     */
+    uint64_t *col_blocked;
 } jps_grid_map;
 
 /*

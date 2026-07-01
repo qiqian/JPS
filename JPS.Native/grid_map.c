@@ -1,4 +1,4 @@
-﻿/*
+/*
  * grid_map.c
  * JPS Pathfinding — C port of JPS.Core/Models/GridMap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -12,15 +12,15 @@
 #define JPS_MAX_DIM 32767
 #define JPS_SIMD_ALIGNMENT 16
 
-static int jps__logical_stride(int width)
+static int jps__logical_stride(int dim)
 {
-    return (width + 63) >> 6;
+    return (dim + 63) >> 6;
 }
 
-static int jps__simd_stride(int width)
+static int jps__simd_stride(int dim)
 {
-    int words = jps__logical_stride(width);
-    return (words + 1) & ~1;   /* two uint64 words = 128 bits */
+    int words = jps__logical_stride(dim);
+    return (words + 1) & ~1;   /* 向上取偶：两个 uint64 = 128 位对齐 */
 }
 
 static void *jps__aligned_alloc16(size_t size)
@@ -42,30 +42,34 @@ static void jps__aligned_free(void *p)
 }
 
 /*
- * 把每行行尾字中的 padding 位（列 ≥ Width）置 1（阻挡）。
- * 这样 walkable_word 取反即得正确可走位，省去逐字屏蔽。
+ * 通用 padding：把一份“按线(line)排布”位图里每条线上 across ≥ valid_across 的位置 1（阻挡）。
+ * 行排布：line=y、across=x、valid_across=width；列排布：line=x、across=y、valid_across=height。
+ * 这样取反即得可走位，扫描无需逐字屏蔽；且对齐补出的整字也置为全阻挡。
  */
-static void jps__mark_padding_blocked(jps_grid_map *m)
+static void jps__mark_padding(uint64_t *bits, int stride, int n_lines, int valid_across)
 {
-    int words = jps__logical_stride(m->width);
-    int valid_in_last_word = m->width - (words - 1) * 64;
-    int last = words - 1;
-    int y, w;
+    int first_pad_word = valid_across >> 6;
+    int first_pad_bit = valid_across & 63;
+    int line, w;
 
-    for (y = 0; y < m->height; y++)
+    for (line = 0; line < n_lines; line++)
     {
-        if (valid_in_last_word != 64)
+        uint64_t *lb = &bits[(size_t)line * stride];
+        for (w = first_pad_word; w < stride; w++)
         {
-            uint64_t padding_mask = ~((1ULL << valid_in_last_word) - 1);
-            m->blocked[(size_t)y * m->stride + last] |= padding_mask;
+            uint64_t mask;
+            if (w > first_pad_word)      mask = ~0ULL;                          /* 整字全 padding */
+            else if (first_pad_bit == 0) mask = ~0ULL;                          /* 恰好字边界 */
+            else                         mask = ~((1ULL << first_pad_bit) - 1); /* 该字内 ≥ 有效位的部分 */
+            lb[w] |= mask;
         }
-        for (w = words; w < m->stride; w++)
-            m->blocked[(size_t)y * m->stride + w] = ~0ULL;
     }
 }
+
 jps_grid_map *jps_grid_map_create(int width, int height)
 {
     jps_grid_map *m;
+    size_t row_bytes, col_bytes;
 
     if (width <= 0 || height <= 0)
         return NULL;
@@ -80,17 +84,26 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->width = width;
     m->height = height;
     m->version = 0;
-    m->stride = jps__simd_stride(width);           /* 128-bit aligned row stride */
-    m->blocked = (uint64_t *)jps__aligned_alloc16((size_t)m->stride * height * sizeof(uint64_t));
-    if (m->blocked == NULL)
+    m->stride = jps__simd_stride(width);      /* 行排布：每行 128 位对齐 */
+    m->col_stride = jps__simd_stride(height); /* 列排布：每列 128 位对齐 */
+
+    row_bytes = (size_t)m->stride * height * sizeof(uint64_t);
+    col_bytes = (size_t)m->col_stride * width * sizeof(uint64_t);
+    m->blocked = (uint64_t *)jps__aligned_alloc16(row_bytes);
+    m->col_blocked = (uint64_t *)jps__aligned_alloc16(col_bytes);
+    if (m->blocked == NULL || m->col_blocked == NULL)
     {
+        jps__aligned_free(m->blocked);
+        jps__aligned_free(m->col_blocked);
         free(m);
         return NULL;
     }
 
     /* 对齐分配器用 malloc，不清零 → 必须先清零，否则有效格残留垃圾（= 随机阻挡）。 */
-    memset(m->blocked, 0, (size_t)m->stride * height * sizeof(uint64_t));
-    jps__mark_padding_blocked(m);                  /* 行尾 padding 位预置为阻挡 */
+    memset(m->blocked, 0, row_bytes);
+    memset(m->col_blocked, 0, col_bytes);
+    jps__mark_padding(m->blocked, m->stride, height, width);       /* 行排布 padding：x ≥ width */
+    jps__mark_padding(m->col_blocked, m->col_stride, width, height); /* 列排布 padding：y ≥ height */
     return m;
 }
 
@@ -99,26 +112,35 @@ void jps_grid_map_destroy(jps_grid_map *m)
     if (m == NULL)
         return;
     jps__aligned_free(m->blocked);
+    jps__aligned_free(m->col_blocked);
     free(m);
 }
 
 void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
 {
-    int word;
-    uint64_t mask;
+    size_t rword, cword;
+    uint64_t rmask, cmask;
 
     if (!jps_grid_map_in_bounds(m, x, y))
         return;
 
     if (jps__grid_map_get_bit(m, x, y) == blocked)
-        return;   /* 无变化，不动版本号 */
+        return;   /* 无变化，不动版本号；行/列两份始终一致 */
 
-    word = (int)((size_t)y * m->stride + (x >> 6));
-    mask = 1ULL << (x & 63);
+    rword = (size_t)y * m->stride + (x >> 6);        /* 行排布位置 */
+    rmask = 1ULL << (x & 63);
+    cword = (size_t)x * m->col_stride + (y >> 6);    /* 列排布位置（转置） */
+    cmask = 1ULL << (y & 63);
     if (blocked)
-        m->blocked[word] |= mask;
+    {
+        m->blocked[rword] |= rmask;
+        m->col_blocked[cword] |= cmask;
+    }
     else
-        m->blocked[word] &= ~mask;
+    {
+        m->blocked[rword] &= ~rmask;
+        m->col_blocked[cword] &= ~cmask;
+    }
 
     m->version++;   /* 阻挡变化 → 惰性跳点缓存整体失效 */
 }
@@ -126,6 +148,8 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
 void jps_grid_map_clear_all(jps_grid_map *m)
 {
     memset(m->blocked, 0, (size_t)m->stride * m->height * sizeof(uint64_t));
-    jps__mark_padding_blocked(m);   /* memset 把 padding 也抹成 0，需重新置 1 */
+    memset(m->col_blocked, 0, (size_t)m->col_stride * m->width * sizeof(uint64_t));
+    jps__mark_padding(m->blocked, m->stride, m->height, m->width);       /* memset 抹掉了 padding，需重置 */
+    jps__mark_padding(m->col_blocked, m->col_stride, m->width, m->height);
     m->version++;
 }
