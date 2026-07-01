@@ -266,12 +266,14 @@ namespace JPS.Benchmark
             Console.WriteLine("  JPSexp/A*exp  平均每次寻路的扩展节点数（JPS / A*）");
             if (nativeEnabled)
             {
-                Console.WriteLine("  cC# / cC      C# / C 版 JPS 冷路径平均耗时（微秒/次；cC 绿=比 cC# 快，红=慢）");
-                Console.WriteLine("  wC# / wC      C# / C 版 JPS 热路径平均耗时（微秒/次；wC 绿=比 wC# 快，红=慢）");
+                Console.WriteLine("  cC# / cC      C# / C 版 JPS 冷路径平均耗时（微秒/次）");
+                Console.WriteLine("  wC# / wC      C# / C 版 JPS 热路径平均耗时（微秒/次）");
+                Console.WriteLine("  着色：cC/wC 比同类 C# 快=绿 慢=红；四列(cC#/cC/wC#/wC)比 A* 慢=红（红优先）");
             }
             else
             {
                 Console.WriteLine("  cC# / wC#     C# 版 JPS 冷 / 热路径平均耗时（微秒/次）");
+                Console.WriteLine("  着色(cC#/wC#)：红=比 A* 慢");
             }
             Console.WriteLine("  A*us          A* 平均每次寻路耗时（微秒/次）");
             Console.WriteLine(nativeEnabled
@@ -379,24 +381,27 @@ namespace JPS.Benchmark
 
                     double cjus = cj / n * 1000, wjus = wj / n * 1000, aus = a / n * 1000;
                     string size = $"{map.Width}x{map.Height}";
+                    string hd = $"{Trunc(name, 30),-30}{size,11}{tag,6}{n,8}{jExp / n,8}{aExp / n,8}";
                     if (nat != null)
                     {
                         double cnus = cn / n * 1000, wnus = wn / n * 1000;
-                        string cnStr = $"{cnus,9:F2}", wnStr = $"{wnus,9:F2}";
-                        // cCus 比 cC#us 快→绿、慢→红；wCus 比 wC#us 快→绿、慢→红。
-                        string cnCol = cnus < cjus ? Green(cnStr) : cnus > cjus ? Red(cnStr) : cnStr;
-                        string wnCol = wnus < wjus ? Green(wnStr) : wnus > wjus ? Red(wnStr) : wnStr;
-                        // 列顺序：cC#(cjus) cC(cnus,着色) wC#(wjus) wC(wnus,着色)
-                        string head = $"{Trunc(name, 30),-30}{size,11}{tag,6}{n,8}{jExp / n,8}{aExp / n,8}{cjus,9:F2}";
-                        string mid = $"{wjus,9:F2}";
+                        string cjStr = $"{cjus,9:F2}", cnStr = $"{cnus,9:F2}", wjStr = $"{wjus,9:F2}", wnStr = $"{wnus,9:F2}";
+                        // 优先：四列比 A* 慢=红。否则 cC/wC 比同类 C# 快=绿、慢=红；cC#/wC# 无相对对比。
+                        string cjCol = cjus > aus ? Red(cjStr) : cjStr;
+                        string cnCol = cnus > aus ? Red(cnStr) : cnus < cjus ? Green(cnStr) : cnus > cjus ? Red(cnStr) : cnStr;
+                        string wjCol = wjus > aus ? Red(wjStr) : wjStr;
+                        string wnCol = wnus > aus ? Red(wnStr) : wnus < wjus ? Green(wnStr) : wnus > wjus ? Red(wnStr) : wnStr;
                         string tail = $"{aus,9:F2}{aus / Math.Max(0.001, cnus),8:F1}{aus / Math.Max(0.001, wnus),8:F1}";
-                        EmitRow(head + cnStr + mid + wnStr + tail, head + cnCol + mid + wnCol + tail);
+                        EmitRow(hd + cjStr + cnStr + wjStr + wnStr + tail,   // 顺序：cC# cC wC# wC
+                                hd + cjCol + cnCol + wjCol + wnCol + tail);
                     }
                     else
                     {
-                        string row = $"{Trunc(name, 30),-30}{size,11}{tag,6}{n,8}{jExp / n,8}{aExp / n,8}{cjus,9:F2}{wjus,9:F2}{aus,9:F2}" +
-                                     $"{aus / Math.Max(0.001, cjus),8:F1}{aus / Math.Max(0.001, wjus),8:F1}";
-                        EmitRow(row, row);
+                        string cjStr = $"{cjus,9:F2}", wjStr = $"{wjus,9:F2}";
+                        string cjCol = cjus > aus ? Red(cjStr) : cjStr;
+                        string wjCol = wjus > aus ? Red(wjStr) : wjStr;
+                        string tail = $"{aus,9:F2}{aus / Math.Max(0.001, cjus),8:F1}{aus / Math.Max(0.001, wjus),8:F1}";
+                        EmitRow(hd + cjStr + wjStr + tail, hd + cjCol + wjCol + tail);
                     }
                     return (cj, wj, cn, wn, a, n);
                 }
