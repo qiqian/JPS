@@ -38,21 +38,17 @@ static inline uint64_t jps_v_lane(jps_v128 v, int i)
         return (uint64_t)_mm_cvtsi128_si64(hi);
     }
 }
+static inline jps_v128 jps_v_zero(void) { return _mm_setzero_si128(); }
+/* 对齐加载一个 128 位单元（两个连续 uint64）。要求 p 16 字节对齐（由 GridMap 保证）。 */
+static inline jps_v128 jps_v_load(const uint64_t *p) { return _mm_load_si128((const __m128i *)p); }
 static inline jps_v128 jps_v_and(jps_v128 a, jps_v128 b) { return _mm_and_si128(a, b); }
 static inline jps_v128 jps_v_or(jps_v128 a, jps_v128 b)  { return _mm_or_si128(a, b); }
 static inline jps_v128 jps_v_not(jps_v128 a) { return _mm_xor_si128(a, _mm_set1_epi32(-1)); }
-/* 当可用时使用 _mm_testz_si128（SSE4.1）更高效，否则退回到 movemask+cmpeq。 */
+/* SSE4.1 可用时用 ptest（1 条指令），否则退回 movemask+cmpeq（SSE2 基线，2 条指令）。 */
 static inline int jps_v_is_zero(jps_v128 v)
 {
 #if defined(__SSE4_1__)
     return _mm_testz_si128(v, v);
-#elif defined(_MSC_VER) && (defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
-    /* MSVC x64 通常可用 _mm_testz_si128；若不可用仍可用 movemask 回退。 */
-#  ifdef _mm_testz_si128
-    return _mm_testz_si128(v, v);
-#  else
-    return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) == 0xFFFF;
-#  endif
 #else
     return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) == 0xFFFF;
 #endif
@@ -91,6 +87,9 @@ static inline uint64_t jps_v_lane(jps_v128 v, int i)
 {
     return i == 0 ? vgetq_lane_u64(v, 0) : vgetq_lane_u64(v, 1);
 }
+static inline jps_v128 jps_v_zero(void) { return vdupq_n_u64(0); }
+/* 加载一个 128 位单元（两个连续 uint64）。NEON 加载对齐不敏感，但数据仍按 16 字节对齐分配。 */
+static inline jps_v128 jps_v_load(const uint64_t *p) { return vld1q_u64(p); }
 static inline jps_v128 jps_v_and(jps_v128 a, jps_v128 b) { return vandq_u64(a, b); }
 static inline jps_v128 jps_v_or(jps_v128 a, jps_v128 b)  { return vorrq_u64(a, b); }
 static inline jps_v128 jps_v_not(jps_v128 a)

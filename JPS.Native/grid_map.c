@@ -88,6 +88,8 @@ jps_grid_map *jps_grid_map_create(int width, int height)
         return NULL;
     }
 
+    /* 对齐分配器用 malloc，不清零 → 必须先清零，否则有效格残留垃圾（= 随机阻挡）。 */
+    memset(m->blocked, 0, (size_t)m->stride * height * sizeof(uint64_t));
     jps__mark_padding_blocked(m);                  /* 行尾 padding 位预置为阻挡 */
     return m;
 }

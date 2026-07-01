@@ -33,21 +33,37 @@ static inline void jps_gen_store_release(uint8_t *p, uint8_t v)
 
 #elif defined(_MSC_VER)
 
-#  include <intrin.h>
-
+#  if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_ATOMICS__)
+/* MSVC 启用 C11 原子（/std:c11 起）：用标准、非弃用的 atomic_thread_fence。 */
+#    include <stdatomic.h>
 static inline uint8_t jps_gen_load_acquire(const uint8_t *p)
 {
-    uint8_t v = (uint8_t)__iso_volatile_load8((const volatile __int8 *)p);   /* x64 TSO：硬件层 acquire */
+    uint8_t v = *(const volatile uint8_t *)p;   /* volatile 防编译器省略/复制该读 */
+    atomic_thread_fence(memory_order_acquire);  /* x64 上编译成编译器屏障，配合 TSO 即 acquire */
+    return v;
+}
+static inline void jps_gen_store_release(uint8_t *p, uint8_t v)
+{
+    atomic_thread_fence(memory_order_release);
+    *(volatile uint8_t *)p = v;
+}
+#  else
+/* 回退（旧 MSVC / 未启用 C11 原子）：编译器屏障 + volatile 内建，x64 TSO 提供硬件 acquire/release。 */
+#    include <intrin.h>
+static inline uint8_t jps_gen_load_acquire(const uint8_t *p)
+{
+    uint8_t v = (uint8_t)__iso_volatile_load8((const volatile __int8 *)p);
 __pragma(warning(suppress : 4996))
-    _ReadWriteBarrier();                                                     /* 禁止后续 dist 读越过本读 */
+    _ReadWriteBarrier();
     return v;
 }
 static inline void jps_gen_store_release(uint8_t *p, uint8_t v)
 {
 __pragma(warning(suppress : 4996))
-    _ReadWriteBarrier();                                                     /* 禁止先前 dist 写沉到本写之后 */
-    __iso_volatile_store8((volatile __int8 *)p, (char)v);                    /* x64 TSO：硬件层 release */
+    _ReadWriteBarrier();
+    __iso_volatile_store8((volatile __int8 *)p, (char)v);
 }
+#  endif
 
 #else
 #  error "JPS: unsupported compiler for acquire/release atomics (need GCC/Clang or MSVC)"

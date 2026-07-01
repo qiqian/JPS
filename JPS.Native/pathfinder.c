@@ -557,8 +557,7 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
 int jps_pathfinder_copy_smoothed_path(const jps_pathfinder *pf, const jps_system *system,
                                       float *out_xy, int capacity_points)
 {
-    jps_point_f *pts = NULL;
-    int produced, n, i;
+    int produced;
 
     if (pf == NULL || system == NULL || out_xy == NULL ||
         !pf->result.success || pf->result.path_count == 0)
