@@ -32,7 +32,7 @@ void jps_min_heap_clear(jps_min_heap *h)
     h->count = 0;
 }
 
-static void jps__heap_swap(jps_min_heap *h, int a, int b)
+static inline void jps__heap_swap(jps_min_heap *h, int a, int b)
 {
     int e = h->elem[a]; h->elem[a] = h->elem[b]; h->elem[b] = e;
     {
@@ -70,7 +70,7 @@ void jps_min_heap_enqueue(jps_min_heap *h, int element, int64_t priority)
     }
 }
 
-static void jps__heap_sift_down(jps_min_heap *h, int i)
+static inline void jps__heap_sift_down(jps_min_heap *h, int i)
 {
     while (1)
     {
