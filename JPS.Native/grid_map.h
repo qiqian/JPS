@@ -30,6 +30,12 @@ typedef struct jps_grid_map
     int height;
     /* 阻挡布局的版本号：任何阻挡增删都自增。寻路器据此判断惰性跳点缓存是否失效。 */
     int version;
+    /*
+     * 行/列影响版本：单格变化只会影响 y-1..y+1 的水平跳点扫描，以及 x-1..x+1 的垂直跳点扫描。
+     * JumpPointCache.Sync 据此把失效粒度从整表降到相关行/列。
+     */
+    int *row_version;
+    int *col_version;
     /* 每行的 uint64 数，向上取整到偶数个 word，使行起点保持 128-bit 对齐。 */
     int stride;
     /* 每列的 uint64 数（列排布/转置位图用），同样偶数、128-bit 对齐。 */

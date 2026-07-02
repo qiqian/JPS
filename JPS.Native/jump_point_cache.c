@@ -216,9 +216,13 @@ jps_jump_point_cache *jps_jump_point_cache_create(void)
     if (c == NULL)
         return NULL;
     c->w = 0;
+    c->h = 0;
     c->size = 0;
     c->cells = NULL;
-    c->valid_gen = 0;
+    c->row_gen = NULL;
+    c->col_gen = NULL;
+    c->row_version = NULL;
+    c->col_version = NULL;
     c->map_version = -1;
     return c;
 }
@@ -228,31 +232,96 @@ void jps_jump_point_cache_destroy(jps_jump_point_cache *c)
     if (c == NULL)
         return;
     free(c->cells);
+    free(c->row_gen);
+    free(c->col_gen);
+    free(c->row_version);
+    free(c->col_version);
     free(c);
+}
+
+static void jps__cache_invalidate_row(jps_jump_point_cache *c, int y)
+{
+    int x;
+    if (c->row_gen[y] >= 255)
+    {
+        for (x = 0; x < c->w; x++)
+        {
+            jps_cell_jump *cell = &c->cells[y * c->w + x];
+            cell->gen[0] = 0;
+            cell->gen[1] = 0;
+        }
+        c->row_gen[y] = 1;
+    }
+    else
+    {
+        c->row_gen[y]++;
+    }
+}
+
+static void jps__cache_invalidate_col(jps_jump_point_cache *c, int x)
+{
+    int y;
+    if (c->col_gen[x] >= 255)
+    {
+        for (y = 0; y < c->h; y++)
+        {
+            jps_cell_jump *cell = &c->cells[y * c->w + x];
+            cell->gen[2] = 0;
+            cell->gen[3] = 0;
+        }
+        c->col_gen[x] = 1;
+    }
+    else
+    {
+        c->col_gen[x]++;
+    }
 }
 
 void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m)
 {
-    if (c->w != m->width || c->size != m->width * m->height)
+    int i;
+
+    if (c->w != m->width || c->h != m->height || c->size != m->width * m->height)
     {
         c->w = m->width;
+        c->h = m->height;
         c->size = m->width * m->height;
         free(c->cells);
+        free(c->row_gen);
+        free(c->col_gen);
+        free(c->row_version);
+        free(c->col_version);
         c->cells = (jps_cell_jump *)calloc((size_t)c->size, sizeof(jps_cell_jump));
-        c->valid_gen = 0;
+        c->row_gen = (uint8_t *)calloc((size_t)c->h, sizeof(uint8_t));
+        c->col_gen = (uint8_t *)calloc((size_t)c->w, sizeof(uint8_t));
+        c->row_version = (int *)malloc((size_t)c->h * sizeof(int));
+        c->col_version = (int *)malloc((size_t)c->w * sizeof(int));
+        /* -1 哨兵：与地图侧初始版本 0 必不相等 → 首次 Sync 把每行/列都失效一遍，
+         * 令所有 cell.gen(=0) 与行/列世代(→1) 失配，杜绝"未触碰的行读到 dist=0 垃圾"。 */
+        for (i = 0; i < c->h; i++)
+            c->row_version[i] = -1;
+        for (i = 0; i < c->w; i++)
+            c->col_version[i] = -1;
         c->map_version = -1;
     }
 
     if (c->map_version != m->version)
     {
-        if (c->valid_gen >= 255)
+        for (i = 0; i < c->h; i++)
         {
-            memset(c->cells, 0, (size_t)c->size * sizeof(jps_cell_jump));   /* 世代回绕：整体清零 → 全 dirty */
-            c->valid_gen = 1;
+            if (c->row_version[i] != m->row_version[i])
+            {
+                jps__cache_invalidate_row(c, i);
+                c->row_version[i] = m->row_version[i];
+            }
         }
-        else
+        for (i = 0; i < c->w; i++)
         {
-            c->valid_gen++;
+            if (c->col_version[i] != m->col_version[i])
+            {
+                jps__cache_invalidate_col(c, i);
+                c->col_version[i] = m->col_version[i];
+            }
         }
         c->map_version = m->version;
     }
@@ -263,11 +332,12 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
 {
     int idx0 = y * c->w + x;
     int s;
+    uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];   /* E/W → 行世代；S/N → 列世代 */
     bool jump_found;
     int fx, fy, k;
 
     /* acquire 读世代戳：若看到 clean，则发布它的那次 release 写之前的 dist 写均已可见，普通读 dist 即安全。 */
-    if (jps_gen_load_acquire(&c->cells[idx0].gen[dir]) == c->valid_gen)
+    if (jps_gen_load_acquire(&c->cells[idx0].gen[dir]) == line_gen)
         return c->cells[idx0].dist[dir];
 
     /* 扫描：从 (x,y) 沿方向找最近跳点或墙。水平走行排布，垂直走列排布(转置) —— 两者共用 SIMD。 */
@@ -282,7 +352,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
     {
         int ci = fy * c->w + fx;
         c->cells[ci].dist[dir] = (int16_t)(jump_found ? (s - k) : -((s - 1) - k));   /* 先普通写 dist */
-        jps_gen_store_release(&c->cells[ci].gen[dir], c->valid_gen);                  /* 再 release 发布该格 */
+        jps_gen_store_release(&c->cells[ci].gen[dir], line_gen);                      /* 再 release 发布该格 */
         fx += dx;
         fy += dy;
     }

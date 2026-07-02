@@ -25,6 +25,8 @@ namespace JPS.Models
         // 行尾 padding（列 ≥ Width 的位）在构造/ClearAll 时即置 1（视为阻挡），故整字直接取反即得可走位，无需运行时屏蔽。
         private readonly ulong[] _blocked;
         private readonly int _stride;        // 每行的 ulong 数 = ceil(Width/64)
+        private readonly int[] _rowVersion;
+        private readonly int[] _colVersion;
 
         /// <summary>
         /// 阻挡布局的版本号：任何阻挡增删都自增。寻路器据此判断惰性跳点缓存是否失效。
@@ -45,11 +47,15 @@ namespace JPS.Models
             Height = height;
             _stride = (width + 63) >> 6;                 // 每行向上取整到整数个 64 位字
             _blocked = new ulong[_stride * height];
+            _rowVersion = new int[height];
+            _colVersion = new int[width];
             MarkPaddingBlocked();                        // 行尾 padding 位预置为阻挡
         }
 
         /// <summary>每行占用的 ulong 数（行首对齐用）。</summary>
         internal int Stride => _stride;
+        internal int[] RowVersion => _rowVersion;
+        internal int[] ColVersion => _colVersion;
 
         /// <summary>
         /// 把每行行尾字中的 padding 位（列 ≥ Width）置 1（阻挡）。
@@ -104,6 +110,24 @@ namespace JPS.Models
             return ~_blocked[y * _stride + wordCol];            // 取反：阻挡=0，可走=1（padding 已置 1 → 0 不可走）
         }
 
+        private void BumpLineVersions(int x, int y)
+        {
+            for (int yy = y - 1; yy <= y + 1; yy++)
+                if ((uint)yy < (uint)Height)
+                    _rowVersion[yy]++;
+            for (int xx = x - 1; xx <= x + 1; xx++)
+                if ((uint)xx < (uint)Width)
+                    _colVersion[xx]++;
+        }
+
+        private void BumpAllLineVersions()
+        {
+            for (int y = 0; y < Height; y++)
+                _rowVersion[y]++;
+            for (int x = 0; x < Width; x++)
+                _colVersion[x]++;
+        }
+
         public void SetBlocked(int x, int y, bool blocked)
         {
             if (!InBounds(x, y))
@@ -119,7 +143,8 @@ namespace JPS.Models
             else
                 _blocked[word] &= ~mask;
 
-            Version++;   // 阻挡变化 → 惰性跳点缓存整体失效
+            Version++;
+            BumpLineVersions(x, y);
         }
 
         public void ClearAll()
@@ -127,6 +152,7 @@ namespace JPS.Models
             Array.Clear(_blocked, 0, _blocked.Length);
             MarkPaddingBlocked();   // Array.Clear 把 padding 也抹成 0，需重新置 1
             Version++;
+            BumpAllLineVersions();
         }
     }
 }

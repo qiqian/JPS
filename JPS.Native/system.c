@@ -82,6 +82,17 @@ void jps_system_set_blocked_buffer(jps_system *s, const uint8_t *cells, int coun
             jps_grid_map_set_blocked(s->map, x, y, cells[i++] != 0);
 }
 
+void jps_system_set_blocked_batch(jps_system *s, const int *xyv, int edit_count)
+{
+    int i;
+
+    if (s == NULL || xyv == NULL || edit_count <= 0)
+        return;
+
+    for (i = 0; i < edit_count; i++)
+        jps_grid_map_set_blocked(s->map, xyv[i * 3], xyv[i * 3 + 1], xyv[i * 3 + 2] != 0);
+}
+
 void jps_system_sync(jps_system *s)
 {
     if (s == NULL)

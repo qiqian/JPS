@@ -70,6 +70,8 @@ namespace JPS.Benchmark
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked_buffer(IntPtr s, byte[] cells, int count);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void jps_system_set_blocked_batch(IntPtr s, int[] xyv, int editCount);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_sync(IntPtr s);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -93,6 +95,7 @@ namespace JPS.Benchmark
     {
         private IntPtr _sys;
         private IntPtr _pf;
+        private int[] _editBuf = Array.Empty<int>();   // 批量增量的 (x,y,blocked) 三元组暂存，跨调用复用
 
         public NativeMap(GridMap map)
         {
@@ -133,6 +136,29 @@ namespace JPS.Benchmark
         }
 
         /// <summary>重新把缓存同步到当前（未改动的）地图：热缓存计时前调用一次。</summary>
+        public void SetBlocked(int x, int y, bool blocked) =>
+            NativeJps.jps_system_set_blocked(_sys, x, y, blocked ? 1 : 0);
+
+        /// <summary>
+        /// 一次 P/Invoke 应用一批稀疏阻挡增量。<paramref name="apply"/>=true 翻到 <c>!oldBlocked</c>（施加改动），
+        /// false 翻回 <c>oldBlocked</c>（还原）。用于冷路径计时里模拟"每次查询前一小簇格子变化"，
+        /// 避免逐格 P/Invoke 的开销污染计时。
+        /// </summary>
+        public void SetBlockedBatch(IReadOnlyList<(int x, int y, bool oldBlocked)> edits, bool apply)
+        {
+            int n = edits.Count;
+            if (n == 0) return;
+            if (_editBuf.Length < n * 3) _editBuf = new int[n * 3];
+            for (int i = 0; i < n; i++)
+            {
+                var e = edits[i];
+                _editBuf[i * 3] = e.x;
+                _editBuf[i * 3 + 1] = e.y;
+                _editBuf[i * 3 + 2] = (apply ? !e.oldBlocked : e.oldBlocked) ? 1 : 0;
+            }
+            NativeJps.jps_system_set_blocked_batch(_sys, _editBuf, n);
+        }
+
         public void Sync() => NativeJps.jps_system_sync(_sys);
 
         /// <summary>最近一次寻路展开的节点数。</summary>

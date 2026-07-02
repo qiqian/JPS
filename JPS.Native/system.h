@@ -67,7 +67,14 @@ JPS_API void JPS_CALL jps_system_clear_all(jps_system *s);
 JPS_API void JPS_CALL jps_system_set_blocked_buffer(jps_system *s, const uint8_t *cells, int count);
 
 /*
- * 把缓存同步到当前地图：按地图版本号 O(1) 整体置脏。
+ * 批量应用稀疏阻挡增量：xyv 为 (x, y, blocked) 三元组连续排布，长度 = edit_count*3。
+ * 一次调用应用全部改动（每格等价 jps_system_set_blocked），越界项忽略。
+ * 相比逐格 set_blocked，跨 ABI 只需一次调用——适合动态地图每帧只改一小簇格子的场景。
+ */
+JPS_API void JPS_CALL jps_system_set_blocked_batch(jps_system *s, const int *xyv, int edit_count);
+
+/*
+ * 把缓存同步到当前地图：按地图版本号同步受影响的行/列。
  * 寻路前调用；尤其在改动阻挡之后、find_path 之前必须调用一次。
  */
 JPS_API void JPS_CALL jps_system_sync(jps_system *s);

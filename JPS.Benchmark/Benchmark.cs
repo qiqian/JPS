@@ -19,7 +19,7 @@ namespace JPS.Benchmark
     ///
     /// 先归并去重所有 .scen；再对每张被引用的地图（每张只解析一次）依次做「随机投点(rand)」与「scen」两段。
     /// 每段都测：JPS(C#) 与 JPS(C) 的**冷/热**路径耗时、A* 耗时，并给出 A*/C 的冷、热加速比。
-    ///   冷路径 = 每次寻路前翻转一个可走格并 Sync，使跳点缓存整表失效（强制每次重新跑跳点扫描）；
+    ///   冷路径 = 每次寻路前在一个小窗口内翻转少量格子（模拟动态地图的局部更新）并 Sync，再在改后地图上寻路；
     ///   热路径 = 缓存复用（Sync 一次后连续寻路）。
     /// 不校验路径正确性（由 JPS.Accuracy 负责）。
     /// </summary>
@@ -74,7 +74,7 @@ namespace JPS.Benchmark
             private readonly bool _enabled;
             private int _lastLen;
             private long _lastShownMs = -100000;
-            private const long MinIntervalMs = 5000;
+            private const long MinIntervalMs = 1000;
 
             public ConsoleProgress(TextWriter console)
             {
@@ -82,11 +82,11 @@ namespace JPS.Benchmark
                 _enabled = !Console.IsOutputRedirected;
             }
 
-            public void Show(string text)
+            public void Show(string text, bool force = false)
             {
                 if (!_enabled) return;
                 long now = Environment.TickCount64;
-                if (now - _lastShownMs < MinIntervalMs) return;
+                if (!force && now - _lastShownMs < MinIntervalMs) return;
                 _lastShownMs = now;
                 int max = SafeWidth();
                 if (text.Length > max) text = text.Substring(0, max);
@@ -256,7 +256,7 @@ namespace JPS.Benchmark
             Console.WriteLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）→ 同时测 C 版" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
             Console.WriteLine($"范围：{scope}，{scenFileCount} 个 .scen / {groups.Count} 张地图；随机投点每图目标 {q} 组，scen 去重后用例 {dedup}（原始 {totalEntries}）");
             Console.WriteLine("流程：每张图只解析一次 → 先随机投点(rand)、后 scen 两段；每段测 C#/C 冷/热与 A* 耗时（多轮取最小）。");
-            Console.WriteLine("冷=每次寻路前翻转可走格+Sync 使跳点缓存整表失效（重新扫描）；热=缓存复用。不校验路径（由 JPS.Accuracy 负责）。");
+            Console.WriteLine("冷=每次寻路前在小窗口内翻转少量格子(模拟局部更新)+Sync 令受影响行/列失效，再在改后地图上寻路；热=缓存复用。不校验路径（由 JPS.Accuracy 负责）。");
             Console.WriteLine();
             Console.WriteLine("列说明：");
             Console.WriteLine("  map           地图名");
@@ -319,8 +319,51 @@ namespace JPS.Benchmark
                 var astar = new AStarPathfinder();
                 using var nat = nativeEnabled ? new NativeMap(map) : null;
 
-                var dpt = walk[0];   // 翻转用可走格（翻 true 再 false → 回原状、仅令 Version 跳变）
-                void ForceDirtyCs() { map.SetBlocked(dpt.X, dpt.Y, true); map.SetBlocked(dpt.X, dpt.Y, false); system.Sync(); }
+                // 冷路径模拟「动态地图的局部更新」：每次查询前只在一个小窗口内翻转少量格子
+                // （建筑放置 / 门开合 / 一小队单位移动那种局部改动），而非全图散点。
+                // 散点 1% 会几乎命中所有行列 → 退化成整表失效，量不出行/列增量失效的收益；
+                // 局部簇只失效窗口覆盖的 ~窗口边长+2 条行/列，才能体现增量失效相对整表重建的优势。
+                int coldWindow = Math.Min(16, Math.Min(map.Width, map.Height));
+                int coldEditCount = Math.Min(24, Math.Max(1, coldWindow * coldWindow / 4));
+                var coldSeen = new int[map.Width * map.Height];
+                int coldSeenStamp = 0;
+
+                List<(int x, int y, bool oldBlocked)> MakeColdEdits(Random rng, int sx, int sy, int gx, int gy)
+                {
+                    var edits = new List<(int x, int y, bool oldBlocked)>(coldEditCount);
+                    int stamp = ++coldSeenStamp;
+                    // 随机挑一个 coldWindow×coldWindow 的局部窗口（左上角落在图内），改动全部集中于此。
+                    int ox = rng.Next(map.Width - coldWindow + 1);
+                    int oy = rng.Next(map.Height - coldWindow + 1);
+                    int maxAttempts = coldEditCount * 20 + 200;
+                    for (int attempts = 0; attempts < maxAttempts && edits.Count < coldEditCount; attempts++)
+                    {
+                        int x = ox + rng.Next(coldWindow);
+                        int y = oy + rng.Next(coldWindow);
+                        if ((x == sx && y == sy) || (x == gx && y == gy)) continue;
+                        int id = y * map.Width + x;
+                        if (coldSeen[id] == stamp) continue;
+                        coldSeen[id] = stamp;
+                        edits.Add((x, y, map.IsBlocked(x, y)));
+                    }
+                    return edits;
+                }
+
+                void RestoreCs(List<(int x, int y, bool oldBlocked)> edits)
+                {
+                    foreach (var e in edits)
+                        map.SetBlocked(e.x, e.y, e.oldBlocked);
+                }
+
+                void ApplyCs(List<(int x, int y, bool oldBlocked)> edits)
+                {
+                    foreach (var e in edits)
+                        map.SetBlocked(e.x, e.y, !e.oldBlocked);
+                }
+
+                // 批量增量：一次 P/Invoke 应用整簇改动，避免逐格 P/Invoke 的开销污染 C 冷路径计时。
+                void RestoreNative(List<(int x, int y, bool oldBlocked)> edits) => nat?.SetBlockedBatch(edits, apply: false);
+                void ApplyNative(List<(int x, int y, bool oldBlocked)> edits) => nat?.SetBlockedBatch(edits, apply: true);
 
                 // 测一段：C# 冷/热、C 冷/热、A*（多轮取最小），输出一行，返回各项 ms 与对数。
                 (double cj, double wj, double cn, double wn, double a, int n) RunSegment(string tag, List<(int sx, int sy, int gx, int gy)> pairs)
@@ -328,30 +371,61 @@ namespace JPS.Benchmark
                     int n = pairs.Count;
                     if (n == 0) return (0, 0, 0, 0, 0, 0);
 
-                    // 展开节点（非计时遍；JPS 顺便预热，冷路径每次 ForceDirty 不受影响）
-                    long jExp = 0, aExp = 0;
-                    foreach (var p in pairs)
+                    void ShowPathProgress(string phase, int done, int count, int rep = 0)
                     {
+                        if (done % 100 == 0 || done == count)
+                        {
+                            string repText = rep > 0 ? $" {rep}/3" : "";
+                            progress.Show($"[{gi}/{total}] {name} {tag} {phase}{repText} {done}/{count}", force: true);
+                        }
+                    }
+
+                    // 展开节点（非计时遍；JPS 顺便预热，冷路径每次都会随机局部改图）
+                    long jExp = 0, aExp = 0;
+                    for (int pi = 0; pi < pairs.Count; pi++)
+                    {
+                        var p = pairs[pi];
                         jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
                         aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                        ShowPathProgress("exp", pi + 1, n);
                     }
 
                     double cj = double.MaxValue, wj = double.MaxValue, a = double.MaxValue;
                     double cn = nat != null ? double.MaxValue : 0, wn = nat != null ? double.MaxValue : 0;
                     for (int rep = 0; rep < 3; rep++)
                     {
-                        // C# 冷（每次前 ForceDirty）
+                        // C# 冷（每次前随机局部改图）
                         progress.Show($"[{gi}/{total}] {name} {tag} C#冷 {rep + 1}/3");
                         GC.Collect(); GC.WaitForPendingFinalizers();
                         sw.Restart();
-                        foreach (var p in pairs) { ForceDirtyCs(); jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)); }
+                        {
+                            var rngCold = new Random(1000003 + rep * 9176 + gi * 131);
+                            var previousEdits = new List<(int x, int y, bool oldBlocked)>();
+                            for (int pi = 0; pi < pairs.Count; pi++)
+                            {
+                                var p = pairs[pi];
+                                RestoreCs(previousEdits);
+                                previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
+                                ApplyCs(previousEdits);
+                                system.Sync();
+                                jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
+                                ShowPathProgress("C#cold", pi + 1, n, rep + 1);
+                            }
+                            RestoreCs(previousEdits);
+                            system.Sync();
+                        }
                         sw.Stop(); cj = Math.Min(cj, sw.Elapsed.TotalMilliseconds);
 
                         // C# 热（Sync 一次后复用）
                         system.Sync();
                         GC.Collect(); GC.WaitForPendingFinalizers();
                         sw.Restart();
-                        foreach (var p in pairs) jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
+                        for (int pi = 0; pi < pairs.Count; pi++)
+                        {
+                            var p = pairs[pi];
+                            jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
+                            ShowPathProgress("C#hot", pi + 1, n, rep + 1);
+                        }
                         sw.Stop(); wj = Math.Min(wj, sw.Elapsed.TotalMilliseconds);
 
                         if (nat != null)
@@ -360,14 +434,34 @@ namespace JPS.Benchmark
                             progress.Show($"[{gi}/{total}] {name} {tag} C冷 {rep + 1}/3");
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart();
-                            foreach (var p in pairs) { nat.ForceDirty(dpt.X, dpt.Y); nat.Find(p.sx, p.sy, p.gx, p.gy); }
+                            {
+                                var rngCold = new Random(1000003 + rep * 9176 + gi * 131);
+                                var previousEdits = new List<(int x, int y, bool oldBlocked)>();
+                                for (int pi = 0; pi < pairs.Count; pi++)
+                                {
+                                    var p = pairs[pi];
+                                    RestoreNative(previousEdits);
+                                    previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
+                                    ApplyNative(previousEdits);
+                                    nat.Sync();
+                                    nat.Find(p.sx, p.sy, p.gx, p.gy);
+                                    ShowPathProgress("Ccold", pi + 1, n, rep + 1);
+                                }
+                                RestoreNative(previousEdits);
+                                nat.Sync();
+                            }
                             sw.Stop(); cn = Math.Min(cn, sw.Elapsed.TotalMilliseconds);
 
                             // C 热
                             nat.Sync();
                             GC.Collect(); GC.WaitForPendingFinalizers();
                             sw.Restart();
-                            foreach (var p in pairs) nat.Find(p.sx, p.sy, p.gx, p.gy);
+                            for (int pi = 0; pi < pairs.Count; pi++)
+                            {
+                                var p = pairs[pi];
+                                nat.Find(p.sx, p.sy, p.gx, p.gy);
+                                ShowPathProgress("Chot", pi + 1, n, rep + 1);
+                            }
                             sw.Stop(); wn = Math.Min(wn, sw.Elapsed.TotalMilliseconds);
                         }
 
@@ -375,7 +469,12 @@ namespace JPS.Benchmark
                         progress.Show($"[{gi}/{total}] {name} {tag} A* {rep + 1}/3");
                         GC.Collect(); GC.WaitForPendingFinalizers();
                         sw.Restart();
-                        foreach (var p in pairs) astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy));
+                        for (int pi = 0; pi < pairs.Count; pi++)
+                        {
+                            var p = pairs[pi];
+                            astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy));
+                            ShowPathProgress("A*", pi + 1, n, rep + 1);
+                        }
                         sw.Stop(); a = Math.Min(a, sw.Elapsed.TotalMilliseconds);
                     }
 
@@ -406,7 +505,7 @@ namespace JPS.Benchmark
                     return (cj, wj, cn, wn, a, n);
                 }
 
-                // ① 随机投点：采样 q 组可解起终点（此处会预热 C# 缓存，计时段每次都 ForceDirty，故无影响）
+                // ① 随机投点：采样 q 组可解起终点（此处会预热 C# 缓存，计时段每次都会随机局部改图）
                 var randPairs = new List<(int sx, int sy, int gx, int gy)>(q);
                 var rng = new Random(12345);
                 int maxAtt = q * 40 + 500;
@@ -415,7 +514,12 @@ namespace JPS.Benchmark
                     var s = walk[rng.Next(walk.Count)];
                     var g = walk[rng.Next(walk.Count)];
                     if (s.Equals(g)) continue;
-                    if (jps.FindPath(system, s, g).Success) randPairs.Add((s.X, s.Y, g.X, g.Y));
+                    if (jps.FindPath(system, s, g).Success)
+                    {
+                        randPairs.Add((s.X, s.Y, g.X, g.Y));
+                        if (randPairs.Count % 100 == 0 || randPairs.Count == q)
+                            progress.Show($"[{gi}/{total}] {name} rand sample {randPairs.Count}/{q}", force: true);
+                    }
                 }
                 var r = RunSegment("rand", randPairs);
                 rCJ += r.cj; rWJ += r.wj; rCN += r.cn; rWN += r.wn; rA += r.a; rP += r.n;

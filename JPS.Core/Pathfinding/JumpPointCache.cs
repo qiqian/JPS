@@ -101,7 +101,7 @@ namespace JPS.Pathfinding
     /// 生命周期上从属于一张地图：按 <see cref="GridMap.Version"/> 失效；但它是 JPS 专属的加速结构，
     /// 刻意独立于纯模型 <see cref="GridMap"/> 之外，避免让模型依赖具体算法（A* 并不需要它）。
     ///
-    ///  - 障碍变化（Version 改变）→ 全局世代 +1，O(1) 整体置脏。
+    ///  - 障碍变化（Version 改变）→ 只推进受影响行/列的世代戳。
     ///  - clean 命中 → O(1) 读。
     ///  - dirty → 沿该方向扫一次到跳点/墙，并把整段 run 一起洗白。
     ///
@@ -114,41 +114,95 @@ namespace JPS.Pathfinding
     public sealed class JumpPointCache
     {
         private int _w;
+        private int _h;
         private int _size;
         private CellJump[] _cells = new CellJump[0];
-        private byte _validGen;
+        private byte[] _rowGen = Array.Empty<byte>();
+        private byte[] _colGen = Array.Empty<byte>();
+        private int[] _rowVersion = Array.Empty<int>();
+        private int[] _colVersion = Array.Empty<int>();
         private int _mapVersion = -1;
 
         /// <summary>
-        /// 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。
-        /// 世代戳用 byte：到 byte.MaxValue(255) 时整体清零（清零=全 dirty）并从 1 重来——
-        /// 即每 255 次障碍变化做一次 O(N) 清零，省内存、清零频率仍远低于"每次清"。
+        /// 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时同步受影响的行/列。
+        /// 行/列世代戳用 byte：到 byte.MaxValue(255) 时只清对应行/列的两个正交方向，并从 1 重来。
         /// </summary>
         public void Sync(GridMap map)
         {
-            if (_w != map.Width || _size != map.Width * map.Height)
+            if (_w != map.Width || _h != map.Height || _size != map.Width * map.Height)
             {
                 _w = map.Width;
+                _h = map.Height;
                 _size = map.Width * map.Height;
                 _cells = new CellJump[_size];
-                _validGen = 0;
+                _rowGen = new byte[_h];
+                _colGen = new byte[_w];
+                _rowVersion = new int[_h];
+                _colVersion = new int[_w];
+                for (int i = 0; i < _h; i++) _rowVersion[i] = -1;
+                for (int i = 0; i < _w; i++) _colVersion[i] = -1;
                 _mapVersion = -1;
             }
 
             if (_mapVersion != map.Version)
             {
-                if (_validGen >= byte.MaxValue)
+                for (int y = 0; y < _h; y++)
                 {
-                    Array.Clear(_cells, 0, _cells.Length);   // 世代回绕：整体清零→全 dirty
-                    _validGen = 1;
+                    if (_rowVersion[y] != map.RowVersion[y])
+                    {
+                        InvalidateRow(y);
+                        _rowVersion[y] = map.RowVersion[y];
+                    }
                 }
-                else
+                for (int x = 0; x < _w; x++)
                 {
-                    _validGen++;
+                    if (_colVersion[x] != map.ColVersion[x])
+                    {
+                        InvalidateCol(x);
+                        _colVersion[x] = map.ColVersion[x];
+                    }
                 }
                 _mapVersion = map.Version;
             }
         }
+
+        private void InvalidateRow(int y)
+        {
+            if (_rowGen[y] == byte.MaxValue)
+            {
+                int row = y * _w;
+                for (int x = 0; x < _w; x++)
+                {
+                    _cells[row + x].Gen.Set(0, 0);
+                    _cells[row + x].Gen.Set(1, 0);
+                }
+                _rowGen[y] = 1;
+            }
+            else
+            {
+                _rowGen[y]++;
+            }
+        }
+
+        private void InvalidateCol(int x)
+        {
+            if (_colGen[x] == byte.MaxValue)
+            {
+                for (int y = 0; y < _h; y++)
+                {
+                    int idx = y * _w + x;
+                    _cells[idx].Gen.Set(2, 0);
+                    _cells[idx].Gen.Set(3, 0);
+                }
+                _colGen[x] = 1;
+            }
+            else
+            {
+                _colGen[x]++;
+            }
+        }
+
+        private byte LineGen(int x, int y, int dir) => dir < 2 ? _rowGen[y] : _colGen[x];
 
         /// <summary>某格某正交方向当前是否 clean（可视化用）。尺寸/版本不符则视为 dirty。</summary>
         public bool IsClean(GridMap map, int x, int y, int dir)
@@ -158,9 +212,9 @@ namespace JPS.Pathfinding
             if (_mapVersion != map.Version)
                 return false;
 #if JPS_CONCURRENT_CACHE
-            return System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[y * _w + x].Gen, dir)) == _validGen;
+            return System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[y * _w + x].Gen, dir)) == LineGen(x, y, dir);
 #else
-            return _cells[y * _w + x].Gen[dir] == _validGen;
+            return _cells[y * _w + x].Gen[dir] == LineGen(x, y, dir);
 #endif
         }
 
@@ -171,12 +225,13 @@ namespace JPS.Pathfinding
         public int CardinalDist(GridMap map, int x, int y, int dx, int dy, int dir)
         {
             int idx0 = y * _w + x;
+            byte lineGen = LineGen(x, y, dir);   // dir<2(E/W) → 行世代；否则(S/N) → 列世代
 #if JPS_CONCURRENT_CACHE
             // acquire 读世代戳：若看到 clean，则发布它的那次 release 写之前的 dist 写均已可见，普通读 dist 即安全。
-            if (System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[idx0].Gen, dir)) == _validGen)
+            if (System.Threading.Volatile.Read(ref Dir4Byte.Slot(ref _cells[idx0].Gen, dir)) == lineGen)
                 return _cells[idx0].Dist[dir];
 #else
-            if (_cells[idx0].Gen[dir] == _validGen)
+            if (_cells[idx0].Gen[dir] == lineGen)
                 return _cells[idx0].Dist[dir];
 #endif
 
@@ -212,9 +267,9 @@ namespace JPS.Pathfinding
                 int ci = fy * _w + fx;
                 _cells[ci].Dist.Set(dir, (short)(jumpFound ? (s - k) : -((s - 1) - k)));
 #if JPS_CONCURRENT_CACHE
-                System.Threading.Volatile.Write(ref Dir4Byte.Slot(ref _cells[ci].Gen, dir), _validGen);
+                System.Threading.Volatile.Write(ref Dir4Byte.Slot(ref _cells[ci].Gen, dir), lineGen);
 #else
-                _cells[ci].Gen.Set(dir, _validGen);
+                _cells[ci].Gen.Set(dir, lineGen);
 #endif
                 fx += dx;
                 fy += dy;

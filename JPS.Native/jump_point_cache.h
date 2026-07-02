@@ -34,16 +34,20 @@ typedef struct jps_cell_jump
 typedef struct jps_jump_point_cache
 {
     int w;
+    int h;
     int size;
     jps_cell_jump *cells;
-    uint8_t valid_gen;
+    uint8_t *row_gen;
+    uint8_t *col_gen;
+    int *row_version;
+    int *col_version;
     int map_version;
 } jps_jump_point_cache;
 
 jps_jump_point_cache *jps_jump_point_cache_create(void);
 void jps_jump_point_cache_destroy(jps_jump_point_cache *c);
 
-/* 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时 O(1) 整体置脏。 */
+/* 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时同步受影响的行/列。 */
 void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m);
 
 /*

@@ -4,8 +4,8 @@
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  *
  * 与 C# 的并发缓存模型严格一致：
- *   写者：先**普通写** dist[dir]，再 **release-store** gen[dir] = valid_gen；
- *   读者：**acquire-load** gen[dir]，若 == valid_gen 再**普通读** dist[dir]。
+ *   写者：先**普通写** dist[dir]，再 **release-store** gen[dir] = 当前行/列有效世代；
+ *   读者：**acquire-load** gen[dir]，若 == 当前行/列有效世代再**普通读** dist[dir]。
  * release/acquire 配对保证“看到某格 clean 世代戳”即可见其 dist 写入，于是多个 jps_pathfinder
  * 可在并行寻路中只读 / 惰性补写**同一份共享缓存**（前提：并行前单线程 Sync 一次、并行期间地图不变；
  * 补写值是固定地图的纯函数，重复计算结果一致）。读热路径只需半屏障(acquire)，比全屏障更省。

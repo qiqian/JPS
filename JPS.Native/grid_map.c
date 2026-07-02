@@ -66,6 +66,26 @@ static void jps__mark_padding(uint64_t *bits, int stride, int n_lines, int valid
     }
 }
 
+static void jps__bump_line_versions(jps_grid_map *m, int x, int y)
+{
+    int i;
+    for (i = y - 1; i <= y + 1; i++)
+        if ((uint32_t)i < (uint32_t)m->height)
+            m->row_version[i]++;
+    for (i = x - 1; i <= x + 1; i++)
+        if ((uint32_t)i < (uint32_t)m->width)
+            m->col_version[i]++;
+}
+
+static void jps__bump_all_line_versions(jps_grid_map *m)
+{
+    int i;
+    for (i = 0; i < m->height; i++)
+        m->row_version[i]++;
+    for (i = 0; i < m->width; i++)
+        m->col_version[i]++;
+}
+
 jps_grid_map *jps_grid_map_create(int width, int height)
 {
     jps_grid_map *m;
@@ -84,6 +104,8 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->width = width;
     m->height = height;
     m->version = 0;
+    m->row_version = NULL;
+    m->col_version = NULL;
     m->stride = jps__simd_stride(width);      /* 行排布：每行 128 位对齐 */
     m->col_stride = jps__simd_stride(height); /* 列排布：每列 128 位对齐 */
 
@@ -91,10 +113,14 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     col_bytes = (size_t)m->col_stride * width * sizeof(uint64_t);
     m->blocked = (uint64_t *)jps__aligned_alloc16(row_bytes);
     m->col_blocked = (uint64_t *)jps__aligned_alloc16(col_bytes);
-    if (m->blocked == NULL || m->col_blocked == NULL)
+    m->row_version = (int *)calloc((size_t)height, sizeof(int));
+    m->col_version = (int *)calloc((size_t)width, sizeof(int));
+    if (m->blocked == NULL || m->col_blocked == NULL || m->row_version == NULL || m->col_version == NULL)
     {
         jps__aligned_free(m->blocked);
         jps__aligned_free(m->col_blocked);
+        free(m->row_version);
+        free(m->col_version);
         free(m);
         return NULL;
     }
@@ -113,6 +139,8 @@ void jps_grid_map_destroy(jps_grid_map *m)
         return;
     jps__aligned_free(m->blocked);
     jps__aligned_free(m->col_blocked);
+    free(m->row_version);
+    free(m->col_version);
     free(m);
 }
 
@@ -142,7 +170,8 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
         m->col_blocked[cword] &= ~cmask;
     }
 
-    m->version++;   /* 阻挡变化 → 惰性跳点缓存整体失效 */
+    m->version++;
+    jps__bump_line_versions(m, x, y);
 }
 
 void jps_grid_map_clear_all(jps_grid_map *m)
@@ -152,4 +181,5 @@ void jps_grid_map_clear_all(jps_grid_map *m)
     jps__mark_padding(m->blocked, m->stride, m->height, m->width);       /* memset 抹掉了 padding，需重置 */
     jps__mark_padding(m->col_blocked, m->col_stride, m->width, m->height);
     m->version++;
+    jps__bump_all_line_versions(m);
 }
