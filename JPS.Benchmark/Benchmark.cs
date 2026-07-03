@@ -25,6 +25,8 @@ namespace JPS.Benchmark
     /// </summary>
     internal static class Benchmark
     {
+        private const int ResultHeaderRepeat = 50;
+
         static int Main(string[] args)
         {
             // 唯一模式 combo：容忍首参写成 "combo"；其余参数为 [每图随机样本数] [子目录]。
@@ -242,12 +244,6 @@ namespace JPS.Benchmark
             // 行着色：ANSI 颜色码只写真实控制台，报告文件仍写纯文本（避免转义码污染报告）。
             bool useColor = !Console.IsOutputRedirected;
             if (useColor && OperatingSystem.IsWindows()) EnableVirtualTerminal();
-            void EmitRow(string plain, string colored)
-            {
-                progress.Clear();
-                fileOut.WriteLine(plain);
-                consoleOut.WriteLine(useColor ? colored : plain);
-            }
 
             string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
@@ -284,8 +280,22 @@ namespace JPS.Benchmark
                 ? $"{"map",-30}{"size",11}{"tag",6}{"pairs",8}{"JPSexp",8}{"A*exp",8}{"cC#",9}{"cC",9}{"wC#",9}{"wC",9}{"A*us",9}{"A*/cC",8}{"A*/wC",8}"
                 : $"{"map",-30}{"size",11}{"tag",6}{"pairs",8}{"JPSexp",8}{"A*exp",8}{"cC#",9}{"wC#",9}{"A*us",9}{"A*/cC#",8}{"A*/wC#",8}";
             int rule = nativeEnabled ? 132 : 114;
-            Console.WriteLine(hdr);
-            Console.WriteLine(new string('-', rule));
+            void PrintResultHeader()
+            {
+                progress.Clear();
+                Console.WriteLine(hdr);
+                Console.WriteLine(new string('-', rule));
+            }
+            int resultRows = 0;
+            void EmitRow(string plain, string colored)
+            {
+                progress.Clear();
+                fileOut.WriteLine(plain);
+                consoleOut.WriteLine(useColor ? colored : plain);
+                if (++resultRows % ResultHeaderRepeat == 0)
+                    PrintResultHeader();
+            }
+            PrintResultHeader();
 
             WarmupJit();
 

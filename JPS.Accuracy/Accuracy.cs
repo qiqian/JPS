@@ -45,6 +45,7 @@ namespace JPS.Accuracy
 
         // 冷缓存测试：每张图最多抽测的用例数（单线程跑，抽样以控住串行开销；改动可调）。
         private const int ColdSampleCap = 64;
+        private const int ResultHeaderRepeat = 50;
 
         static int Main(string[] args)
         {
@@ -162,13 +163,19 @@ namespace JPS.Accuracy
                 + "  ⑤ 随机改图+还原致缓存失效后，冷重扫==热结果");
             Console.WriteLine("列说明：n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短  mism=C≠C#  cold=失效重扫≠热结果");
             Console.WriteLine();
-            Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}{"cold",7}");
-            Console.WriteLine(new string('-', 108));
+            void PrintResultHeader()
+            {
+                progress.Clear();
+                Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}{"cold",7}");
+                Console.WriteLine(new string('-', 108));
+            }
+            PrintResultHeader();
 
             bool allowCorner = JpsBuildInfo.CornerCutting;
 
             Stats total = default;
             var sw = Stopwatch.StartNew();
+            int resultRows = 0;
 
             int totalFiles = files.Length;
             var parOpt = new ParallelOptions { MaxDegreeOfParallelism = threadCount };
@@ -234,7 +241,11 @@ namespace JPS.Accuracy
                 }
 
                 if (scen.N > 0)
+                {
                     Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}{scen.Mism,7}{scen.Cold,7}");
+                    if (++resultRows % ResultHeaderRepeat == 0)
+                        PrintResultHeader();
+                }
 
                 total.Merge(scen);
             }
