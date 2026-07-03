@@ -218,7 +218,8 @@ jps_jump_point_cache *jps_jump_point_cache_create(void)
     c->w = 0;
     c->h = 0;
     c->size = 0;
-    c->cells = NULL;
+    c->dist = NULL;
+    c->gen = NULL;
     c->row_gen = NULL;
     c->col_gen = NULL;
     c->row_version = NULL;
@@ -231,7 +232,8 @@ void jps_jump_point_cache_destroy(jps_jump_point_cache *c)
 {
     if (c == NULL)
         return;
-    free(c->cells);
+    free(c->dist);
+    free(c->gen);
     free(c->row_gen);
     free(c->col_gen);
     free(c->row_version);
@@ -239,17 +241,15 @@ void jps_jump_point_cache_destroy(jps_jump_point_cache *c)
     free(c);
 }
 
+/* 世代回绕(到 uint8 上限 255)时把该行 E/W 两 gen 平面对应行整段清零(→0，必与复位后的 1 失配→全 dirty)。
+ * 行在每个 gen 平面内连续，两次 memset 即可（dist 无需动，靠 gen 失配即判 dirty）。 */
 static void jps__cache_invalidate_row(jps_jump_point_cache *c, int y)
 {
-    int x;
     if (c->row_gen[y] >= 255)
     {
-        for (x = 0; x < c->w; x++)
-        {
-            jps_cell_jump *cell = &c->cells[y * c->w + x];
-            cell->gen[0] = 0;
-            cell->gen[1] = 0;
-        }
+        size_t rowoff = (size_t)y * c->w;
+        memset(c->gen + (size_t)0 * c->size + rowoff, 0, (size_t)c->w);   /* dir 0 = E */
+        memset(c->gen + (size_t)1 * c->size + rowoff, 0, (size_t)c->w);   /* dir 1 = W */
         c->row_gen[y] = 1;
     }
     else
@@ -258,16 +258,19 @@ static void jps__cache_invalidate_row(jps_jump_point_cache *c, int y)
     }
 }
 
+/* 列在 gen 平面内跨步 w，非连续，逐格清零 S/N 两平面。 */
 static void jps__cache_invalidate_col(jps_jump_point_cache *c, int x)
 {
-    int y;
     if (c->col_gen[x] >= 255)
     {
+        uint8_t *g2 = c->gen + (size_t)2 * c->size;   /* dir 2 = S */
+        uint8_t *g3 = c->gen + (size_t)3 * c->size;   /* dir 3 = N */
+        int y;
         for (y = 0; y < c->h; y++)
         {
-            jps_cell_jump *cell = &c->cells[y * c->w + x];
-            cell->gen[2] = 0;
-            cell->gen[3] = 0;
+            size_t idx = (size_t)y * c->w + x;
+            g2[idx] = 0;
+            g3[idx] = 0;
         }
         c->col_gen[x] = 1;
     }
@@ -286,12 +289,14 @@ void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m)
         c->w = m->width;
         c->h = m->height;
         c->size = m->width * m->height;
-        free(c->cells);
+        free(c->dist);
+        free(c->gen);
         free(c->row_gen);
         free(c->col_gen);
         free(c->row_version);
         free(c->col_version);
-        c->cells = (jps_cell_jump *)calloc((size_t)c->size, sizeof(jps_cell_jump));
+        c->dist = (int16_t *)calloc((size_t)4 * c->size, sizeof(int16_t));   /* 4 个方向 dist 平面 */
+        c->gen = (uint8_t *)calloc((size_t)4 * c->size, sizeof(uint8_t));    /* 4 个方向 gen 平面 */
         c->row_gen = (uint8_t *)calloc((size_t)c->h, sizeof(uint8_t));
         c->col_gen = (uint8_t *)calloc((size_t)c->w, sizeof(uint8_t));
         c->row_version = (int *)malloc((size_t)c->h * sizeof(int));
@@ -327,18 +332,46 @@ void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m)
     }
 }
 
+/*
+ * 水平回写 dist：把等差数列 dist(t) = a + b*t（t=0..s-1，b=±1）写入连续地址 dst[0..s-1]。
+ * 一段连续 int16 → 用 16 位车道 SIMD 一次生成并写 8 个；尾部不足 8 个标量补齐。
+ * 只写 dist（普通写，非发布）；gen 的 release 发布由调用方另做，语义与旧逐格版一致。
+ */
+static void jps__backfill_dist_run(int16_t *dst, int s, int a, int b)
+{
+    int t = 0;
+#ifdef JPS_HAVE_SIMD
+    if (s >= 8)
+    {
+        jps_v128 vramp = b > 0 ? jps_v_setr_i16(0, 1, 2, 3, 4, 5, 6, 7)
+                               : jps_v_setr_i16(0, -1, -2, -3, -4, -5, -6, -7);
+        jps_v128 vstep = jps_v_set1_i16((int16_t)(8 * b));                  /* 每组 t 前进 8，dist 变 8*b */
+        jps_v128 vcur  = jps_v_add_i16(jps_v_set1_i16((int16_t)a), vramp);  /* [a, a+b, ..., a+7b] */
+        int groups = s & ~7;
+        for (; t < groups; t += 8)
+        {
+            jps_v_storeu_i16(dst + t, vcur);
+            vcur = jps_v_add_i16(vcur, vstep);
+        }
+    }
+#endif
+    for (; t < s; t++)
+        dst[t] = (int16_t)(a + b * t);
+}
+
 int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_map *m,
                                        int x, int y, int dx, int dy, int dir)
 {
     int idx0 = y * c->w + x;
-    int s;
+    int16_t *distp = c->dist + (size_t)dir * c->size;             /* 该方向的 dist 平面 */
+    uint8_t *genp = c->gen + (size_t)dir * c->size;               /* 该方向的 gen 平面 */
     uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];   /* E/W → 行世代；S/N → 列世代 */
+    int s, t;
     bool jump_found;
-    int fx, fy, k;
 
     /* acquire 读世代戳：若看到 clean，则发布它的那次 release 写之前的 dist 写均已可见，普通读 dist 即安全。 */
-    if (jps_gen_load_acquire(&c->cells[idx0].gen[dir]) == line_gen)
-        return c->cells[idx0].dist[dir];
+    if (jps_gen_load_acquire(&genp[idx0]) == line_gen)
+        return distp[idx0];
 
     /* 扫描：从 (x,y) 沿方向找最近跳点或墙。水平走行排布，垂直走列排布(转置) —— 两者共用 SIMD。 */
     if (dy == 0)
@@ -346,16 +379,42 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
     else
         jps__scan_line(m->col_blocked, m->col_stride, m->width, x, y, dy, &s, &jump_found);
 
-    /* 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ INT16_MAX。 */
-    fx = x; fy = y;
-    for (k = 0; k <= s - 1; k++)
+    /* 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ INT16_MAX。
+     * 先写 dist（水平段可 SIMD），再逐格 release-store gen 发布——所有 dist 写在任何 gen 发布之前，
+     * 故读者见某格 gen==line_gen 时其 dist 必已可见，acquire/release 语义与旧逐格版一致。 */
+    if (dy == 0)
     {
-        int ci = fy * c->w + fx;
-        c->cells[ci].dist[dir] = (int16_t)(jump_found ? (s - k) : -((s - 1) - k));   /* 先普通写 dist */
-        jps_gen_store_release(&c->cells[ci].gen[dir], line_gen);                      /* 再 release 发布该格 */
-        fx += dx;
-        fy += dy;
+        /* 水平：整段 run 在平面内连续。dist(k) 换算成按“升序地址位置 t”的等差 a + b*t：
+         * E(dx>0) 地址随步 k 升，t=k；W(dx<0) 地址随 k 降，升序位置 t=(s-1)-k。 */
+        int block_start, a, b;
+        if (dx > 0)
+        {
+            block_start = idx0;
+            a = jump_found ? s : -(s - 1);
+            b = jump_found ? -1 : 1;
+        }
+        else
+        {
+            block_start = idx0 - (s - 1);
+            a = jump_found ? 1 : 0;
+            b = jump_found ? 1 : -1;
+        }
+        jps__backfill_dist_run(distp + block_start, s, a, b);
+        for (t = 0; t < s; t++)
+            jps_gen_store_release(&genp[block_start + t], line_gen);
+    }
+    else
+    {
+        /* 垂直：沿列跨步 w，地址非连续 → 标量逐格回填。 */
+        int fy = y, k;
+        for (k = 0; k <= s - 1; k++)
+        {
+            size_t ci = (size_t)fy * c->w + x;
+            distp[ci] = (int16_t)(jump_found ? (s - k) : -((s - 1) - k));   /* 先普通写 dist */
+            jps_gen_store_release(&genp[ci], line_gen);                      /* 再 release 发布该格 */
+            fy += dy;
+        }
     }
 
-    return c->cells[idx0].dist[dir];   /* 本线程自己刚写的值，程序序可见，无需屏障 */
+    return jump_found ? s : -(s - 1);   /* idx0(k=0) 处的 dist；本线程刚写，直接返回 */
 }

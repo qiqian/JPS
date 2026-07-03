@@ -43,6 +43,9 @@ namespace JPS.Accuracy
         private const int MaxFailDumps = 100;
         private static int _failDumpCount;
 
+        // 冷缓存测试：每张图最多抽测的用例数（单线程跑，抽样以控住串行开销；改动可调）。
+        private const int ColdSampleCap = 64;
+
         static int Main(string[] args)
         {
             string? sub = args.Length >= 1 && !string.IsNullOrWhiteSpace(args[0]) ? args[0] : null;
@@ -155,11 +158,12 @@ namespace JPS.Accuracy
                 : $"原生库：未启用（{nativeInfo}）→ 跳过 C/C# 强一致校验（先构建 JPS.Native 的 x64 DLL）");
             Console.WriteLine();
             Console.WriteLine("校验项：① JPS整数代价==A*整数代价（最优性）  ② JPS路径合法（相邻/可走/不切角）  ③ JPS真实长度≈官方最优"
-                + (nativeEnabled ? "  ④ C版JPS路径==C#版JPS路径（强一致）" : ""));
-            Console.WriteLine("列说明：n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短  mism=C≠C#");
+                + (nativeEnabled ? "  ④ C版JPS路径==C#版JPS路径（强一致）" : "")
+                + "  ⑤ 随机改图+还原致缓存失效后，冷重扫==热结果");
+            Console.WriteLine("列说明：n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短  mism=C≠C#  cold=失效重扫≠热结果");
             Console.WriteLine();
-            Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}");
-            Console.WriteLine(new string('-', 101));
+            Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}{"cold",7}");
+            Console.WriteLine(new string('-', 108));
 
             bool allowCorner = JpsBuildInfo.CornerCutting;
 
@@ -196,6 +200,7 @@ namespace JPS.Accuracy
                     // 各线程的 NativePathfinder 共享它并行寻路；这张图测完即销毁（异常路径也销毁）。
                     NativeSystem? nsys = nativeEnabled ? new NativeSystem(loaded.map) : null;
                     var partial = new Stats[threadCount];
+                    Stats coldStats = default;
                     try
                     {
                         // 把该图用例按步长切给 threadCount 个线程**并行**验证；所有线程共享同一 JpsSystem / 原生 system
@@ -216,22 +221,28 @@ namespace JPS.Accuracy
                             }
                             finally { npf?.Dispose(); }   // 本线程原生 pathfinder 用完即销毁（异常路径也走到）
                         });
+
+                        // 冷缓存正确性（并行阶段之后**单线程**跑，改图会破坏“地图只读”前提，故不能并行）：
+                        // 抽样若干用例，每例随机改若干格再还原 → Sync 使跳点缓存受影响行/列失效，
+                        // 冷重扫结果须与热参考逐格一致（复用该图共享 system，用完即随本图销毁）。
+                        coldStats = ColdCachePass(loaded.map, loaded.sys, nsys, mapEntries, failDir, name);
                     }
                     finally { nsys?.Dispose(); }   // 这张图测完即销毁原生 system（用完即销毁，不缓存）
 
                     for (int t = 0; t < threadCount; t++) scen.Merge(partial[t]);
+                    scen.Merge(coldStats);
                 }
 
                 if (scen.N > 0)
-                    Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}{scen.Mism,7}");
+                    Emit($"{Trunc(name, 44),-44}{scen.N,8}{scen.Pass,8}{scen.JFail,7}{scen.Subopt,8}{scen.Inval,7}{scen.RefL,7}{scen.RefS,7}{scen.Mism,7}{scen.Cold,7}");
 
                 total.Merge(scen);
             }
 
             sw.Stop();
             progress.Clear();
-            Console.WriteLine(new string('-', 101));
-            Console.WriteLine($"{"合计",-44}{total.N,8}{total.Pass,8}{total.JFail,7}{total.Subopt,8}{total.Inval,7}{total.RefL,7}{total.RefS,7}{total.Mism,7}");
+            Console.WriteLine(new string('-', 108));
+            Console.WriteLine($"{"合计",-44}{total.N,8}{total.Pass,8}{total.JFail,7}{total.Subopt,8}{total.Inval,7}{total.RefL,7}{total.RefS,7}{total.Mism,7}{total.Cold,7}");
             Console.WriteLine();
             long fails = total.JFail + total.Subopt + total.Inval + total.RefL + total.RefS;
             Console.WriteLine($"用例 {total.N}（平凡 {total.Trivial}，无效起终点 {total.BadCell} 已跳过），用时 {sw.Elapsed.TotalSeconds:F1}s");
@@ -243,8 +254,12 @@ namespace JPS.Accuracy
                 Console.WriteLine(total.Mism == 0
                     ? $"C/C# 强一致：全部 {total.N} 例 C 版 JPS 路径与 C# 版逐格一致，✓ 通过"
                     : $"C/C# 强一致：⚠ {total.Mism} 例 C 版与 C# 版 JPS 结果不一致（mism）");
+            if (total.ColdN > 0)
+                Console.WriteLine(total.Cold == 0
+                    ? $"冷缓存正确性：抽测 {total.ColdN} 例，随机改图+还原致缓存失效后冷重扫与热结果逐格一致，✓ 通过"
+                    : $"冷缓存正确性：⚠ {total.Cold} 例失效重扫结果与热结果不一致（cold）");
 
-            long allFails = fails + total.Mism;   // 退出码同时反映正确性失败与 C/C# 不一致
+            long allFails = fails + total.Mism + total.Cold;   // 退出码同时反映正确性失败、C/C# 不一致与冷缓存失效 bug
             if (allFails > 0)
             {
                 int saved = Math.Min(_failDumpCount, MaxFailDumps);
@@ -267,6 +282,7 @@ namespace JPS.Accuracy
         {
             public long N, Pass, JFail, Subopt, Inval, RefL, RefS, Trivial, BadCell, Exact, Artifact;
             public long Mism;        // C 版 JPS 与 C# 版 JPS 结果不一致的用例数（强一致校验）
+            public long Cold, ColdN;  // 冷缓存：失效后寻路≠热结果的用例数 Cold（失败）/ 已抽测数 ColdN
             public double MaxDevOk;   // 通过项里的最大 |真实长度-官方|（应为舍入量级）
             public double WorstBad;   // 失败项里的最大 |偏差|
 
@@ -274,7 +290,7 @@ namespace JPS.Accuracy
             {
                 N += o.N; Pass += o.Pass; JFail += o.JFail; Subopt += o.Subopt; Inval += o.Inval;
                 RefL += o.RefL; RefS += o.RefS; Trivial += o.Trivial; BadCell += o.BadCell;
-                Exact += o.Exact; Artifact += o.Artifact; Mism += o.Mism;
+                Exact += o.Exact; Artifact += o.Artifact; Mism += o.Mism; Cold += o.Cold; ColdN += o.ColdN;
                 if (o.MaxDevOk > MaxDevOk) MaxDevOk = o.MaxDevOk;
                 if (o.WorstBad > WorstBad) WorstBad = o.WorstBad;
             }
@@ -342,6 +358,81 @@ namespace JPS.Accuracy
             if (ad <= 1e-6) st.Exact++; else st.Artifact++;
             st.MaxDevOk = Math.Max(st.MaxDevOk, ad);
             st.Pass++;
+        }
+
+        // ---------------- 冷缓存正确性（单线程；改图会破坏“地图只读”，不能与并行阶段同跑）----------------
+        //
+        // 对抽样用例：随机改若干格阻挡再**还原**（地图净不变，但 Version/行列版本跳变）→ Sync 令跳点缓存
+        // 受影响行/列失效 → 冷重扫。重扫结果必须与“热参考”逐格一致（热参考即并行阶段已对过 A*/官方最优的那次搜索，
+        // 同图同询问确定性相同）。这样能抓住失效/重扫机制自身的 bug（例如重扫回写越界污染邻格、行列失效漏标等），
+        // 而这些在“缓存一直热”的主校验里不会触发。C# 与 C 两版各自比对自己的热参考。
+        private static Stats ColdCachePass(
+            GridMap map, JpsSystem sys, NativeSystem? nsys, List<Entry> entries, string failDir, string scenName)
+        {
+            Stats st = default;
+            var jps = new JpsPathfinder();
+            NativePathfinder? npf = nsys != null ? new NativePathfinder() : null;
+            var rng = new Random(0x00C01D + entries.Count);   // 与图规模挂钩、可复现
+            var seen = new int[map.Width * map.Height];        // 去重戳：seen[id]==stamp 表示本次已选过该格
+            int stamp = 0;
+            var edits = new List<(int x, int y, bool old)>();
+            // 每次改动的格数：随机撒到 ~W+H 个，令多数行/列被触及（冷重扫覆盖搜索用到的线）。
+            int editCount = Math.Min(map.Width * map.Height - 2, map.Width + map.Height);
+
+            try
+            {
+                int step = Math.Max(1, entries.Count / ColdSampleCap);
+                for (int i = 0; i < entries.Count; i += step)
+                {
+                    var e = entries[i];
+                    var s = (e.Sx, e.Sy);
+                    var g = (e.Gx, e.Gy);
+                    if (!InBounds(map, s) || !InBounds(map, g) ||
+                        !map.IsWalkable(s.Item1, s.Item2) || !map.IsWalkable(g.Item1, g.Item2) || s == g)
+                        continue;
+
+                    // 热参考（当前缓存；等价于并行阶段已验证过的结果，同图同询问确定性一致）。
+                    var warm = jps.FindPath(sys, s, g);
+                    (bool ok, List<(int X, int Y)>? path) nwarm = (false, null);
+                    if (npf != null) nwarm = npf.Find(nsys!, e.Sx, e.Sy, e.Gx, e.Gy);
+
+                    // 选 editCount 个互异格（避开起终点），先改到相反态、再还原 → 地图净不变，缓存受影响行/列失效。
+                    edits.Clear();
+                    stamp++;
+                    int attempts = 0, maxAttempts = editCount * 8 + 64;
+                    while (edits.Count < editCount && attempts++ < maxAttempts)
+                    {
+                        int x = rng.Next(map.Width), y = rng.Next(map.Height);
+                        if ((x == s.Item1 && y == s.Item2) || (x == g.Item1 && y == g.Item2)) continue;
+                        int id = y * map.Width + x;
+                        if (seen[id] == stamp) continue;
+                        seen[id] = stamp;
+                        edits.Add((x, y, map.IsBlocked(x, y)));
+                    }
+                    foreach (var ed in edits) { map.SetBlocked(ed.x, ed.y, !ed.old); nsys?.SetBlocked(ed.x, ed.y, !ed.old); }
+                    foreach (var ed in edits) { map.SetBlocked(ed.x, ed.y, ed.old); nsys?.SetBlocked(ed.x, ed.y, ed.old); }
+                    sys.Sync();
+                    nsys?.Sync();
+
+                    st.ColdN++;
+
+                    // C# 冷重扫 == C# 热参考（逐格）
+                    var cold = jps.FindPath(sys, s, g);
+                    if (cold.Success != warm.Success || (warm.Success && !PathEqual(cold.Path, warm.Path)))
+                    { st.Cold++; SaveFailureJson(map, s, g, "cold-cs", failDir, scenName); }
+
+                    // C 冷重扫 == C 热参考（逐格）——直接验证原生 SoA/SIMD 回写在失效重扫下是否正确
+                    if (npf != null)
+                    {
+                        var (cok, cpath) = npf.Find(nsys!, e.Sx, e.Sy, e.Gx, e.Gy);
+                        if (cok != nwarm.ok || (nwarm.ok && !PathEqual(cpath, nwarm.path!)))
+                        { st.Cold++; SaveFailureJson(map, s, g, "cold-c", failDir, scenName); }
+                    }
+                }
+            }
+            finally { npf?.Dispose(); }
+
+            return st;
         }
 
         // 把失败用例的地图（位图→阻挡点列表）+ 起终点存成 Playground 可载入的 MapData JSON。

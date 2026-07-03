@@ -68,6 +68,17 @@ static inline jps_v128 jps_v_shr1(jps_v128 v, uint64_t cin_top)
     return jps_v_or(sh, jps_v_set2(carry << 63, (cin_top & 1ULL) << 63));
 }
 
+/* ---- 16 位车道运算（供跳点缓存 dist 平面的 SIMD 回写：一次生成/写 8 个 int16 距离） ---- */
+static inline jps_v128 jps_v_set1_i16(int16_t v) { return _mm_set1_epi16(v); }
+static inline jps_v128 jps_v_setr_i16(int16_t a, int16_t b, int16_t c, int16_t d,
+                                      int16_t e, int16_t f, int16_t g, int16_t h)
+{
+    return _mm_setr_epi16(a, b, c, d, e, f, g, h);
+}
+static inline jps_v128 jps_v_add_i16(jps_v128 a, jps_v128 b) { return _mm_add_epi16(a, b); }
+/* 非对齐存 8×int16（回填起点列任意，不能要求 16 字节对齐）。 */
+static inline void jps_v_storeu_i16(int16_t *p, jps_v128 v) { _mm_storeu_si128((__m128i *)p, v); }
+
 #elif defined(__aarch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
 
 #  define JPS_HAVE_SIMD 1
@@ -112,6 +123,20 @@ static inline jps_v128 jps_v_shr1(jps_v128 v, uint64_t cin_top)
     uint64_t carry = jps_v_lane(v, 1) & 1ULL;
     return jps_v_or(sh, jps_v_set2(carry << 63, (cin_top & 1ULL) << 63));
 }
+
+/* ---- 16 位车道运算（供跳点缓存 dist 平面的 SIMD 回写） ---- */
+static inline jps_v128 jps_v_set1_i16(int16_t v) { return vreinterpretq_u64_s16(vdupq_n_s16(v)); }
+static inline jps_v128 jps_v_setr_i16(int16_t a, int16_t b, int16_t c, int16_t d,
+                                      int16_t e, int16_t f, int16_t g, int16_t h)
+{
+    int16_t tmp[8]; tmp[0]=a; tmp[1]=b; tmp[2]=c; tmp[3]=d; tmp[4]=e; tmp[5]=f; tmp[6]=g; tmp[7]=h;
+    return vreinterpretq_u64_s16(vld1q_s16(tmp));
+}
+static inline jps_v128 jps_v_add_i16(jps_v128 a, jps_v128 b)
+{
+    return vreinterpretq_u64_s16(vaddq_s16(vreinterpretq_s16_u64(a), vreinterpretq_s16_u64(b)));
+}
+static inline void jps_v_storeu_i16(int16_t *p, jps_v128 v) { vst1q_s16(p, vreinterpretq_s16_u64(v)); }
 
 #else
 #  error "JPS.Native requires a 128-bit SIMD backend (SSE2 or NEON)."

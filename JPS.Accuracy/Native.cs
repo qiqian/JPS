@@ -78,6 +78,8 @@ namespace JPS.Accuracy
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked_buffer(IntPtr s, byte[] cells, int count);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void jps_system_set_blocked(IntPtr s, int x, int y, int blocked);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_sync(IntPtr s);
 
         // ---- jps_pathfinder：寻路 / 取结果 ----
@@ -112,6 +114,13 @@ namespace JPS.Accuracy
             NativeJps.jps_system_set_blocked_buffer(Handle, cells, cells.Length);
             NativeJps.jps_system_sync(Handle);              // 灌入阻挡后同步缓存（并行寻路前由单线程做）
         }
+
+        /// <summary>改单格阻挡（供冷缓存测试改图/还原用；改后需 Sync 才生效）。仅在单线程阶段调用。</summary>
+        public void SetBlocked(int x, int y, bool blocked) =>
+            NativeJps.jps_system_set_blocked(Handle, x, y, blocked ? 1 : 0);
+
+        /// <summary>把缓存同步到当前地图（改图后调用一次，使受影响行/列失效）。</summary>
+        public void Sync() => NativeJps.jps_system_sync(Handle);
 
         public void Dispose()
         {

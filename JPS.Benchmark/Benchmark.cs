@@ -490,17 +490,26 @@ namespace JPS.Benchmark
                         string cnCol = cnus > aus ? Red(cnStr) : cnus < cjus ? Green(cnStr) : cnus > cjus ? Red(cnStr) : cnStr;
                         string wjCol = wjus > aus ? Red(wjStr) : wjStr;
                         string wnCol = wnus > aus ? Red(wnStr) : wnus < wjus ? Green(wnStr) : wnus > wjus ? Red(wnStr) : wnStr;
-                        string tail = $"{aus,9:F2}{aus / Math.Max(0.001, cnus),8:F1}{aus / Math.Max(0.001, wnus),8:F1}";
-                        EmitRow(hd + cjStr + cnStr + wjStr + wnStr + tail,   // 顺序：cC# cC wC# wC
-                                hd + cjCol + cnCol + wjCol + wnCol + tail);
+                        double rcn = aus / Math.Max(0.001, cnus), rwn = aus / Math.Max(0.001, wnus);
+                        string ausStr = $"{aus,9:F2}", rcnStr = $"{rcn,8:F1}", rwnStr = $"{rwn,8:F1}";
+                        // A*/cC、A*/wC < 1（C 版 JPS 比 A* 还慢）标红
+                        string rcnCol = rcn < 1 ? Red(rcnStr) : rcnStr;
+                        string rwnCol = rwn < 1 ? Red(rwnStr) : rwnStr;
+                        EmitRow(hd + cjStr + cnStr + wjStr + wnStr + ausStr + rcnStr + rwnStr,   // 顺序：cC# cC wC# wC
+                                hd + cjCol + cnCol + wjCol + wnCol + ausStr + rcnCol + rwnCol);
                     }
                     else
                     {
                         string cjStr = $"{cjus,9:F2}", wjStr = $"{wjus,9:F2}";
                         string cjCol = cjus > aus ? Red(cjStr) : cjStr;
                         string wjCol = wjus > aus ? Red(wjStr) : wjStr;
-                        string tail = $"{aus,9:F2}{aus / Math.Max(0.001, cjus),8:F1}{aus / Math.Max(0.001, wjus),8:F1}";
-                        EmitRow(hd + cjStr + wjStr + tail, hd + cjCol + wjCol + tail);
+                        double rcj = aus / Math.Max(0.001, cjus), rwj = aus / Math.Max(0.001, wjus);
+                        string ausStr = $"{aus,9:F2}", rcjStr = $"{rcj,8:F1}", rwjStr = $"{rwj,8:F1}";
+                        // A*/cC#、A*/wC# < 1（C# 版 JPS 比 A* 还慢）标红
+                        string rcjCol = rcj < 1 ? Red(rcjStr) : rcjStr;
+                        string rwjCol = rwj < 1 ? Red(rwjStr) : rwjStr;
+                        EmitRow(hd + cjStr + wjStr + ausStr + rcjStr + rwjStr,
+                                hd + cjCol + wjCol + ausStr + rcjCol + rwjCol);
                     }
                     return (cj, wj, cn, wn, a, n);
                 }
