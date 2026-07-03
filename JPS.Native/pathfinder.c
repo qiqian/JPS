@@ -58,6 +58,9 @@ struct jps_pathfinder
 
     jps_jump_point_cache *cache;   /* 当前查询绑定的共享跳点缓存 */
     jps_path_result result;        /* 最近一次寻路结果（供 copy/count 访问器读取） */
+
+    int *rebuild_nodes;            /* 路径重建用父链节点栈，跨查询复用，避免每次 malloc/free */
+    int rebuild_nodes_capacity;
 };
 
 /* ---------------- PathResult（内部） ---------------- */
@@ -115,6 +118,8 @@ jps_pathfinder *jps_pathfinder_create(void)
     jps_min_heap_init(&pf->open, 64);
     pf->cache = NULL;
     jps__result_init(&pf->result);
+    pf->rebuild_nodes = NULL;
+    pf->rebuild_nodes_capacity = 0;
     return pf;
 }
 
@@ -126,6 +131,7 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
     free(pf->parent_dir);
     free(pf->parent_steps);
     free(pf->mark);
+    free(pf->rebuild_nodes);
     jps_min_heap_free(&pf->open);
     jps__result_free(&pf->result);
     free(pf);
@@ -373,21 +379,34 @@ static void jps__append_segment(jps_path_result *r, int fx, int fy, int tx, int 
     }
 }
 
+static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
+{
+    int n;
+    if (count <= pf->rebuild_nodes_capacity)
+        return;
+
+    n = pf->rebuild_nodes_capacity < 16 ? 16 : pf->rebuild_nodes_capacity * 2;
+    while (n < count)
+        n *= 2;
+    pf->rebuild_nodes = (int *)realloc(pf->rebuild_nodes, (size_t)n * sizeof(int));
+    pf->rebuild_nodes_capacity = n;
+}
+
 static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id, jps_path_result *r)
 {
     /* 先沿父链收集跳点节点（goal → start），再反转。 */
-    int *nodes = NULL;
-    int nodes_count = 0, nodes_cap = 0;
+    int *nodes = pf->rebuild_nodes;
+    int nodes_count = 0;
     int current = goal_id;
     int i;
 
     /* 收集 */
     for (;;)
     {
-        if (nodes_count == nodes_cap)
+        if (nodes_count == pf->rebuild_nodes_capacity)
         {
-            nodes_cap = nodes_cap < 16 ? 16 : nodes_cap * 2;
-            nodes = (int *)realloc(nodes, (size_t)nodes_cap * sizeof(int));
+            jps__ensure_rebuild_nodes(pf, nodes_count + 1);
+            nodes = pf->rebuild_nodes;
         }
         nodes[nodes_count++] = current;
 
@@ -417,7 +436,6 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
     if (nodes_count == 1)
     {
         jps__path_push(r, goal_id % pf->w, goal_id / pf->w);
-        free(nodes);
         return;
     }
 
@@ -427,8 +445,6 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
         int to_id = nodes[i + 1];
         jps__append_segment(r, from_id % pf->w, from_id / pf->w, to_id % pf->w, to_id / pf->w);
     }
-
-    free(nodes);
 }
 
 /* ---------------- 入口 ---------------- */
