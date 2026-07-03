@@ -28,6 +28,23 @@ extern "C" {
  *
  * 并发模型不变：写者先普通写 dist、再 release-store gen 发布；读者 acquire-load gen，命中再普通读 dist。
  * 单线程 Sync 后多个 jps_pathfinder 可共享同一缓存并行只读/惰性补写（补写值是固定地图的纯函数）。
+ *
+ * ---- 行/列世代失效机制（与 jps_pathfinder 的查询纪元 epoch/mark 是**两套独立机制**）----
+ * 这套世代随「地图改动」推进、跨查询存活，判定缓存条目是否失效；
+ * pathfinder 那套随「每次查询」推进、判定节点访问状态（见 pathfinder.c）。二者互不作用。
+ *
+ * 三层结构与不变量：
+ *   · map 的 row_version/col_version（int）：set_blocked(x,y) 时 bump 行 y±1、列 x±1——
+ *     单格变化只影响这些线上的水平/垂直扫描结果；
+ *   · 本结构的 row_version/col_version 镜像上者，Sync 时逐线比对，不等 → bump 该线的
+ *     row_gen/col_gen（有效世代）；初始化为 -1 哨兵（≠ 地图侧初始 0），保证首次 Sync
+ *     把每条线都 bump 到 ≥1；
+ *   · cell 侧 gen 平面（uint8）：某格某方向 clean ⇔ gen[dir*size+idx] == 对应线的有效世代。
+ *
+ * 关键不变量：**cell gen 的 0 是保留值（恒 dirty），line 有效世代只在 1..255 循环**。
+ *   回绕（line gen 到 255 再失效）时把该线两个方向的 gen 平面 memset 为 0、line gen 复位为 1；
+ *   一个循环周期内 cell 只会写入“当时的 line gen”(1..255)，而上个周期的同值已被 memset 清 0，
+ *   故不存在跨周期的 stale-clean 别名。回绕代价 = 单线 memset，罕见且便宜。
  */
 typedef struct jps_jump_point_cache
 {
@@ -35,12 +52,12 @@ typedef struct jps_jump_point_cache
     int h;
     int size;
     int16_t *dist;        /* 4 个方向平面拼接：dist[dir*size + idx] */
-    uint8_t *gen;         /* 4 个方向平面拼接：gen[dir*size + idx] */
-    uint8_t *row_gen;     /* 每行 E/W 有效世代（dir 0/1） */
-    uint8_t *col_gen;     /* 每列 S/N 有效世代（dir 2/3） */
-    int *row_version;
-    int *col_version;
-    int map_version;
+    uint8_t *gen;         /* 4 个方向平面拼接：gen[dir*size + idx]；0 = 恒 dirty（保留值） */
+    uint8_t *row_gen;     /* 每行 E/W 有效世代（dir 0/1），1..255 循环 */
+    uint8_t *col_gen;     /* 每列 S/N 有效世代（dir 2/3），1..255 循环 */
+    int *row_version;     /* 已同步的地图行版本（-1 哨兵 → 首次 Sync 全失效） */
+    int *col_version;     /* 已同步的地图列版本（同上） */
+    int map_version;      /* 已同步的地图总版本（快速跳过无变化的 Sync） */
 } jps_jump_point_cache;
 
 jps_jump_point_cache *jps_jump_point_cache_create(void);

@@ -6,7 +6,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <limits.h>
 #include "pathfinder.h"
 #include "smoother.h"
 #include "min_heap.h"
@@ -44,15 +43,50 @@ typedef struct
     int expanded_nodes;
 } jps_path_result;
 
+/*
+ * 逐节点搜索状态：按**访问频率**拆存（SoA），不按节点合并（AoS）——
+ * mark 是被高频单独访问的（堆过期检查/邻居 closed 检查只碰它），保持独立密集数组：
+ * uint16 一条 cache line 装 32 个节点的 mark；与冷字段合并会把最热数组稀释 3–4 倍（实测回退）。
+ *
+ * g 与 parent_dir 打包进同一个 uint64（g_dir：低 56 位 = g，高 8 位 = dir）：
+ *   · 范围：迷宫最优路径可途经 ~W×H 格，g 上限 ~1.5e12 < 2^41 ≪ 2^56，56 位绰绰有余；
+ *   · 需要 dir 的两条路径（展开读 dir+g、relax 写 dir+g）本来就要摸 g 的 line，
+ *     dir 塞进 g 的高 8 位等于免费搭车——独立 dir 数组整个消失；
+ *   · 哨兵：无父存 0xFF，(int8_t)(g_dir>>56) 读出即 -1，parent_dir<0 的判断照旧成立；
+ *   · g_dir 自然 8 对齐、8 节点/line，无跨线、无非对齐访问。
+ */
+#define JPS__G_MASK (~0ULL >> 8)   /* g_dir 的低 56 位 */
+
+#define JPS__NO_DIR ((uint8_t)0xFFu)   /* parent_dir 哨兵：无父（读出为 -1） */
+
+static inline int64_t jps__gd_g(uint64_t gd) { return (int64_t)(gd & JPS__G_MASK); }
+
+static inline int8_t jps__gd_dir(uint64_t gd) { return (int8_t)(gd >> 56); }
+
+static inline uint64_t jps__pack_gdir(int64_t g, uint8_t dir)
+{
+    return ((uint64_t)g) | ((uint64_t)dir << 56);
+}
+
 struct jps_pathfinder
 {
     /* ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ---- */
     int w, h, size;
-    int64_t *g;          /* 各节点已知最短代价 g */
-    int8_t *parent_dir;  /* 到达该节点的方向索引（剪枝用 + 回溯反推父节点） */
-    int16_t *parent_steps;/* 到达该节点的跳跃步数；父节点 = 当前 − dir×steps */
-    int32_t *mark;       /* 访问状态：== 2·gen → open，== 2·gen+1 → closed */
-    int gen;
+    uint64_t *g_dir;     /* 每节点：低 56 位 g + 高 8 位到达方向（见上方布局说明） */
+    uint16_t *steps;     /* 到达该节点的跳跃步数；父节点 = 当前 − dir×steps */
+    /*
+     * 查询纪元（epoch）标记法——免清零地跨查询复用 mark 数组：
+     *   mark == 2·epoch → 本次查询已入 open；== 2·epoch+1 → 已 closed；< 2·epoch → 未访问。
+     *   epoch 每次 find_path 自增；mark 为 uint16 → 需 2·epoch+1 ≤ 65535，
+     *   故 epoch 在 1..32767 循环，回绕时 memset 整个 mark（每 ~3.3 万次查询一次，摊薄可忽略）。
+     *   0 是保留值：epoch 从 1 起、mark 写入值 ∈ 2..65535，mark==0（新 calloc/回绕后）恒为未访问。
+     *
+     * ⚠️ 与跳点缓存的行/列世代（jump_point_cache.h 的 row_gen/col_gen/gen 平面）是**两套独立机制**：
+     *   那套随「地图改动」推进、跨查询存活，判定缓存条目失效；
+     *   这套随「每次查询」推进、只属于本 pathfinder，判定节点访问状态。二者互不作用。
+     */
+    uint16_t *mark;      /* 访问状态（独立密集数组，32 节点/cache line） */
+    int epoch;           /* 查询纪元，1..32767 循环（见上） */
     jps_min_heap open;
     int dir_buf[JPS_DIR_COUNT];
 
@@ -110,11 +144,10 @@ jps_pathfinder *jps_pathfinder_create(void)
     if (pf == NULL)
         return NULL;
     pf->w = pf->h = pf->size = 0;
-    pf->g = NULL;
-    pf->parent_dir = NULL;
-    pf->parent_steps = NULL;
+    pf->g_dir = NULL;
+    pf->steps = NULL;
     pf->mark = NULL;
-    pf->gen = 0;
+    pf->epoch = 0;
     jps_min_heap_init(&pf->open, 64);
     pf->cache = NULL;
     jps__result_init(&pf->result);
@@ -127,9 +160,8 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
 {
     if (pf == NULL)
         return;
-    free(pf->g);
-    free(pf->parent_dir);
-    free(pf->parent_steps);
+    free(pf->g_dir);
+    free(pf->steps);
     free(pf->mark);
     free(pf->rebuild_nodes);
     jps_min_heap_free(&pf->open);
@@ -145,24 +177,25 @@ static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
     pf->w = m->width;
     pf->h = m->height;
     pf->size = pf->w * pf->h;
-    free(pf->g);
-    free(pf->parent_dir);
-    free(pf->parent_steps);
+    free(pf->g_dir);
+    free(pf->steps);
     free(pf->mark);
-    pf->g = (int64_t *)malloc((size_t)pf->size * sizeof(int64_t));
-    pf->parent_dir = (int8_t *)malloc((size_t)pf->size * sizeof(int8_t));
-    pf->parent_steps = (int16_t *)malloc((size_t)pf->size * sizeof(int16_t));
-    pf->mark = (int32_t *)calloc((size_t)pf->size, sizeof(int32_t));
-    pf->gen = 0;
+    pf->g_dir = (uint64_t *)malloc((size_t)pf->size * sizeof(uint64_t));
+    pf->steps = (uint16_t *)malloc((size_t)pf->size * sizeof(uint16_t));
+    /* mark 必须清零（calloc），使纪元标记方案（mark < 2·epoch 即未访问）对新缓冲成立；
+     * g_dir/steps 仅在本纪元 mark 命中后才被读取，无需清零。 */
+    pf->mark = (uint16_t *)calloc((size_t)pf->size, sizeof(uint16_t));
+    pf->epoch = 0;
 }
 
-static void jps__next_generation(jps_pathfinder *pf)
+static void jps__next_epoch(jps_pathfinder *pf)
 {
-    pf->gen++;
-    if (pf->gen <= (INT_MAX / 2) - 1)
+    pf->epoch++;
+    if (pf->epoch <= 32767)   /* mark 为 uint16：需 2·epoch+1 ≤ 65535 */
         return;
-    memset(pf->mark, 0, (size_t)pf->size * sizeof(int32_t));
-    pf->gen = 1;
+    /* 纪元回绕：清零 mark 即可——g_dir/steps 仅在本纪元 mark 命中后才被读取。 */
+    memset(pf->mark, 0, (size_t)pf->size * sizeof(uint16_t));
+    pf->epoch = 1;
 }
 
 static int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }
@@ -414,9 +447,10 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
             break;
 
         {
-            int dx = jps_dir_dx[pf->parent_dir[current]];
-            int dy = jps_dir_dy[pf->parent_dir[current]];
-            int steps = pf->parent_steps[current];
+            int pdir = jps__gd_dir(pf->g_dir[current]);   /* 非起点必有父，不会是 -1 */
+            int dx = jps_dir_dx[pdir];
+            int dy = jps_dir_dy[pdir];
+            int steps = pf->steps[current];
             int cx = current % pf->w, cy = current / pf->w;
             current = (cy - dy * steps) * pf->w + (cx - dx * steps);
         }
@@ -474,28 +508,31 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
         return JPS_ERR_BLOCKED;
 
     jps__ensure_buffers(pf, map);
-    jps__next_generation(pf);   /* 缓存同步由 jps_system_sync 负责（调用方在寻路前完成） */
+    jps__next_epoch(pf);   /* 缓存同步由 jps_system_sync 负责（调用方在寻路前完成） */
 
-    open_mark = pf->gen * 2;        /* 本代“已生成/在 open”标记 */
-    closed_mark = open_mark + 1;    /* 本代“已展开/closed”标记 */
+    open_mark = pf->epoch * 2;      /* 本纪元“已生成/在 open”标记 */
+    closed_mark = open_mark + 1;    /* 本纪元“已展开/closed”标记 */
 
     start_id = jps__id(pf, sx, sy);
     goal_id = jps__id(pf, gx, gy);
 
     jps_min_heap_clear(&pf->open);
-    pf->g[start_id] = 0;
-    pf->mark[start_id] = open_mark;
-    pf->parent_dir[start_id] = -1;   /* 起点无来向 */
+    pf->g_dir[start_id] = jps__pack_gdir(0, JPS__NO_DIR);   /* g=0，起点无来向 */
+    pf->mark[start_id] = (uint16_t)open_mark;
     jps_min_heap_enqueue(&pf->open, start_id, jps_octile_heuristic(sx, sy, gx, gy));
 
     while (jps_min_heap_try_dequeue(&pf->open, &current, &prio))
     {
+        uint64_t cur_gd;
+        int64_t cur_g;
         int cx, cy, dir_count, i;
 
         if (pf->mark[current] == closed_mark)
             continue;
 
-        pf->mark[current] = closed_mark;
+        pf->mark[current] = (uint16_t)closed_mark;
+        cur_gd = pf->g_dir[current];   /* 一次 load 同取 g 与来向；已 closed，g 不再变 */
+        cur_g = jps__gd_g(cur_gd);
         expanded_count++;
 
         cx = current % pf->w;
@@ -509,7 +546,7 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             return out->path_count;
         }
 
-        dir_count = jps__fill_directions(pf, map, cx, cy, pf->parent_dir[current]);
+        dir_count = jps__fill_directions(pf, map, cx, cy, jps__gd_dir(cur_gd));
 
         for (i = 0; i < dir_count; i++)
         {
@@ -521,7 +558,7 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
                 ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, gx, gy)
                 : jps__cardinal_jump(pf, map, cx, cy, dx, dy, idx, gx, gy);
 
-            int nb_id;
+            int nb_id, nb_mark;
             int64_t move_cost, tentative;
             bool first_seen;
 
@@ -529,20 +566,21 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
                 continue;
 
             nb_id = jps__id(pf, jump.x, jump.y);
-            if (pf->mark[nb_id] == closed_mark)
+            nb_mark = pf->mark[nb_id];   /* 读一次，closed 判定与 first_seen 共用 */
+            if (nb_mark == closed_mark)
                 continue;
 
             move_cost = (int64_t)jump.steps * (diagonal ? JPS_DIAGONAL_COST : JPS_CARDINAL_COST);
-            tentative = pf->g[current] + move_cost;
+            tentative = cur_g + move_cost;
 
-            first_seen = pf->mark[nb_id] < open_mark;
-            if (!first_seen && tentative >= pf->g[nb_id])
+            first_seen = nb_mark < open_mark;
+            if (!first_seen && tentative >= jps__gd_g(pf->g_dir[nb_id]))
                 continue;
 
-            pf->g[nb_id] = tentative;
-            pf->mark[nb_id] = open_mark;
-            pf->parent_dir[nb_id] = (int8_t)idx;
-            pf->parent_steps[nb_id] = (int16_t)jump.steps;
+            /* g 与 dir 同字：一条 8 字节 store 同时写入两者。 */
+            pf->g_dir[nb_id] = jps__pack_gdir(tentative, (uint8_t)idx);
+            pf->mark[nb_id] = (uint16_t)open_mark;
+            pf->steps[nb_id] = (uint16_t)jump.steps;
 
             jps_min_heap_enqueue(&pf->open, nb_id,
                                  tentative + jps_octile_heuristic(jump.x, jump.y, gx, gy));
