@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "grid_map.h"
+#include "jps_atomic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,22 @@ void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m);
  */
 int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_map *m,
                                        int x, int y, int dx, int dy, int dir);
+
+/*
+ * 热路内联快探：dir 平面上第 idx 格若 clean（gen==line_gen）则 *out 置 dist 并返回 true；
+ * dirty 返回 false（调用方走完整慢路 cardinal_dist：扫描+回填）。
+ * distp/genp 为该方向平面基址（c->dist/gen + dir*size）、line_gen 为该格所在行/列的有效世代，
+ * 均由调用方在热循环外解出——省去每次探测的函数调用与基址/世代重复解算。
+ * 内存序与完整版一致：acquire 读 gen，命中再普通读 dist（见 jps_atomic.h 的发布协议）。
+ */
+static inline bool jps_jump_probe(const int16_t *distp, const uint8_t *genp,
+                                  int idx, uint8_t line_gen, int *out)
+{
+    if (jps_gen_load_acquire(&genp[idx]) != line_gen)
+        return false;
+    *out = distp[idx];
+    return true;
+}
 
 #ifdef __cplusplus
 }
