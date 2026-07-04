@@ -39,6 +39,8 @@ public sealed class GridControl : ScrollableControl
         public int TargetY;
         public readonly List<(int X, int Y)> Path = new();
         public int PathIndex;
+        public readonly List<System.Numerics.Vector2> SmoothPath = new();
+        public int SmoothPathIndex;
 
         public DynamicMonster(int x, int y, int targetX, int targetY)
         {
@@ -78,7 +80,12 @@ public sealed class GridControl : ScrollableControl
     }
 
     private readonly record struct DynamicMonsterSnapshot(int Index, int X, int Y, int TargetX, int TargetY);
-    private readonly record struct DynamicPlan(int Index, bool Success, List<(int X, int Y)> Path, SearchOverlay Overlay);
+    private readonly record struct DynamicPlan(
+        int Index,
+        bool Success,
+        List<(int X, int Y)> Path,
+        List<System.Numerics.Vector2> SmoothPath,
+        SearchOverlay Overlay);
 
     private int _cellSize;               // 当前格像素尺寸
     private readonly int _baseCellSize;  // 沙盒模式的默认格尺寸
@@ -575,6 +582,9 @@ public sealed class GridControl : ScrollableControl
             monster.Path.Clear();
             monster.Path.AddRange(plan.Path);
             monster.PathIndex = 0;
+            monster.SmoothPath.Clear();
+            monster.SmoothPath.AddRange(plan.SmoothPath);
+            monster.SmoothPathIndex = 0;
         }
 
         if (failedPlans > 0)
@@ -622,10 +632,15 @@ public sealed class GridControl : ScrollableControl
 
         // 小怪跟随**平滑后**的路线：把视线拉直的折线栅格化成 8 连通逐格序列。
         // 段已通过 LOS，故栅格化经过的每格都可走且不斜穿角，可安全逐格移动。
+        var smoothPath = result.Success
+            ? new List<System.Numerics.Vector2>(result.SmoothedPath)
+            : new List<System.Numerics.Vector2>();
+
         return new DynamicPlan(
             monster.Index,
             result.Success,
-            result.Success ? RasterizeSmoothPath(result.SmoothedPath) : new List<(int X, int Y)>(),
+            result.Success ? RasterizeSmoothPath(smoothPath) : new List<(int X, int Y)>(),
+            smoothPath,
             overlay);
     }
 
@@ -699,9 +714,32 @@ public sealed class GridControl : ScrollableControl
         for (int i = 0; i < _monsters.Length; i++)
         {
             var monster = _monsters[i];
-            monster.VisualX = Approach(monster.VisualX, monster.X, DynamicMonsterVisualLerp);
-            monster.VisualY = Approach(monster.VisualY, monster.Y, DynamicMonsterVisualLerp);
+            var target = GetMonsterVisualTarget(monster);
+            monster.VisualX = Approach(monster.VisualX, target.X, DynamicMonsterVisualLerp);
+            monster.VisualY = Approach(monster.VisualY, target.Y, DynamicMonsterVisualLerp);
         }
+    }
+
+    private static (float X, float Y) GetMonsterVisualTarget(DynamicMonster monster)
+    {
+        if (monster.SmoothPath.Count < 2)
+            return (monster.X, monster.Y);
+
+        AdvanceMonsterSmoothPathIndex(monster);
+        if (monster.SmoothPathIndex >= monster.SmoothPath.Count - 1)
+            return SmoothCell(monster.SmoothPath[^1]);
+
+        var a = SmoothCell(monster.SmoothPath[monster.SmoothPathIndex]);
+        var b = SmoothCell(monster.SmoothPath[monster.SmoothPathIndex + 1]);
+        float vx = b.X - a.X;
+        float vy = b.Y - a.Y;
+        float len2 = vx * vx + vy * vy;
+        if (len2 <= float.Epsilon)
+            return b;
+
+        float t = ((monster.X - a.X) * vx + (monster.Y - a.Y) * vy) / len2;
+        t = Math.Clamp(t, 0f, 1f);
+        return (a.X + vx * t, a.Y + vy * t);
     }
 
     private static float Approach(float current, float target, float factor)
@@ -756,6 +794,8 @@ public sealed class GridControl : ScrollableControl
     {
         monster.Path.Clear();
         monster.PathIndex = 0;
+        monster.SmoothPath.Clear();
+        monster.SmoothPathIndex = 0;
     }
 
     private bool IsMonsterPathNextUsable(DynamicMonster monster, int index)
@@ -791,7 +831,23 @@ public sealed class GridControl : ScrollableControl
         if (monster.PathIndex < monster.Path.Count - 1 &&
             !PointOnSegment((monster.X, monster.Y), monster.Path[monster.PathIndex], monster.Path[monster.PathIndex + 1]))
             NormalizeMonsterPathIndex(monster);
+
+        AdvanceMonsterSmoothPathIndex(monster);
     }
+
+    private static void AdvanceMonsterSmoothPathIndex(DynamicMonster monster)
+    {
+        if (monster.SmoothPathIndex < 0)
+            monster.SmoothPathIndex = 0;
+
+        while (monster.SmoothPathIndex < monster.SmoothPath.Count - 1 &&
+               SmoothCellInt(monster.SmoothPath[monster.SmoothPathIndex + 1]) == (monster.X, monster.Y))
+            monster.SmoothPathIndex++;
+    }
+
+    private static (float X, float Y) SmoothCell(System.Numerics.Vector2 p) => (p.X - 0.5f, p.Y - 0.5f);
+
+    private static (int X, int Y) SmoothCellInt(System.Numerics.Vector2 p) => ((int)p.X, (int)p.Y);
 
     private static void NormalizeMonsterPathIndex(DynamicMonster monster)
     {
@@ -1390,7 +1446,8 @@ public sealed class GridControl : ScrollableControl
         for (int i = 0; i < _monsters.Length; i++)
         {
             var monster = _monsters[i];
-            if (monster.Path.Count - monster.PathIndex < 2)
+            bool hasSmoothPath = monster.SmoothPath.Count - monster.SmoothPathIndex >= 2;
+            if (!hasSmoothPath && monster.Path.Count - monster.PathIndex < 2)
                 continue;
 
             var color = DynamicPathColors[i % DynamicPathColors.Length];
@@ -1406,8 +1463,17 @@ public sealed class GridControl : ScrollableControl
             {
                 new PointF(monster.VisualX * cs + cs / 2f, monster.VisualY * cs + cs / 2f)
             };
-            for (int p = monster.PathIndex + 1; p < monster.Path.Count; p++)
-                points.Add(new PointF(monster.Path[p].X * cs + cs / 2f, monster.Path[p].Y * cs + cs / 2f));
+            if (hasSmoothPath)
+            {
+                AdvanceMonsterSmoothPathIndex(monster);
+                for (int p = monster.SmoothPathIndex + 1; p < monster.SmoothPath.Count; p++)
+                    points.Add(new PointF(monster.SmoothPath[p].X * cs, monster.SmoothPath[p].Y * cs));
+            }
+            else
+            {
+                for (int p = monster.PathIndex + 1; p < monster.Path.Count; p++)
+                    points.Add(new PointF(monster.Path[p].X * cs + cs / 2f, monster.Path[p].Y * cs + cs / 2f));
+            }
             if (points.Count < 2)
                 continue;
 
