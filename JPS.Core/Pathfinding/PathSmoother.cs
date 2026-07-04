@@ -46,18 +46,56 @@ namespace JPS.Pathfinding
                 int stepX = Math.Sign(to.X - from.X);
                 int stepY = Math.Sign(to.Y - from.Y);
                 int steps = Math.Max(Math.Abs(to.X - from.X), Math.Abs(to.Y - from.Y));
+                int nextStep = 1;
 
-                for (int step = 1; step <= steps; step++)
+                while (nextStep <= steps)
                 {
-                    var current = (X: from.X + stepX * step, Y: from.Y + stepY * step);
-                    if (previous != anchor &&
-                        !LineOfSight(map, anchor.X, anchor.Y, current.X, current.Y))
+                    if (previous == anchor)
                     {
-                        result.Add(Center(previous));
-                        anchor = previous;
+                        previous = to;
+                        break;
                     }
 
-                    previous = current;
+                    if (LineOfSight(map, anchor.X, anchor.Y, to.X, to.Y))
+                    {
+                        previous = to;
+                        break;
+                    }
+
+                    int lo = nextStep;
+                    int hi = steps;
+                    int best = nextStep - 1;
+
+                    while (lo <= hi)
+                    {
+                        int mid = lo + ((hi - lo) >> 1);
+                        var probe = (X: from.X + stepX * mid, Y: from.Y + stepY * mid);
+                        if (LineOfSight(map, anchor.X, anchor.Y, probe.X, probe.Y))
+                        {
+                            best = mid;
+                            lo = mid + 1;
+                        }
+                        else
+                        {
+                            hi = mid - 1;
+                        }
+                    }
+
+                    var bestPoint = (X: from.X + stepX * best, Y: from.Y + stepY * best);
+                    result.Add(Center(bestPoint));
+                    anchor = bestPoint;
+
+                    int failStep = best + 1;
+                    if (failStep > steps)
+                    {
+                        previous = bestPoint;
+                        nextStep = failStep;
+                    }
+                    else
+                    {
+                        previous = (X: from.X + stepX * failStep, Y: from.Y + stepY * failStep);
+                        nextStep = failStep + 1;
+                    }
                 }
             }
 
@@ -87,6 +125,23 @@ namespace JPS.Pathfinding
             int signY = Math.Sign(y1 - y0);
             int x = x0;
             int y = y0;
+
+            if (nx == ny && nx != 0)
+            {
+                while (x != x1)
+                {
+                    x += signX;
+                    y += signY;
+#if !JPS_ALLOW_CORNER_CUTTING
+                    if (!map.IsWalkable(x - signX, y) || !map.IsWalkable(x, y - signY))
+                        return false;
+#endif
+                    if (!map.IsWalkable(x, y))
+                        return false;
+                }
+                return true;
+            }
+
             int ix = 0;   // 已走的水平步数
             int iy = 0;   // 已走的垂直步数
             long decision = (long)ny - nx;

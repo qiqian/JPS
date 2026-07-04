@@ -51,6 +51,8 @@ bool jps__line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1)
 
     nx = abs(x1 - x0);   /* 水平总步数 */
     ny = abs(y1 - y0);   /* 垂直总步数 */
+    sign_x = jps_sign(x1 - x0);
+    sign_y = jps_sign(y1 - y0);
 
     if (ny == 0)
         return jps__bit_range_walkable(m->blocked + (ptrdiff_t)y0 * m->stride, x0, x1);
@@ -60,8 +62,25 @@ bool jps__line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1)
     if (!jps_grid_map_is_walkable_g(m, x0, y0))
         return false;
 
-    sign_x = jps_sign(x1 - x0);
-    sign_y = jps_sign(y1 - y0);
+    if (nx == ny)
+    {
+        x = x0;
+        y = y0;
+        while (x != x1)
+        {
+            x += sign_x;
+            y += sign_y;
+#ifndef JPS_ALLOW_CORNER_CUTTING
+            if (!jps_grid_map_is_walkable_g(m, x - sign_x, y) ||
+                !jps_grid_map_is_walkable_g(m, x, y - sign_y))
+                return false;
+#endif
+            if (!jps_grid_map_is_walkable_g(m, x, y))
+                return false;
+        }
+        return true;
+    }
+
     x = x0;
     y = y0;
     ix = 0;   /* 已走的水平步数 */
@@ -142,23 +161,66 @@ int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path
         int dx = abs(to.x - from.x);
         int dy = abs(to.y - from.y);
         int steps = dx > dy ? dx : dy;
-        int step;
+        int next_step = 1;
 
-        for (step = 1; step <= steps; step++)
+        while (next_step <= steps)
         {
-            jps_point current;
-            current.x = from.x + step_x * step;
-            current.y = from.y + step_y * step;
-
-            if ((previous.x != anchor.x || previous.y != anchor.y) &&
-                !jps__line_of_sight(m, anchor.x, anchor.y, current.x, current.y))
+            if (previous.x == anchor.x && previous.y == anchor.y)
             {
-                if (count < capacity_points) out_points[count] = jps__center(previous);
-                count++;
-                anchor = previous;
+                previous = to;
+                break;
             }
 
-            previous = current;
+            if (jps__line_of_sight(m, anchor.x, anchor.y, to.x, to.y))
+            {
+                previous = to;
+                break;
+            }
+            else
+            {
+                int lo = next_step;
+                int hi = steps;
+                int best = next_step - 1;
+                int fail_step;
+                jps_point best_point;
+
+                while (lo <= hi)
+                {
+                    int mid = lo + ((hi - lo) >> 1);
+                    jps_point probe;
+                    probe.x = from.x + step_x * mid;
+                    probe.y = from.y + step_y * mid;
+
+                    if (jps__line_of_sight(m, anchor.x, anchor.y, probe.x, probe.y))
+                    {
+                        best = mid;
+                        lo = mid + 1;
+                    }
+                    else
+                    {
+                        hi = mid - 1;
+                    }
+                }
+
+                best_point.x = from.x + step_x * best;
+                best_point.y = from.y + step_y * best;
+                if (count < capacity_points) out_points[count] = jps__center(best_point);
+                count++;
+                anchor = best_point;
+
+                fail_step = best + 1;
+                if (fail_step > steps)
+                {
+                    previous = best_point;
+                    next_step = fail_step;
+                }
+                else
+                {
+                    previous.x = from.x + step_x * fail_step;
+                    previous.y = from.y + step_y * fail_step;
+                    next_step = fail_step + 1;
+                }
+            }
         }
     }
 
