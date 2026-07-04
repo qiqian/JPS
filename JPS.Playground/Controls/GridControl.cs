@@ -112,6 +112,7 @@ public sealed class GridControl : ScrollableControl
     private readonly List<DynamicObstacle> _dynamicObstacles = new();
     private readonly List<JpsPathfinder> _dynamicPathfinderPool = new();
     private bool _dynamicMode;
+    private bool _obstaclesAutoMove = true;   // dynamic=其他障碍自动随机移动；static=其他障碍静止，仅主障碍块手工(方向键)控制
     private bool _dynamicBusy;
     private int _dynamicBlockX;
     private int _dynamicBlockY;
@@ -200,19 +201,32 @@ public sealed class GridControl : ScrollableControl
 
     public void SetMode(EditMode mode) => _mode = mode;
 
-    public bool DynamicMode => _dynamicMode;
+    public bool DynamicMode => _dynamicMode && _obstaclesAutoMove;
+    public bool StaticMode => _dynamicMode && !_obstaclesAutoMove;
 
     public void ToggleDynamicDemo()
     {
-        if (_dynamicMode)
+        if (_dynamicMode && _obstaclesAutoMove)
             StopDynamicDemo();
         else
-            StartDynamicDemo();
+            StartDemo(obstaclesAutoMove: true);
     }
 
-    private void StartDynamicDemo()
+    // static 模式：与 dynamic 完全相同，唯一区别是其他障碍不主动移动（主障碍块仍用方向键手工控制）。
+    public void ToggleStaticDemo()
     {
+        if (_dynamicMode && !_obstaclesAutoMove)
+            StopDynamicDemo();
+        else
+            StartDemo(obstaclesAutoMove: false);
+    }
+
+    private void StartDemo(bool obstaclesAutoMove)
+    {
+        if (_dynamicMode)
+            StopDynamicDemo();   // 从另一模式切换：先停当前再启动
         _dynamicMode = true;
+        _obstaclesAutoMove = obstaclesAutoMove;
         _dynamicBusy = false;
         _dynamicFrames = 0;
         _dynamicPathFrames = 0;
@@ -247,9 +261,13 @@ public sealed class GridControl : ScrollableControl
         Focus();
         _dynamicTimer.Start();
         Invalidate();
-        NotifyStatus(Loc.Zh
-            ? "动态障碍测试：方向键移动大障碍，小怪共享同一 JPS 缓存并用占位表避让。"
-            : "Dynamic obstacle test: arrow keys move the block; monsters share one JPS cache and avoid via reservations.");
+        NotifyStatus(obstaclesAutoMove
+            ? (Loc.Zh
+                ? "动态障碍测试：方向键移动大障碍，小怪共享同一 JPS 缓存并用占位表避让。"
+                : "Dynamic obstacle test: arrow keys move the block; monsters share one JPS cache and avoid via reservations.")
+            : (Loc.Zh
+                ? "静态障碍测试：方向键移动大障碍，其他障碍静止；小怪自动寻路避让。"
+                : "Static obstacle test: arrow keys move the block; other obstacles stay put; monsters auto-path around."));
     }
 
     private void StopDynamicDemo()
@@ -259,6 +277,7 @@ public sealed class GridControl : ScrollableControl
 
         _dynamicTimer.Stop();
         _dynamicMode = false;
+        _obstaclesAutoMove = true;
         _dynamicBusy = false;
         _monsters = [];
         _dynamicStaticBlocked = null;
@@ -266,7 +285,7 @@ public sealed class GridControl : ScrollableControl
         _pendingBlockDx = 0;
         _pendingBlockDy = 0;
         _overlay.Clear();
-        NotifyStatus(Loc.T("动态障碍测试已停止。", "Dynamic obstacle test stopped."));
+        NotifyStatus(Loc.T("障碍测试已停止。", "Obstacle test stopped."));
     }
 
     private void BuildDynamicStaticObstacles()
@@ -488,7 +507,8 @@ public sealed class GridControl : ScrollableControl
         try
         {
             ApplyPendingDynamicBlockMove();
-            StepDynamicObstacles();
+            if (_obstaclesAutoMove)
+                StepDynamicObstacles();   // static 模式：其他障碍静止，不自动移动
             await StepDynamicMonstersAsync();
             UpdateDynamicMonsterVisuals();
             if (!_dynamicMode)

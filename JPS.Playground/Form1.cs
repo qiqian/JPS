@@ -55,6 +55,9 @@ namespace JPS
             btnDynamic.Text = Loc.T("动态", "Dynamic");
             btnDynamic.ToolTipText = Loc.T("动态障碍测试：方向键移动大障碍，小怪并行重新寻路",
                 "Dynamic obstacle test: arrow keys move a large block; monsters re-path in parallel");
+            btnStatic.Text = Loc.T("静态", "Static");
+            btnStatic.ToolTipText = Loc.T("静态障碍测试：方向键移动大障碍，其他障碍静止，小怪并行重新寻路",
+                "Static obstacle test: arrow keys move a large block; other obstacles stay put; monsters re-path in parallel");
             btnFindPath.Text = Loc.T("JPS寻路", "JPS Path");
             btnFindPathAStar.Text = Loc.T("A*寻路", "A* Path");
             btnSave.Text = Loc.T("保存", "Save");
@@ -79,13 +82,14 @@ namespace JPS
             btnEnd.Image = IconDot(GridControl.EndColor);
             btnClear.Image = IconClear();
             btnDynamic.Image = IconDynamic();
+            btnStatic.Image = IconStatic();
             btnFindPath.Image = IconJps();
             btnFindPathAStar.Image = IconAStar();
             btnSave.Image = IconArrow(down: true);
             btnLoad.Image = IconArrow(down: false);
             btnOpenMap.Image = IconGrid();
 
-            foreach (var b in new[] { btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnFindPath, btnFindPathAStar, btnSave, btnLoad, btnOpenMap })
+            foreach (var b in new[] { btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, btnFindPath, btnFindPathAStar, btnSave, btnLoad, btnOpenMap })
                 b.DisplayStyle = ToolStripItemDisplayStyle.ImageAndText;
         }
 
@@ -129,14 +133,33 @@ namespace JPS
             g.DrawLine(p, 15, 5, 5, 15);
         });
 
+        // 动态：障碍块 + 怪物 + 底部双向移动箭头（其他障碍会自动来回移动）
         private static Bitmap IconDynamic() => MakeIcon(g =>
         {
             using var wall = new SolidBrush(GridControl.DynamicBlockColor);
             using var monster = new SolidBrush(GridControl.MonsterColor);
             using var pen = new Pen(Color.White, 1.4f);
-            g.FillRectangle(wall, 3, 5, 9, 9);
-            g.DrawRectangle(pen, 3, 5, 9, 9);
-            g.FillEllipse(monster, 11, 10, 6, 6);
+            g.FillRectangle(wall, 3, 3, 9, 9);
+            g.DrawRectangle(pen, 3, 3, 9, 9);
+            g.FillEllipse(monster, 12, 4, 6, 6);
+            using var mv = new Pen(IconBlue, 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            mv.CustomStartCap = new AdjustableArrowCap(2f, 2f);
+            mv.CustomEndCap = new AdjustableArrowCap(2f, 2f);
+            g.DrawLine(mv, 4, 16, 16, 16);   // ↔ 障碍自动移动
+        });
+
+        // 静态：障碍块 + 怪物 + 底部暂停符号（其他障碍静止，仅方向键手动推主障碍块）
+        private static Bitmap IconStatic() => MakeIcon(g =>
+        {
+            using var wall = new SolidBrush(GridControl.DynamicBlockColor);
+            using var monster = new SolidBrush(GridControl.MonsterColor);
+            using var pen = new Pen(Color.White, 1.4f);
+            g.FillRectangle(wall, 3, 3, 9, 9);
+            g.DrawRectangle(pen, 3, 3, 9, 9);
+            g.FillEllipse(monster, 12, 4, 6, 6);
+            using var pause = new Pen(IconNeutral, 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawLine(pause, 8, 14, 8, 19);    // ‖ 其他障碍静止
+            g.DrawLine(pause, 12, 14, 12, 19);
         });
 
         // JPS 寻路：金色折线 + 箭头（干净跳跃）
@@ -223,12 +246,22 @@ namespace JPS
         {
             gridControl.ClearMap();
             btnDynamic.Checked = false;
+            btnStatic.Checked = false;
         }
 
         private void BtnDynamic_Click(object? sender, EventArgs e)
         {
             gridControl.ToggleDynamicDemo();
             btnDynamic.Checked = gridControl.DynamicMode;
+            btnStatic.Checked = gridControl.StaticMode;
+            gridControl.Focus();
+        }
+
+        private void BtnStatic_Click(object? sender, EventArgs e)
+        {
+            gridControl.ToggleStaticDemo();
+            btnDynamic.Checked = gridControl.DynamicMode;
+            btnStatic.Checked = gridControl.StaticMode;
             gridControl.Focus();
         }
 
@@ -289,6 +322,7 @@ namespace JPS
 
                 gridControl.Import(data);
                 btnDynamic.Checked = false;
+            btnStatic.Checked = false;
                 statusLabel.Text = Loc.Zh
                     ? $"已载入 {dlg.FileName}（阻挡 {data.Obstacles.Count} 格，原始尺寸 {data.Width}x{data.Height}）"
                     : $"Loaded {dlg.FileName} ({data.Obstacles.Count} walls, original size {data.Width}x{data.Height})";
@@ -314,6 +348,7 @@ namespace JPS
                 var map = MovingAiMap.Parse(File.ReadAllText(dlg.FileName));
                 gridControl.LoadFixedMap(map);
                 btnDynamic.Checked = false;
+            btnStatic.Checked = false;
                 string name = Path.GetFileName(dlg.FileName);
                 statusLabel.Text = Loc.Zh
                     ? $"已打开 {name}（{map.Width}×{map.Height}）。设起点/终点后寻路。"

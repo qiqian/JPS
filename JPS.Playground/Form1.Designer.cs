@@ -15,6 +15,7 @@ namespace JPS
         private ToolStripButton btnEnd;
         private ToolStripButton btnClear;
         private ToolStripButton btnDynamic;
+        private ToolStripButton btnStatic;
         private ToolStripButton btnFindPath;
         private ToolStripButton btnFindPathAStar;
         private ToolStripButton btnSave;
@@ -46,6 +47,7 @@ namespace JPS
             btnEnd = new ToolStripButton();
             btnClear = new ToolStripButton();
             btnDynamic = new ToolStripButton();
+            btnStatic = new ToolStripButton();
             toolStripSeparator1 = new ToolStripSeparator();
             btnFindPath = new ToolStripButton();
             btnFindPathAStar = new ToolStripButton();
@@ -69,7 +71,7 @@ namespace JPS
             toolStrip1.ImageScalingSize = new Size(20, 20);
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
-                btnBrush, btnStart, btnEnd, btnClear, btnDynamic, toolStripSeparator1, btnFindPath, btnFindPathAStar,
+                btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, toolStripSeparator1, btnFindPath, btnFindPathAStar,
                 toolStripSeparator2, btnSave, btnLoad, btnOpenMap
             });
             toolStrip1.Location = new Point(0, 0);
@@ -122,7 +124,17 @@ namespace JPS
             btnDynamic.Text = "动态";
             btnDynamic.ToolTipText = "动态障碍测试";
             btnDynamic.Click += BtnDynamic_Click;
-            // 
+            //
+            // btnStatic
+            //
+            btnStatic.CheckOnClick = true;
+            btnStatic.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            btnStatic.Name = "btnStatic";
+            btnStatic.Size = new Size(80, 28);
+            btnStatic.Text = "静态";
+            btnStatic.ToolTipText = "静态障碍测试";
+            btnStatic.Click += BtnStatic_Click;
+            //
             // btnFindPath
             // 
             btnFindPath.DisplayStyle = ToolStripItemDisplayStyle.Text;
