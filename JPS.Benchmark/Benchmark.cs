@@ -20,29 +20,36 @@ namespace JPS.Benchmark
         private const int Repeats = 3;
 
 
-        // Thread affinity helpers: only used on Windows. Bind threads to specific logical processors.
+        // Pin the calling thread to one logical processor. Cross-platform via runtime OS dispatch:
+        //   Windows -> SetThreadAffinityMask, Linux -> sched_setaffinity, macOS/other -> no portable per-core pinning.
+        // DllImports bind lazily on first call, so the library for an OS we don't run on is never loaded; the
+        // OperatingSystem.IsXxx() guards ensure each native call only happens on its own platform. A 64-bit mask
+        // covers CPUs 0..63, which is enough for the fixed cpuList used here.
+#pragma warning disable SYSLIB1054
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetCurrentThread();
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern UIntPtr SetThreadAffinityMask(IntPtr hThread, UIntPtr dwThreadAffinityMask);
 
+        // Linux: sched_setaffinity(pid = 0 -> the calling thread, cpusetsize in bytes, mask). Returns 0 on success.
+        [DllImport("libc", SetLastError = true)]
+        private static extern int sched_setaffinity(int pid, IntPtr cpusetsize, ref ulong mask);
+#pragma warning restore SYSLIB1054
+
         private static bool TrySetCurrentThreadAffinity(int cpuIndex)
         {
-            if (!OperatingSystem.IsWindows())
+            if (cpuIndex < 0 || cpuIndex >= 64)
                 return false;
-            if (cpuIndex < 0 || cpuIndex >= (IntPtr.Size * 8))
-                ; // still try, mask may be larger on the system
+            ulong mask = 1UL << cpuIndex;
             try
             {
-                IntPtr h = GetCurrentThread();
-                UIntPtr mask = new UIntPtr(1UL << cpuIndex);
-                UIntPtr prev = SetThreadAffinityMask(h, mask);
-                return prev != UIntPtr.Zero;
+                if (OperatingSystem.IsWindows())
+                    return SetThreadAffinityMask(GetCurrentThread(), new UIntPtr(mask)) != UIntPtr.Zero;
+                if (OperatingSystem.IsLinux())
+                    return sched_setaffinity(0, (IntPtr)sizeof(ulong), ref mask) == 0;
             }
-            catch
-            {
-                return false;
-            }
+            catch { /* API missing / call blocked -> fall through to no-op */ }
+            return false;   // macOS / other: no portable per-core pinning
         }
 
         static int Main(string[] args)
@@ -72,6 +79,84 @@ namespace JPS.Benchmark
         private static string BuildConfig() =>
             $"corner-cutting={(JpsBuildInfo.CornerCutting ? "on" : "off")}, " +
             $"concurrent-cache={(JpsBuildInfo.ConcurrentCache ? "on" : "off")}";
+
+        // Run a helper program and capture its stdout (null on any failure). Used for host-info probes only.
+        private static string? RunCapture(string file, string args)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(file, args)
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using Process? proc = Process.Start(psi);
+                if (proc == null)
+                    return null;
+                string outp = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                return outp;
+            }
+            catch { return null; }
+        }
+
+        // Best-effort friendly CPU model name, e.g. "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz". The lookup is
+        // inherently platform-specific: Windows reads the registry's ProcessorNameString (via reg.exe, so no
+        // Microsoft.Win32.Registry package is needed), Linux reads /proc/cpuinfo, macOS uses sysctl. Falls back
+        // to "unknown" (Windows further falls back to PROCESSOR_IDENTIFIER, which is family/model/stepping).
+        private static string GetCpuModel()
+        {
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    string? outp = RunCapture("reg",
+                        @"query ""HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0"" /v ProcessorNameString");
+                    if (outp != null)
+                    {
+                        int i = outp.IndexOf("REG_SZ", StringComparison.Ordinal);
+                        if (i >= 0)
+                        {
+                            string v = outp[(i + "REG_SZ".Length)..].Trim();   // value follows the type token
+                            if (v.Length > 0)
+                                return v;
+                        }
+                    }
+                    string? id = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
+                    return string.IsNullOrWhiteSpace(id) ? "unknown" : id.Trim();
+                }
+                if (OperatingSystem.IsLinux())
+                {
+                    foreach (string line in File.ReadLines("/proc/cpuinfo"))
+                    {
+                        if (line.StartsWith("model name", StringComparison.Ordinal))
+                        {
+                            int c = line.IndexOf(':');
+                            if (c >= 0)
+                                return line[(c + 1)..].Trim();
+                        }
+                    }
+                    return "unknown";
+                }
+                if (OperatingSystem.IsMacOS())
+                {
+                    string? outp = RunCapture("sysctl", "-n machdep.cpu.brand_string")?.Trim();
+                    if (!string.IsNullOrEmpty(outp))
+                        return outp;
+                }
+            }
+            catch { /* diagnostics only; never fail the benchmark over host info */ }
+            return "unknown";
+        }
+
+        // Host/runtime info for report reproducibility, one field per line (kept short so it doesn't wrap).
+        private static void PrintHostInfo(Action<string> writeLine)
+        {
+            writeLine($"Host OS:  {RuntimeInformation.OSDescription.Trim()} ({RuntimeInformation.OSArchitecture})");
+            writeLine($"Host CPU: {GetCpuModel()}; {Environment.ProcessorCount} logical cores");
+            writeLine($"Runtime:  {RuntimeInformation.FrameworkDescription} ({RuntimeInformation.ProcessArchitecture})");
+        }
 
         private static string FindDir(string name)
         {
@@ -247,6 +332,9 @@ namespace JPS.Benchmark
         private static string Green(string s) => "\x1b[32m" + s + "\x1b[0m";
         private static string Red(string s) => "\x1b[31m" + s + "\x1b[0m";
 
+        // Enable ANSI escape processing so colored output renders in the classic Windows console (Windows only;
+        // other terminals handle ANSI natively). Non-Windows builds compile the Win32 imports out -> no-op.
+#if WINDOWS
 #pragma warning disable SYSLIB1054
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetStdHandle(int nStdHandle);
@@ -255,9 +343,13 @@ namespace JPS.Benchmark
         [DllImport("kernel32.dll")]
         private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 #pragma warning restore SYSLIB1054
+#endif
 
         private static void EnableVirtualTerminal()
         {
+#if WINDOWS
+            if (!OperatingSystem.IsWindows())
+                return;
             try
             {
                 IntPtr h = GetStdHandle(-11);
@@ -265,6 +357,7 @@ namespace JPS.Benchmark
                     SetConsoleMode(h, mode | 0x0004);
             }
             catch { }
+#endif
         }
 
         private static void WarmupJit()
@@ -337,11 +430,35 @@ namespace JPS.Benchmark
             string scope = string.IsNullOrEmpty(sub) ? "movingai/" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
             Console.WriteLine($"# JPS(C#/C) cold/hot vs A* benchmark   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            PrintHostInfo(Console.WriteLine);
             Console.WriteLine($"Build config: {BuildConfig()}");
             Console.WriteLine($"Native: {(nativeEnabled ? $"enabled ({nativeInfo})" : $"disabled ({nativeInfo})")}");
             Console.WriteLine($"Scope: {scope}; {scenFileCount} .scen / {groups.Count} maps; rand target {q}/map; scen dedup {dedup} from {totalEntries}");
             Console.WriteLine($"Parallelism: {workers} map workers (default is half of logical cores)");
             Console.WriteLine("Timing mode: parallel throughput by map group. Rows are emitted in map dispatch order as results arrive.");
+            Console.WriteLine("cold = before each query flip a few cells in a small window then restore + Sync (invalidates the jump-point cache); hot = warm cache reuse.");
+            Console.WriteLine();
+            Console.WriteLine("Columns:");
+            Console.WriteLine("  map          map name (relative path)");
+            Console.WriteLine("  size         width x height");
+            Console.WriteLine("  tag          rand = random sampled pairs / scen = .scen cases");
+            Console.WriteLine("  pairs        start/goal pairs timed");
+            Console.WriteLine("  JPSexp/A*exp mean expanded nodes per query (JPS / A*)");
+            if (nativeEnabled)
+            {
+                Console.WriteLine("  cC# / cC     C# / C JPS cold-path mean time (us/query)");
+                Console.WriteLine("  wC# / wC     C# / C JPS hot-path mean time (us/query)");
+                Console.WriteLine("  A*us         A* mean time per query (us/query)");
+                Console.WriteLine("  A*/cC A*/wC  A*us divided by C cold / hot time (higher = C JPS faster than A*)");
+                Console.WriteLine("  color: cC/wC vs same-language C# faster=green slower=red; any JPS time slower than A*=red; A*/cC or A*/wC < 1 = red");
+            }
+            else
+            {
+                Console.WriteLine("  cC# / wC#    C# JPS cold / hot mean time (us/query)");
+                Console.WriteLine("  A*us         A* mean time per query (us/query)");
+                Console.WriteLine("  A*/cC# A*/wC# A*us divided by C# cold / hot time (higher = C# JPS faster than A*)");
+                Console.WriteLine("  color: cC#/wC# slower than A* = red; A*/cC# or A*/wC# < 1 = red");
+            }
             Console.WriteLine();
 
             string hdr = nativeEnabled
@@ -351,6 +468,7 @@ namespace JPS.Benchmark
             void PrintResultHeader()
             {
                 ClearProgress();
+                Console.WriteLine(new string('-', rule));
                 Console.WriteLine(hdr);
                 Console.WriteLine(new string('-', rule));
             }

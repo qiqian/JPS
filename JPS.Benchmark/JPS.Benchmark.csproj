@@ -12,6 +12,12 @@
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
+  <!-- 在 Windows 上构建时定义 WINDOWS 符号：Benchmark 里的线程亲和性 / 控制台 VT 模式等 Win32 API
+       用 #if WINDOWS 包起来，非 Windows 构建将其编译为 no-op，保持跨平台可编译。 -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
     <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
