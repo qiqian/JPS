@@ -95,6 +95,14 @@ struct jps_pathfinder
 
     int *rebuild_nodes;            /* 路径重建用父链节点栈，跨查询复用，避免每次 malloc/free */
     int rebuild_nodes_capacity;
+
+    /* 平滑路径缓存：find_path 成功后**惰性**算一次（首次取平滑时）并缓存，copy_smoothed_path 直接拷。
+     * 惰性的意义：不取平滑的纯寻路（benchmark 计时 / 只要原始格路径）零平滑开销。 */
+    const jps_grid_map *smooth_map;   /* 寻路所用地图，供惰性平滑（LOS 需要） */
+    jps_point_f *smoothed;            /* 平滑点缓存（连续格中心），跨查询复用 */
+    int smoothed_count;
+    int smoothed_capacity;
+    bool smoothed_valid;              /* 本次寻路结果的平滑是否已算 */
 };
 
 /* ---------------- PathResult（内部） ---------------- */
@@ -153,6 +161,11 @@ jps_pathfinder *jps_pathfinder_create(void)
     jps__result_init(&pf->result);
     pf->rebuild_nodes = NULL;
     pf->rebuild_nodes_capacity = 0;
+    pf->smooth_map = NULL;
+    pf->smoothed = NULL;
+    pf->smoothed_count = 0;
+    pf->smoothed_capacity = 0;
+    pf->smoothed_valid = false;
     return pf;
 }
 
@@ -164,6 +177,7 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
     free(pf->steps);
     free(pf->mark);
     free(pf->rebuild_nodes);
+    free(pf->smoothed);
     jps_min_heap_free(&pf->open);
     jps__result_free(&pf->result);
     free(pf);
@@ -557,6 +571,8 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             jps__reconstruct_path(pf, start_id, goal_id, out);
             out->success = true;
             out->expanded_nodes = expanded_count;
+            pf->smooth_map = map;         /* 记住地图，供惰性平滑（copy/count 首次触发） */
+            pf->smoothed_valid = false;   /* 本次结果的平滑待算 */
             return out->path_count;
         }
 
@@ -613,11 +629,6 @@ int jps_pathfinder_path_count(const jps_pathfinder *pf)
     return (pf && pf->result.success) ? pf->result.path_count : 0;
 }
 
-int jps_pathfinder_expanded_nodes(const jps_pathfinder *pf)
-{
-    return pf ? pf->result.expanded_nodes : 0;
-}
-
 int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity_points)
 {
     int n, i;
@@ -637,18 +648,54 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
     return n;
 }
 
-int jps_pathfinder_copy_smoothed_path(const jps_pathfinder *pf, const jps_system *system,
-                                      float *out_xy, int capacity_points)
+/* 惰性平滑：find_path 成功后首次取平滑时算一次并缓存。前提：pf->result.success（path_count≥1）。
+ * 平滑（视线拉直只抽稀、不加点）点数 ≤ 原路径点数，故按 path_count 备足容量一次算完。 */
+static void jps__ensure_smoothed(jps_pathfinder *pf)
 {
-    int produced;
+    int need;
 
-    if (pf == NULL || system == NULL || out_xy == NULL ||
-        !pf->result.success || pf->result.path_count == 0)
+    if (pf->smoothed_valid)
+        return;
+
+    need = pf->result.path_count;
+    if (need > pf->smoothed_capacity)
+    {
+        int n = pf->smoothed_capacity < 16 ? 16 : pf->smoothed_capacity * 2;
+        while (n < need)
+            n *= 2;
+        pf->smoothed = (jps_point_f *)realloc(pf->smoothed, (size_t)n * sizeof(jps_point_f));
+        pf->smoothed_capacity = n;
+    }
+    pf->smoothed_count = jps_smooth_path_into(pf->smooth_map, pf->result.path, pf->result.path_count,
+                                              pf->smoothed, pf->smoothed_capacity);
+    pf->smoothed_valid = true;
+}
+
+int jps_pathfinder_smoothed_path_count(jps_pathfinder *pf)
+{
+    if (pf == NULL || !pf->result.success)
+        return 0;
+    jps__ensure_smoothed(pf);   /* 首次触发惰性平滑；已算则直接返回 */
+    return pf->smoothed_count;
+}
+
+int jps_pathfinder_copy_smoothed_path(jps_pathfinder *pf, float *out_xy, int capacity_points)
+{
+    int n, i;
+
+    if (pf == NULL || out_xy == NULL || !pf->result.success)
         return 0;
 
-    /* 直接将平滑结果写入调用者提供的 out_xy，避免内部 malloc。 */
-    produced = jps_smooth_path_into(system->map, pf->result.path, pf->result.path_count,
-                                     (jps_point_f *)out_xy, capacity_points);
-    /* produced 是理论产生的点数；实际写入已受 capacity_points 限制，返回写入点数（<= capacity_points） */
-    return produced < capacity_points ? produced : capacity_points;
+    jps__ensure_smoothed(pf);   /* 平滑已在此算好并缓存——无二次计算、无需 system */
+
+    n = pf->smoothed_count;
+    if (n > capacity_points)
+        n = capacity_points;
+
+    for (i = 0; i < n; i++)
+    {
+        out_xy[i * 2]     = pf->smoothed[i].x;
+        out_xy[i * 2 + 1] = pf->smoothed[i].y;
+    }
+    return n;
 }

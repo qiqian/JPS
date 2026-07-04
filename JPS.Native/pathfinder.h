@@ -39,22 +39,29 @@ JPS_API void JPS_CALL jps_pathfinder_destroy(jps_pathfinder *pf);
 JPS_API int JPS_CALL jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
                                               int sx, int sy, int gx, int gy);
 
-/* 最近一次寻路的路径格数（未找到/未调用为 0）。 */
+/* 最近一次寻路的**原始**路径格数（贴格折线；未找到/未调用为 0）。配 jps_pathfinder_copy_path。 */
 JPS_API int JPS_CALL jps_pathfinder_path_count(const jps_pathfinder *pf);
 
-/* 最近一次搜索展开（出队展开）的节点数，用于诊断/性能统计。 */
-JPS_API int JPS_CALL jps_pathfinder_expanded_nodes(const jps_pathfinder *pf);
+/*
+ * 最近一次寻路的**平滑**路径点数（视线拉直后的折线；未找到/未调用为 0）。配 jps_pathfinder_copy_smoothed_path。
+ * 平滑在 find_path 成功后由本函数或 copy_smoothed_path 首次调用时**自动算一次并缓存**（惰性，不取平滑则零开销）；
+ * 因内部会填充缓存，pf 非 const。
+ */
+JPS_API int JPS_CALL jps_pathfinder_smoothed_path_count(jps_pathfinder *pf);
 
 // 把最近一次找到的路径拷进调用方缓冲。out_xy 按 x0,y0,x1,y1,... 交错存放，
 // capacity_points 为可容纳点数（out_xy 至少 capacity_points*2 个 int）。
 // 返回实际写入点数 = min(path_count, capacity_points)。
 JPS_API int JPS_CALL jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity_points);
 
-// 对最近一次找到的整数路径做视线拉直平滑，输出连续格中心点（cx+0.5, cy+0.5）。
-// 需提供寻路所用的 system 以取得地图。out_xy 按 x0,y0,... 交错的 float。
-// 返回实际写入点数（≤ 原路径点数）。无路径时返回 0
-JPS_API int JPS_CALL jps_pathfinder_copy_smoothed_path(const jps_pathfinder *pf, const jps_system *system,
-                                                       float *out_xy, int capacity_points);
+// 把最近一次寻路的**平滑路径**拷进调用方缓冲：视线拉直后的连续格中心点（cx+0.5, cy+0.5），
+// out_xy 按 x0,y0,x1,y1,... 交错的 float（至少 capacity_points*2 个）。
+//
+// 平滑在 find_path 成功后**自动完成并缓存**（首次调 smoothed_path_count / 本函数时惰性算一次），
+// 这里只是拷已算好的结果——**无二次计算、不需要 system**。返回实际写入点数 = min(smoothed_path_count, capacity_points)。
+// 典型用法：n = jps_pathfinder_smoothed_path_count(pf); 分配 n*2 float; jps_pathfinder_copy_smoothed_path(pf, buf, n)。
+// 无路径时返回 0；因内部会填充缓存，pf 非 const。
+JPS_API int JPS_CALL jps_pathfinder_copy_smoothed_path(jps_pathfinder *pf, float *out_xy, int capacity_points);
 
 #ifdef __cplusplus
 }

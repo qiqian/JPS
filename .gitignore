@@ -6,3 +6,5 @@ tmp
 /JPS.Native/x64
 /x64/Release
 /x64/Debug
+build-android
+android-ndk-r*
