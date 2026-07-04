@@ -35,6 +35,10 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 REM Build/configure relative to the script dir (CMakeLists.txt lives here), like the .sh's `-S .`.
 cd /d "%SCRIPT_DIR%"
 
+rem determine platform name early so build root defaults to build-android-<platform>
+set "platform=windows"
+if "%BUILD_ROOT%"=="build-android" set "BUILD_ROOT=%BUILD_ROOT%-%platform%"
+
 if "%NDK_PATH%"=="" call :find_or_get_ndk
 if "%NDK_PATH%"=="" (
   echo Failed to obtain NDK. Set --ndk-path or ANDROID_NDK_HOME. 1>&2
@@ -167,9 +171,10 @@ exit /b 1
 
 REM ============================================================
 :usage
-echo Usage: %~nx0 [--ndk-path PATH] [--abis "arm64-v8a"] [--api 21] [--build-root build-android]
+echo Usage: %~nx0 [--ndk-path PATH] [--abis "arm64-v8a"] [--api 21] [--build-root build-android-<platform>]
 echo.
 echo If --ndk-path and ANDROID_NDK_HOME are not provided, the script looks for a local
-echo android-ndk-%NDK_VERSION%* folder next to this script. If none is found, it downloads
-echo NDK %NDK_VERSION% from Google's servers and extracts it (PowerShell Expand-Archive).
+echo android-ndk-%NDK_VERSION%* folder under ndk\<platform> next to this script. If none is found, it
+echo downloads NDK %NDK_VERSION% from Google's servers into ndk\<platform> and extracts it
+echo (PowerShell Expand-Archive). By default the build root is build-android-<platform>.
 exit /b 0

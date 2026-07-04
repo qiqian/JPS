@@ -21,11 +21,12 @@ NDK_VERSION="r27d"
 
 print_usage() {
   cat <<EOF
-Usage: $0 [--ndk-path PATH] [--abis "arm64-v8a"] [--api 21] [--build-root build-android]
+Usage: $0 [--ndk-path PATH] [--abis "arm64-v8a"] [--api 21] [--build-root build-android-<platform>]
 
 If --ndk-path and ANDROID_NDK_HOME are not provided, the script looks for a copy of NDK
 $NDK_VERSION under ndk/<platform>/ next to this script. If none is found, it downloads
-NDK $NDK_VERSION from Google's servers into ndk/<platform>/ (supports Linux and macOS/darwin).
+NDK $NDK_VERSION from Google's servers into ndk/<platform>/ (supports Linux, macOS and Windows/MSYS).
+By default the build output root is build-android-<platform> unless overridden with --build-root.
 EOF
 }
 
@@ -41,6 +42,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# detect platform early so build output defaults to build-android-<platform>
+uname_s="$(uname -s)"
+case "$uname_s" in
+  Linux*)   platform=linux;;
+  Darwin*)  platform=darwin;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT*) platform=windows;;
+  *) platform=unknown;;
+esac
+
+# adjust default build root to include platform unless user supplied custom --build-root
+if [[ "$BUILD_ROOT" == "build-android" ]]; then
+  BUILD_ROOT="build-android-$platform"
+fi
 
 if [[ -z "$NDK_PATH" ]]; then
   # Detect platform up-front so the NDK is kept under ndk/<platform>/ (OSes stay isolated).
@@ -77,7 +92,11 @@ if [[ -z "$NDK_PATH" ]]; then
     if [[ -f "$download_path" ]]; then
       echo "Found existing NDK archive: $download_path (skipping download)"
     else
-      if command -v curl >/dev/null 2>&1; then
+      # try BITS on Windows via pwsh Start-BitsTransfer
+      if command -v pwsh >/dev/null 2>&1 && [[ "$platform" == "windows" ]]; then
+        echo "Downloading $url via Start-BitsTransfer ..."
+        pwsh -NoProfile -Command "Try { Start-BitsTransfer -Source \"$url\" -Destination \"$download_path\"; exit 0 } Catch { Write-Error $_; exit 1 }"
+      elif command -v curl >/dev/null 2>&1; then
         echo "Downloading $url ..."
         curl -L --fail -o "$download_path" "$url"
       elif command -v wget >/dev/null 2>&1; then

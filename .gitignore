@@ -7,6 +7,6 @@ ndk
 /JPS.Native/x64
 /x64/Release
 /x64/Debug
-build-android
+build-android*
 android-ndk-r*
 /JPS.Native/JPS.Native/x64
