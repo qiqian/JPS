@@ -66,6 +66,8 @@ namespace JPS.Benchmark
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_destroy(IntPtr s);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong jps_system_memory_bytes(IntPtr s);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked(IntPtr s, int x, int y, int blocked);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked_buffer(IntPtr s, byte[] cells, int count);
@@ -78,6 +80,8 @@ namespace JPS.Benchmark
         public static extern IntPtr jps_pathfinder_create();
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_pathfinder_destroy(IntPtr pf);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong jps_pathfinder_memory_bytes(IntPtr pf);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern int jps_pathfinder_find_path(IntPtr pf, IntPtr system, int sx, int sy, int gx, int gy);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -163,6 +167,10 @@ namespace JPS.Benchmark
 
         /// <summary>最近一次寻路展开的节点数。</summary>
         public int Expanded => NativeJps.jps_pathfinder_expanded_nodes(_pf);
+
+        public ulong SystemMemoryBytes => NativeJps.jps_system_memory_bytes(_sys);
+        public ulong PathfinderMemoryBytes => NativeJps.jps_pathfinder_memory_bytes(_pf);
+        public ulong MemoryBytes => SystemMemoryBytes + PathfinderMemoryBytes;
 
         /// <summary>寻路并返回 (是否有解, compact path)；供与 C# 版一致性抽检。</summary>
         public (bool ok, List<(int X, int Y)>? path) FindAndCopy(int sx, int sy, int gx, int gy)

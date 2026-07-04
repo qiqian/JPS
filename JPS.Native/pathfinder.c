@@ -185,6 +185,33 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
     free(pf);
 }
 
+uint64_t jps_pathfinder_memory_bytes(const jps_pathfinder *pf)
+{
+    uint64_t bytes;
+
+    if (pf == NULL)
+        return 0;
+
+    bytes = (uint64_t)sizeof(*pf);
+    if (pf->g_dir != NULL)
+        bytes += (uint64_t)((size_t)pf->size * sizeof(uint64_t));
+    if (pf->steps != NULL)
+        bytes += (uint64_t)((size_t)pf->size * sizeof(uint16_t));
+    if (pf->mark != NULL)
+        bytes += (uint64_t)((size_t)pf->size * sizeof(uint16_t));
+    if (pf->open.elem != NULL)
+        bytes += (uint64_t)((size_t)pf->open.capacity * sizeof(int));
+    if (pf->open.prio != NULL)
+        bytes += (uint64_t)((size_t)pf->open.capacity * sizeof(int64_t));
+    if (pf->result.path != NULL)
+        bytes += (uint64_t)((size_t)pf->result.path_capacity * sizeof(jps_point));
+    if (pf->rebuild_nodes != NULL)
+        bytes += (uint64_t)((size_t)pf->rebuild_nodes_capacity * sizeof(int));
+    if (pf->smoothed != NULL)
+        bytes += (uint64_t)((size_t)pf->smoothed_capacity * sizeof(jps_point_f));
+    return bytes;
+}
+
 static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
 {
     if (pf->w == m->width && pf->size == m->width * m->height)

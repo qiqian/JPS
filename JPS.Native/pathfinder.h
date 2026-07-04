@@ -7,6 +7,7 @@
 #ifndef JPS_PATHFINDER_H
 #define JPS_PATHFINDER_H
 
+#include <stdint.h>
 #include "jps_export.h"
 #include "system.h"
 
@@ -31,6 +32,9 @@ typedef struct jps_pathfinder jps_pathfinder;
 
 JPS_API jps_pathfinder *JPS_CALL jps_pathfinder_create(void);
 JPS_API void JPS_CALL jps_pathfinder_destroy(jps_pathfinder *pf);
+
+/* 当前 pathfinder 保留的 native 内存字节数估算：本体 + 搜索/堆/结果/平滑缓冲。NULL 返回 0。 */
+JPS_API uint64_t JPS_CALL jps_pathfinder_memory_bytes(const jps_pathfinder *pf);
 
 // 在 system 上从 (sx,sy) 到 (gx,gy) 寻路（禁止斜穿角，整数代价 1000/1414，octile 启发）
 // 结果（compact path + smoothed path + 展开节点数）暂存于 pf，供随后 copy/查询

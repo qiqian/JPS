@@ -7,6 +7,59 @@
 #include <stdlib.h>
 #include "system.h"
 
+static uint64_t jps__grid_map_memory_bytes(const jps_grid_map *m)
+{
+    uint64_t bytes;
+    size_t row_words, col_words;
+
+    if (m == NULL)
+        return 0;
+
+    bytes = (uint64_t)sizeof(*m);
+    row_words = (size_t)(m->height + 2) * (size_t)m->stride;
+    col_words = (size_t)(m->width + 2) * (size_t)m->col_stride;
+    if (m->blocked_alloc != NULL)
+        bytes += (uint64_t)(row_words * sizeof(uint64_t));
+    if (m->col_blocked_alloc != NULL)
+        bytes += (uint64_t)(col_words * sizeof(uint64_t));
+    if (m->row_version != NULL)
+        bytes += (uint64_t)((size_t)m->height * sizeof(int));
+    if (m->col_version != NULL)
+        bytes += (uint64_t)((size_t)m->width * sizeof(int));
+    if (m->dirty_rows != NULL)
+        bytes += (uint64_t)((size_t)m->height * sizeof(int));
+    if (m->dirty_cols != NULL)
+        bytes += (uint64_t)((size_t)m->width * sizeof(int));
+    if (m->dirty_row_mark != NULL)
+        bytes += (uint64_t)((size_t)m->height * sizeof(uint8_t));
+    if (m->dirty_col_mark != NULL)
+        bytes += (uint64_t)((size_t)m->width * sizeof(uint8_t));
+    return bytes;
+}
+
+static uint64_t jps__jump_point_cache_memory_bytes(const jps_jump_point_cache *c)
+{
+    uint64_t bytes;
+
+    if (c == NULL)
+        return 0;
+
+    bytes = (uint64_t)sizeof(*c);
+    if (c->dist != NULL)
+        bytes += (uint64_t)(4u * (size_t)c->size * sizeof(int16_t));
+    if (c->gen != NULL)
+        bytes += (uint64_t)(4u * (size_t)c->size * sizeof(uint8_t));
+    if (c->row_gen != NULL)
+        bytes += (uint64_t)((size_t)c->h * sizeof(uint8_t));
+    if (c->col_gen != NULL)
+        bytes += (uint64_t)((size_t)c->w * sizeof(uint8_t));
+    if (c->row_version != NULL)
+        bytes += (uint64_t)((size_t)c->h * sizeof(int));
+    if (c->col_version != NULL)
+        bytes += (uint64_t)((size_t)c->w * sizeof(int));
+    return bytes;
+}
+
 jps_system *jps_system_create(int width, int height)
 {
     jps_system *s = (jps_system *)malloc(sizeof(jps_system));
@@ -41,6 +94,16 @@ void jps_system_destroy(jps_system *s)
 
 int jps_system_width(const jps_system *s)  { return s ? s->map->width  : 0; }
 int jps_system_height(const jps_system *s) { return s ? s->map->height : 0; }
+
+uint64_t jps_system_memory_bytes(const jps_system *s)
+{
+    if (s == NULL)
+        return 0;
+
+    return (uint64_t)sizeof(*s)
+        + jps__grid_map_memory_bytes(s->map)
+        + jps__jump_point_cache_memory_bytes(s->cache);
+}
 
 void jps_system_set_blocked(jps_system *s, int x, int y, int blocked)
 {

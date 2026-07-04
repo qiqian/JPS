@@ -76,6 +76,8 @@ namespace JPS.Accuracy
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_destroy(IntPtr s);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong jps_system_memory_bytes(IntPtr s);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked_buffer(IntPtr s, byte[] cells, int count);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_system_set_blocked(IntPtr s, int x, int y, int blocked);
@@ -87,6 +89,8 @@ namespace JPS.Accuracy
         public static extern IntPtr jps_pathfinder_create();
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern void jps_pathfinder_destroy(IntPtr pf);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong jps_pathfinder_memory_bytes(IntPtr pf);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern int jps_pathfinder_find_path(IntPtr pf, IntPtr system, int sx, int sy, int gx, int gy);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -126,6 +130,8 @@ namespace JPS.Accuracy
         /// <summary>把缓存同步到当前地图（改图后调用一次，使受影响行/列失效）。</summary>
         public void Sync() => NativeJps.jps_system_sync(Handle);
 
+        public ulong MemoryBytes => NativeJps.jps_system_memory_bytes(Handle);
+
         public void Dispose()
         {
             if (Handle != IntPtr.Zero) { NativeJps.jps_system_destroy(Handle); Handle = IntPtr.Zero; }
@@ -141,6 +147,8 @@ namespace JPS.Accuracy
         private IntPtr _pf;
 
         public NativePathfinder() => _pf = NativeJps.jps_pathfinder_create();
+
+        public ulong MemoryBytes => NativeJps.jps_pathfinder_memory_bytes(_pf);
 
         /// <summary>
         /// 在给定 system 上寻路。返回 (是否有解, compact path, 平滑路径)；无解时后两者为 null。

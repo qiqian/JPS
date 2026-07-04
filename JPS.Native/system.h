@@ -49,6 +49,9 @@ JPS_API void JPS_CALL jps_system_destroy(jps_system *s);
 JPS_API int JPS_CALL jps_system_width(const jps_system *s);
 JPS_API int JPS_CALL jps_system_height(const jps_system *s);
 
+/* 当前 system 保留的 native 内存字节数估算：system 本体 + 地图 + 共享跳点缓存。NULL 返回 0。 */
+JPS_API uint64_t JPS_CALL jps_system_memory_bytes(const jps_system *s);
+
 /* ---- 阻挡编辑（改动后需 jps_system_sync 才会令缓存失效生效） ---- */
 
 /* 设置/清除单格阻挡（blocked 非 0 = 阻挡）。越界忽略。 */
