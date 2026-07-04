@@ -107,9 +107,13 @@ exit /b 0
 
 REM ============================================================
 :find_or_get_ndk
-REM Look for a repo-local copy of the requested NDK version only. A different local version is NOT
-REM silently reused, so bumping NDK_VERSION actually takes effect (triggers a fresh download below).
-for /d %%d in ("%SCRIPT_DIR%\android-ndk-%NDK_VERSION%*" "%SCRIPT_DIR%\ndk-%NDK_VERSION%*") do (
+REM Keep auto-downloaded NDKs under ndk\<platform> to avoid interfering with other scripts.
+set "platform=windows"
+set "NDK_DIR=%SCRIPT_DIR%\ndk\%platform%"
+if not exist "%NDK_DIR%" mkdir "%NDK_DIR%"
+
+REM Look for a repo-local copy under ndk\<platform> only. A different local version is NOT reused.
+for /d %%d in ("%NDK_DIR%\android-ndk-%NDK_VERSION%*" "%NDK_DIR%\ndk-%NDK_VERSION%*") do (
   if exist "%%d\build\cmake\android.toolchain.cmake" (
     set "NDK_PATH=%%d"
     echo Found local NDK at: %%d
@@ -117,16 +121,17 @@ for /d %%d in ("%SCRIPT_DIR%\android-ndk-%NDK_VERSION%*" "%SCRIPT_DIR%\ndk-%NDK_
   )
 )
 
-echo NDK not found in repository. Preparing to obtain NDK %NDK_VERSION%...
+echo NDK not found under %NDK_DIR%. Preparing to obtain NDK %NDK_VERSION% for %platform%...
 set "NDK_FILE=android-ndk-%NDK_VERSION%-windows.zip"
 set "URL=https://dl.google.com/android/repository/%NDK_FILE%"
-set "DOWNLOAD_PATH=%SCRIPT_DIR%\%NDK_FILE%"
+set "DOWNLOAD_PATH=%NDK_DIR%\%NDK_FILE%"
 
 if exist "%DOWNLOAD_PATH%" (
-  echo Found existing NDK archive: %DOWNLOAD_PATH% ^(skipping download^)
+  echo Found existing NDK archive: %DOWNLOAD_PATH% (skipping download)
 ) else (
-  echo Downloading %URL% ...
-  powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%URL%' -OutFile '%DOWNLOAD_PATH%'"
+  echo Downloading %URL% to %DOWNLOAD_PATH% ...
+  rem Use BITS for robust download/resume (PowerShell Start-BitsTransfer)
+  powershell -NoProfile -Command "Try { Start-BitsTransfer -Source '%URL%' -Destination '%DOWNLOAD_PATH%'; exit 0 } Catch { Write-Error $_; exit 1 }"
   if errorlevel 1 (
     echo Download failed. Install NDK manually and pass --ndk-path. 1>&2
     exit /b 1
@@ -134,7 +139,7 @@ if exist "%DOWNLOAD_PATH%" (
 )
 
 REM already extracted?
-for /d %%d in ("%SCRIPT_DIR%\android-ndk-%NDK_VERSION%*") do (
+for /d %%d in ("%NDK_DIR%\android-ndk-%NDK_VERSION%*") do (
   if exist "%%d\build\cmake\android.toolchain.cmake" (
     set "NDK_PATH=%%d"
     echo Found existing extracted NDK at: %%d
@@ -143,13 +148,13 @@ for /d %%d in ("%SCRIPT_DIR%\android-ndk-%NDK_VERSION%*") do (
 )
 
 echo Extracting %DOWNLOAD_PATH% ...
-powershell -NoProfile -Command "Expand-Archive -Path '%DOWNLOAD_PATH%' -DestinationPath '%SCRIPT_DIR%' -Force"
+powershell -NoProfile -Command "Expand-Archive -Path '%DOWNLOAD_PATH%' -DestinationPath '%NDK_DIR%' -Force"
 if errorlevel 1 (
   echo Extraction failed. 1>&2
   exit /b 1
 )
 
-for /d %%d in ("%SCRIPT_DIR%\android-ndk-%NDK_VERSION%*") do (
+for /d %%d in ("%NDK_DIR%\android-ndk-%NDK_VERSION%*") do (
   if exist "%%d\build\cmake\android.toolchain.cmake" (
     set "NDK_PATH=%%d"
     echo NDK installed to: %%d
