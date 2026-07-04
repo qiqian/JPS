@@ -3,6 +3,7 @@ obj
 bin
 tmp
 .claude
+ndk
 /JPS.Native/x64
 /x64/Release
 /x64/Debug
