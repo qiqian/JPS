@@ -601,10 +601,7 @@ public sealed class GridControl : ScrollableControl
             {
                 monster.X = next.X;
                 monster.Y = next.Y;
-                if (monster.PathIndex < monster.Path.Count - 1 && monster.Path[monster.PathIndex + 1] == next)
-                    monster.PathIndex++;
-                else
-                    ClearMonsterPath(monster);
+                AdvanceMonsterPathIndex(monster);
             }
 
             if (monster.X == monster.TargetX && monster.Y == monster.TargetY)
@@ -623,10 +620,12 @@ public sealed class GridControl : ScrollableControl
         overlay.BeginCollect();
         var result = finder.FindPath(system, (monster.X, monster.Y), (monster.TargetX, monster.TargetY), overlay);
 
+        // 小怪跟随**平滑后**的路线：把视线拉直的折线栅格化成 8 连通逐格序列。
+        // 段已通过 LOS，故栅格化经过的每格都可走且不斜穿角，可安全逐格移动。
         return new DynamicPlan(
             monster.Index,
             result.Success,
-            result.Success ? result.Path : new List<(int X, int Y)>(),
+            result.Success ? RasterizeSmoothPath(result.SmoothedPath) : new List<(int X, int Y)>(),
             overlay);
     }
 
@@ -773,17 +772,101 @@ public sealed class GridControl : ScrollableControl
         if (monster.Path.Count == 0 || monster.PathIndex >= monster.Path.Count - 1)
             return (monster.X, monster.Y);
 
-        if (monster.PathIndex < 0 || monster.PathIndex >= monster.Path.Count ||
-            monster.Path[monster.PathIndex] != (monster.X, monster.Y))
-        {
-            int current = monster.Path.FindIndex(p => p.X == monster.X && p.Y == monster.Y);
-            if (current < 0 || current >= monster.Path.Count - 1)
-                return (monster.X, monster.Y);
+        NormalizeMonsterPathIndex(monster);
+        if (monster.Path.Count == 0 || monster.PathIndex >= monster.Path.Count - 1)
+            return (monster.X, monster.Y);
 
-            monster.PathIndex = current;
+        var target = monster.Path[monster.PathIndex + 1];
+        return (
+            monster.X + Math.Sign(target.X - monster.X),
+            monster.Y + Math.Sign(target.Y - monster.Y));
+    }
+
+    private static void AdvanceMonsterPathIndex(DynamicMonster monster)
+    {
+        while (monster.PathIndex < monster.Path.Count - 1 &&
+               monster.Path[monster.PathIndex + 1] == (monster.X, monster.Y))
+            monster.PathIndex++;
+
+        if (monster.PathIndex < monster.Path.Count - 1 &&
+            !PointOnSegment((monster.X, monster.Y), monster.Path[monster.PathIndex], monster.Path[monster.PathIndex + 1]))
+            NormalizeMonsterPathIndex(monster);
+    }
+
+    private static void NormalizeMonsterPathIndex(DynamicMonster monster)
+    {
+        if (monster.PathIndex < 0)
+            monster.PathIndex = 0;
+
+        if (monster.PathIndex < monster.Path.Count - 1 &&
+            PointOnSegment((monster.X, monster.Y), monster.Path[monster.PathIndex], monster.Path[monster.PathIndex + 1]))
+            return;
+
+        for (int i = 0; i < monster.Path.Count - 1; i++)
+        {
+            if (PointOnSegment((monster.X, monster.Y), monster.Path[i], monster.Path[i + 1]))
+            {
+                monster.PathIndex = i;
+                return;
+            }
         }
 
-        return monster.Path[monster.PathIndex + 1];
+        ClearMonsterPath(monster);
+    }
+
+    private static bool PointOnSegment((int X, int Y) p, (int X, int Y) a, (int X, int Y) b)
+    {
+        int sx = Math.Sign(b.X - a.X);
+        int sy = Math.Sign(b.Y - a.Y);
+        int dx = Math.Abs(b.X - a.X);
+        int dy = Math.Abs(b.Y - a.Y);
+        if (dx == 0 && dy == 0)
+            return p == a;
+        if (dx != 0 && dy != 0 && dx != dy)
+            return false;
+
+        int apx = p.X - a.X;
+        int apy = p.Y - a.Y;
+        if ((sx == 0 && apx != 0) || (sy == 0 && apy != 0))
+            return false;
+        if (sx != 0 && apx * sx < 0) return false;
+        if (sy != 0 && apy * sy < 0) return false;
+        if (sx != 0 && sy != 0 && Math.Abs(apx) != Math.Abs(apy))
+            return false;
+
+        return Math.Abs(apx) <= dx && Math.Abs(apy) <= dy;
+    }
+
+    // 把平滑路径（连续格中心顶点 cx+0.5）栅格化成 8 连通逐格整数序列，供小怪按拉直后的路线逐格移动。
+    // 顶点取整即格坐标；相邻顶点间用与 PathSmoother 视线检测同款的超覆盖增量遍历，
+    // 因此经过的格与 LOS 检查过的格一致——段既已通视，逐格皆可走且不斜穿角。
+    private static List<(int X, int Y)> RasterizeSmoothPath(IReadOnlyList<System.Numerics.Vector2> smooth)
+    {
+        var cells = new List<(int X, int Y)>();
+        if (smooth.Count == 0)
+            return cells;
+
+        cells.Add(((int)smooth[0].X, (int)smooth[0].Y));
+        for (int i = 1; i < smooth.Count; i++)
+            AppendSupercover(cells, (int)smooth[i - 1].X, (int)smooth[i - 1].Y, (int)smooth[i].X, (int)smooth[i].Y);
+        return cells;
+    }
+
+    // 超覆盖直线：把 (x0,y0)->(x1,y1) 经过的整数格依次追加到 cells（跳过起点，它已是 cells 末尾）。
+    // decision==0 时对角推进（与移动规则一致，不产生斜穿角），与 PathSmoother.LineOfSight 的遍历完全对应。
+    private static void AppendSupercover(List<(int X, int Y)> cells, int x0, int y0, int x1, int y1)
+    {
+        int nx = Math.Abs(x1 - x0), ny = Math.Abs(y1 - y0);
+        int sx = Math.Sign(x1 - x0), sy = Math.Sign(y1 - y0);
+        int x = x0, y = y0, ix = 0, iy = 0;
+        while (ix < nx || iy < ny)
+        {
+            long decision = (1L + 2 * ix) * ny - (1L + 2 * iy) * nx;
+            if (decision == 0) { x += sx; y += sy; ix++; iy++; }
+            else if (decision < 0) { x += sx; ix++; }
+            else { y += sy; iy++; }
+            cells.Add((x, y));
+        }
     }
 
     private (int X, int Y) RandomDynamicFreeCell(int exceptMonster)
@@ -1011,7 +1094,7 @@ public sealed class GridControl : ScrollableControl
         sw.Stop();
 
         _overlay.SetPath(result.Path);
-        _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
+        _overlay.SetSmoothPath(result.SmoothedPath);
         Invalidate();
         NotifyStatus(DescribeResult("JPS", result, sw));
         return result;
@@ -1027,7 +1110,7 @@ public sealed class GridControl : ScrollableControl
         sw.Stop();
 
         _overlay.SetPath(result.Path);
-        _overlay.SetSmoothPath(PathSmoother.Smooth(_map, result.Path));
+        _overlay.SetSmoothPath(result.SmoothedPath);
         Invalidate();
         NotifyStatus(DescribeResult("A*", result, sw));
         return result;
@@ -1052,8 +1135,8 @@ public sealed class GridControl : ScrollableControl
                 ? Loc.Zh ? $"搜索合计 {_overlay.ExpandedCount + frontier} 格，" : $"searched {_overlay.ExpandedCount + frontier} cells, "
                 : Loc.Zh ? $"扫描跳过 {scanned} 格，" : $"scanned-skipped {scanned} cells, ";
             body = Loc.Zh
-                ? $"{algo}：扩展 {r.ExpandedNodes}，入队未扩展 {frontier}，{mid}路径 {r.Path.Count} 格。"
-                : $"{algo}: expanded {r.ExpandedNodes}, frontier {frontier}, {mid}path {r.Path.Count} cells.";
+                ? $"{algo}：扩展 {r.ExpandedNodes}，入队未扩展 {frontier}，{mid}路径 {r.Path.Count} 点。"
+                : $"{algo}: expanded {r.ExpandedNodes}, frontier {frontier}, {mid}path {r.Path.Count} points.";
         }
         else
         {
@@ -1319,17 +1402,19 @@ public sealed class GridControl : ScrollableControl
             };
             using var dotBrush = new SolidBrush(Color.FromArgb(220, color));
 
-            var points = monster.Path
-                .Skip(monster.PathIndex)
-                .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
-                .ToArray();
-            if (points.Length < 2)
+            var points = new List<PointF>
+            {
+                new PointF(monster.VisualX * cs + cs / 2f, monster.VisualY * cs + cs / 2f)
+            };
+            for (int p = monster.PathIndex + 1; p < monster.Path.Count; p++)
+                points.Add(new PointF(monster.Path[p].X * cs + cs / 2f, monster.Path[p].Y * cs + cs / 2f));
+            if (points.Count < 2)
                 continue;
 
-            g.DrawLines(pen, points);
+            g.DrawLines(pen, points.ToArray());
 
             float r = Math.Max(1.8f, cs / 7f);
-            for (int p = 1; p < points.Length; p += 3)
+            for (int p = 1; p < points.Count; p += 3)
                 g.FillEllipse(dotBrush, points[p].X - r, points[p].Y - r, r * 2, r * 2);
         }
 

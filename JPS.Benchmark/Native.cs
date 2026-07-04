@@ -120,7 +120,7 @@ namespace JPS.Benchmark
             }
         }
 
-        /// <summary>寻路；返回 find_path 的原始返回值（&gt;=0 路径格数，&lt;0 错误）。仅供计时调用。</summary>
+        /// <summary>寻路；返回 find_path 的原始返回值（&gt;=0 compact path 点数，&lt;0 错误）。仅供计时调用。</summary>
         public int Find(int sx, int sy, int gx, int gy) =>
             NativeJps.jps_pathfinder_find_path(_pf, _sys, sx, sy, gx, gy);
 
@@ -164,7 +164,7 @@ namespace JPS.Benchmark
         /// <summary>最近一次寻路展开的节点数。</summary>
         public int Expanded => NativeJps.jps_pathfinder_expanded_nodes(_pf);
 
-        /// <summary>寻路并返回 (是否有解, 路径)；供与 C# 版逐格一致性抽检。</summary>
+        /// <summary>寻路并返回 (是否有解, compact path)；供与 C# 版一致性抽检。</summary>
         public (bool ok, List<(int X, int Y)>? path) FindAndCopy(int sx, int sy, int gx, int gy)
         {
             int n = Find(sx, sy, gx, gy);

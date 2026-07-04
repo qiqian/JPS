@@ -26,7 +26,7 @@ namespace JPS.Accuracy
     ///
     /// 每条场景给出官方最优解长度（octile：直 1、斜 √2，且不允许斜穿角）。本测试对每条用例：
     ///   1) JPS vs A*：整数代价（直 1000 / 斜 1414）必须**完全相等** → JPS 最优性的硬校验；
-    ///   2) JPS 路径合法性：首尾正确、逐格相邻、格子可走、（按当前构建）不斜穿角；
+    ///   2) JPS compact path 合法性：首尾正确、每段为 8 方向直线、沿途格子可走、（按当前构建）不斜穿角；
     ///   3) JPS vs 官方最优：把 JPS 路径折算成真实 octile 长度（直 1 + 斜 √2），与 optimal 比对，
     ///      校验“本项目的移动模型/最优性”是否与 MovingAI 基准一致。
     ///
@@ -158,16 +158,23 @@ namespace JPS.Accuracy
                 ? $"原生库：JPS.Native.dll 已加载（{nativeInfo}）→ 每条用例校验「C 版 JPS 路径 == C# 版 JPS 路径」"
                 : $"原生库：未启用（{nativeInfo}）→ 跳过 C/C# 强一致校验（先构建 JPS.Native 的 x64 DLL）");
             Console.WriteLine();
-            Console.WriteLine("校验项：① JPS整数代价==A*整数代价（最优性）  ② JPS路径合法（相邻/可走/不切角）  ③ JPS真实长度≈官方最优"
-                + (nativeEnabled ? "  ④ C版JPS路径==C#版JPS路径（强一致）" : "")
-                + "  ⑤ 随机改图+还原致缓存失效后，冷重扫==热结果");
-            Console.WriteLine("列说明：n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法  refL=比官方长  refS=比官方短  mism=C≠C#  cold=失效重扫≠热结果");
+            Console.WriteLine("校验项：");
+            Console.WriteLine("  ① JPS 整数代价 == A* 整数代价（最优性）");
+            Console.WriteLine("  ② JPS 路径合法（相邻/可走/不切角）");
+            Console.WriteLine("  ③ JPS 真实长度 ≈ 官方最优");
+            if (nativeEnabled)
+                Console.WriteLine("  ④ C 版 JPS == C# 版 JPS：compact path 与平滑路径均逐点严格一致（强一致）");
+            Console.WriteLine("  ⑤ 随机改图+还原致缓存失效后，冷重扫 == 热结果");
+            Console.WriteLine("列说明：");
+            Console.WriteLine("  n=用例数  pass=三项全过  jFail=JPS无解(A*有解)  subopt=JPS≠A*  inval=路径非法");
+            Console.WriteLine("  refL=比官方长  refS=比官方短  mism=C≠C#(compact 或平滑不一致)  cold=失效重扫≠热结果");
             Console.WriteLine();
             void PrintResultHeader()
             {
                 progress.Clear();
+                Console.WriteLine(new string('-', 110));
                 Console.WriteLine($"{"scen",-44}{"n",8}{"pass",8}{"jFail",7}{"subopt",8}{"inval",7}{"refL",7}{"refS",7}{"mism",7}{"cold",7}");
-                Console.WriteLine(new string('-', 108));
+                Console.WriteLine(new string('-', 110));
             }
             PrintResultHeader();
 
@@ -231,7 +238,7 @@ namespace JPS.Accuracy
 
                         // 冷缓存正确性（并行阶段之后**单线程**跑，改图会破坏“地图只读”前提，故不能并行）：
                         // 抽样若干用例，每例随机改若干格再还原 → Sync 使跳点缓存受影响行/列失效，
-                        // 冷重扫结果须与热参考逐格一致（复用该图共享 system，用完即随本图销毁）。
+                        // 冷重扫结果须与热参考 compact path 一致（复用该图共享 system，用完即随本图销毁）。
                         coldStats = ColdCachePass(loaded.map, loaded.sys, nsys, mapEntries, failDir, name);
                     }
                     finally { nsys?.Dispose(); }   // 这张图测完即销毁原生 system（用完即销毁，不缓存）
@@ -263,11 +270,11 @@ namespace JPS.Accuracy
                 : $"正确性：⚠ {fails} 例未通过（jFail={total.JFail} subopt={total.Subopt} inval={total.Inval} refL={total.RefL} refS={total.RefS}，最大偏差 {total.WorstBad:F4}）");
             if (nativeEnabled)
                 Console.WriteLine(total.Mism == 0
-                    ? $"C/C# 强一致：全部 {total.N} 例 C 版 JPS 路径与 C# 版逐格一致，✓ 通过"
+                    ? $"C/C# 强一致：全部 {total.N} 例 C 版 JPS compact path 与平滑路径均与 C# 版一致，✓ 通过"
                     : $"C/C# 强一致：⚠ {total.Mism} 例 C 版与 C# 版 JPS 结果不一致（mism）");
             if (total.ColdN > 0)
                 Console.WriteLine(total.Cold == 0
-                    ? $"冷缓存正确性：抽测 {total.ColdN} 例，随机改图+还原致缓存失效后冷重扫与热结果逐格一致，✓ 通过"
+                    ? $"冷缓存正确性：抽测 {total.ColdN} 例，随机改图+还原致缓存失效后冷重扫与热结果 compact path 一致，✓ 通过"
                     : $"冷缓存正确性：⚠ {total.Cold} 例失效重扫结果与热结果不一致（cold）");
 
             long allFails = fails + total.Mism + total.Cold;   // 退出码同时反映正确性失败、C/C# 不一致与冷缓存失效 bug
@@ -329,13 +336,17 @@ namespace JPS.Accuracy
             st.N++;
             var rj = jps.FindPath(sys, s, g);
 
-            // ④ 强一致：C 版 JPS（DLL）必须与 C# 版 JPS 结果完全一致（有解性 + 逐格路径）。
-            // 这是独立维度，与下面 A*/官方 校验互不影响；不一致单独计入 mism 并存盘。
-            // 原生侧与 C# 侧同构：本线程私有的 npf 在本图共享的 nsys 上寻路。
+            // ④ 强一致：C 版 JPS（DLL）必须与 C# 版 JPS 结果完全一致（有解性 + compact path + 平滑路径）。
+            //    这是独立维度，与下面 A*/官方 校验互不影响；不一致单独计入 mism 并存盘。
+            //    原生侧与 C# 侧同构：本线程私有的 npf 在本图共享的 nsys 上寻路。
+            //    C 与 C# 运行同一 JPS，输出相同的原始跳点序列，故 compact path 逐点严格一致；
+            //    平滑路径同样逐点精确判等，校验 C/C# 视线拉直（LOS 遍历 + 断点）完全同解。
             if (npf != null && nsys != null)
             {
-                var (nok, npath) = npf.Find(nsys, e.Sx, e.Sy, e.Gx, e.Gy);
-                if (nok != rj.Success || (rj.Success && !PathEqual(npath, rj.Path)))
+                var (nok, npath, nsmooth) = npf.Find(nsys, e.Sx, e.Sy, e.Gx, e.Gy);
+                if (nok != rj.Success
+                    || (rj.Success && !PathEqual(npath, rj.Path))
+                    || (rj.Success && !SmoothEqual(nsmooth, rj.SmoothedPath)))
                 { st.Mism++; Dump("native"); }
             }
 
@@ -352,6 +363,7 @@ namespace JPS.Accuracy
 
             var (jCard, jDiag) = CountSteps(rj.Path);
             var (aCard, aDiag) = CountSteps(ra.Path);
+            if (jCard < 0 || aCard < 0) { st.Inval++; Dump("inval"); return; }
             long jInt = jCard * 1000L + jDiag * 1414L;
             long aInt = aCard * 1000L + aDiag * 1414L;
             if (jInt != aInt) { st.Subopt++; st.WorstBad = Math.Max(st.WorstBad, Math.Abs(jInt - aInt) / 1000.0); Dump("subopt"); return; }
@@ -374,7 +386,7 @@ namespace JPS.Accuracy
         // ---------------- 冷缓存正确性（单线程；改图会破坏“地图只读”，不能与并行阶段同跑）----------------
         //
         // 对抽样用例：随机改若干格阻挡再**还原**（地图净不变，但 Version/行列版本跳变）→ Sync 令跳点缓存
-        // 受影响行/列失效 → 冷重扫。重扫结果必须与“热参考”逐格一致（热参考即并行阶段已对过 A*/官方最优的那次搜索，
+        // 受影响行/列失效 → 冷重扫。重扫结果必须与“热参考” compact path 一致（热参考即并行阶段已对过 A*/官方最优的那次搜索，
         // 同图同询问确定性相同）。这样能抓住失效/重扫机制自身的 bug（例如重扫回写越界污染邻格、行列失效漏标等），
         // 而这些在“缓存一直热”的主校验里不会触发。C# 与 C 两版各自比对自己的热参考。
         private static Stats ColdCachePass(
@@ -404,7 +416,8 @@ namespace JPS.Accuracy
 
                     // 热参考（当前缓存；等价于并行阶段已验证过的结果，同图同询问确定性一致）。
                     var warm = jps.FindPath(sys, s, g);
-                    (bool ok, List<(int X, int Y)>? path) nwarm = (false, null);
+                    // 冷缓存维度只校验重扫的 compact path 一致（平滑一致已在主强一致段覆盖），故忽略平滑分量。
+                    (bool ok, List<(int X, int Y)>? path, List<(float X, float Y)>? smooth) nwarm = (false, null, null);
                     if (npf != null) nwarm = npf.Find(nsys!, e.Sx, e.Sy, e.Gx, e.Gy);
 
                     // 选 editCount 个互异格（避开起终点），先改到相反态、再还原 → 地图净不变，缓存受影响行/列失效。
@@ -427,15 +440,15 @@ namespace JPS.Accuracy
 
                     st.ColdN++;
 
-                    // C# 冷重扫 == C# 热参考（逐格）
+                    // C# 冷重扫 == C# 热参考（compact path）
                     var cold = jps.FindPath(sys, s, g);
                     if (cold.Success != warm.Success || (warm.Success && !PathEqual(cold.Path, warm.Path)))
                     { st.Cold++; SaveFailureJson(map, s, g, "cold-cs", failDir, scenName); }
 
-                    // C 冷重扫 == C 热参考（逐格）——直接验证原生 SoA/SIMD 回写在失效重扫下是否正确
+                    // C 冷重扫 == C 热参考（compact path）——直接验证原生 SoA/SIMD 回写在失效重扫下是否正确
                     if (npf != null)
                     {
-                        var (cok, cpath) = npf.Find(nsys!, e.Sx, e.Sy, e.Gx, e.Gy);
+                        var (cok, cpath, _) = npf.Find(nsys!, e.Sx, e.Sy, e.Gx, e.Gy);
                         if (cok != nwarm.ok || (nwarm.ok && !PathEqual(cpath, nwarm.path!)))
                         { st.Cold++; SaveFailureJson(map, s, g, "cold-c", failDir, scenName); }
                     }
@@ -521,8 +534,21 @@ namespace JPS.Accuracy
         private static bool InBounds(GridMap map, (int X, int Y) p) =>
             p.X >= 0 && p.Y >= 0 && p.X < map.Width && p.Y < map.Height;
 
-        // C 版与 C# 版 JPS 路径逐格相等判定（强一致校验用）。
+        // C 版与 C# 版 JPS compact path 逐点相等判定（强一致校验用）。
+        // 两版 reconstruct 均已把跳点序列规范化为“转折点”（合并共线段），逐格几何路径唯一 →
+        // 转折点序列唯一，故等价路径的 compact 表示必然逐点一致，可直接严格比较。
         private static bool PathEqual(List<(int X, int Y)>? a, List<(int X, int Y)> b)
+        {
+            if (a is null || a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+                if (a[i].X != b[i].X || a[i].Y != b[i].Y) return false;
+            return true;
+        }
+
+        // C 版与 C# 版平滑路径逐点相等判定（强一致校验用）。
+        // 两版坐标都由整数格中心 (float)c + 0.5f 产生（c ≤ 32767 < 2^24，float 可精确表示），
+        // 故位级完全一致——用精确相等即可，任何差异都指向 LOS 遍历/断点逻辑的实现分歧。
+        private static bool SmoothEqual(List<(float X, float Y)>? a, List<System.Numerics.Vector2> b)
         {
             if (a is null || a.Count != b.Count) return false;
             for (int i = 0; i < a.Count; i++)
@@ -536,7 +562,12 @@ namespace JPS.Accuracy
             for (int i = 1; i < p.Count; i++)
             {
                 int dx = Math.Abs(p[i].X - p[i - 1].X), dy = Math.Abs(p[i].Y - p[i - 1].Y);
-                if (dx != 0 && dy != 0) diag++; else card++;
+                if (dx == 0 && dy == 0) return (-1, -1);
+                if (dx != 0 && dy != 0 && dx != dy) return (-1, -1);
+                if (dx != 0 && dy != 0)
+                    diag += Math.Max(dx, dy);
+                else
+                    card += dx + dy;
             }
             return (card, diag);
         }
@@ -551,12 +582,25 @@ namespace JPS.Accuracy
 
             for (int i = 1; i < p.Count; i++)
             {
-                int dx = p[i].X - p[i - 1].X, dy = p[i].Y - p[i - 1].Y;
-                if (Math.Abs(dx) > 1 || Math.Abs(dy) > 1 || (dx == 0 && dy == 0)) { why = $"step@{i}"; return false; }
-                if (!map.IsWalkable(p[i].X, p[i].Y)) { why = $"blocked@{i}"; return false; }
-                if (dx != 0 && dy != 0 && !allowCorner &&
-                    (!map.IsWalkable(p[i - 1].X + dx, p[i - 1].Y) || !map.IsWalkable(p[i - 1].X, p[i - 1].Y + dy)))
-                { why = $"corner@{i}"; return false; }
+                int sx = Math.Sign(p[i].X - p[i - 1].X);
+                int sy = Math.Sign(p[i].Y - p[i - 1].Y);
+                int dx = Math.Abs(p[i].X - p[i - 1].X);
+                int dy = Math.Abs(p[i].Y - p[i - 1].Y);
+                if (dx == 0 && dy == 0) { why = $"step@{i}"; return false; }
+                if (dx != 0 && dy != 0 && dx != dy) { why = $"line@{i}"; return false; }
+
+                int x = p[i - 1].X, y = p[i - 1].Y;
+                int steps = Math.Max(dx, dy);
+                for (int k = 0; k < steps; k++)
+                {
+                    if (sx != 0 && sy != 0 && !allowCorner &&
+                        (!map.IsWalkable(x + sx, y) || !map.IsWalkable(x, y + sy)))
+                    { why = $"corner@{i}:{k}"; return false; }
+
+                    x += sx;
+                    y += sy;
+                    if (!map.IsWalkable(x, y)) { why = $"blocked@{i}:{k}"; return false; }
+                }
             }
             return true;
         }

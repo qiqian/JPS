@@ -33,7 +33,7 @@
 #  define JPS_CALL
 #endif
 
-/* jps_pathfinder_find_path 的返回码：>=0 为找到的路径格数；负值为错误。 */
+/* jps_pathfinder_find_path 的返回码：>=0 为找到的 compact path 点数；负值为错误。 */
 enum
 {
     JPS_ERR_NULL          = -1,   /* 句柄为 NULL */

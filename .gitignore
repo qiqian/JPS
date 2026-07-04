@@ -8,3 +8,4 @@ tmp
 /x64/Debug
 build-android
 android-ndk-r*
+/JPS.Native/JPS.Native/x64

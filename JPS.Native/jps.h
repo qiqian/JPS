@@ -16,10 +16,13 @@
  *   jps_system_sync(s);                         // 阻挡改动后同步缓存
  *
  *   jps_pathfinder *pf = jps_pathfinder_create();
- *   int n = jps_pathfinder_find_path(pf, s, sx, sy, gx, gy);   // n>=0 路径格数，<0 见 JPS_ERR_*
+ *   int n = jps_pathfinder_find_path(pf, s, sx, sy, gx, gy);   // n>=0 compact path 点数；成功时已完成平滑
  *   if (n > 0) {
  *       int *buf = malloc(n * 2 * sizeof(int));
- *       jps_pathfinder_copy_path(pf, buf, n);                  // 取出路径（x,y 交错）
+ *       jps_pathfinder_copy_path(pf, buf, n);                  // 取出 compact path（x,y 交错）
+ *       int sn = jps_pathfinder_smoothed_path_count(pf);
+ *       float *sbuf = malloc(sn * 2 * sizeof(float));
+ *       jps_pathfinder_copy_smoothed_path(pf, sbuf, sn);       // 取出平滑路径（x,y 交错）
  *   }
  *   // 可再创建更多 pf 共用同一个 s 并行/串行寻路
  *

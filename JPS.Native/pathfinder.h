@@ -33,23 +33,23 @@ JPS_API jps_pathfinder *JPS_CALL jps_pathfinder_create(void);
 JPS_API void JPS_CALL jps_pathfinder_destroy(jps_pathfinder *pf);
 
 // 在 system 上从 (sx,sy) 到 (gx,gy) 寻路（禁止斜穿角，整数代价 1000/1414，octile 启发）
-// 结果（路径 + 展开节点数）暂存于 pf，供随后 copy/查询
+// 结果（compact path + smoothed path + 展开节点数）暂存于 pf，供随后 copy/查询
 // 调用前需确保 system 已 jps_system_sync（尤其阻挡改动之后）
-// 返回：>=0 = 路径格数（含起终点；start==goal 时为 1）；负值见 jps_export.h 的 JPS_ERR_
+// 返回：>=0 = compact path 点数（含起终点；start==goal 时为 1）；成功时已同步完成路径平滑。负值见 jps_export.h 的 JPS_ERR_
 JPS_API int JPS_CALL jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
                                               int sx, int sy, int gx, int gy);
 
-/* 最近一次寻路的**原始**路径格数（贴格折线；未找到/未调用为 0）。配 jps_pathfinder_copy_path。 */
+/* 最近一次寻路的 compact path 点数（起点 + 跳点/拐点 + 终点；未找到/未调用为 0）。配 jps_pathfinder_copy_path。 */
 JPS_API int JPS_CALL jps_pathfinder_path_count(const jps_pathfinder *pf);
 
 /*
  * 最近一次寻路的**平滑**路径点数（视线拉直后的折线；未找到/未调用为 0）。配 jps_pathfinder_copy_smoothed_path。
- * 平滑在 find_path 成功后由本函数或 copy_smoothed_path 首次调用时**自动算一次并缓存**（惰性，不取平滑则零开销）；
- * 因内部会填充缓存，pf 非 const。
+ * 平滑在 find_path 成功时已计算并缓存；本函数只返回缓存点数。pf 非 const 仅用于兼容旧声明。
  */
 JPS_API int JPS_CALL jps_pathfinder_smoothed_path_count(jps_pathfinder *pf);
 
-// 把最近一次找到的路径拷进调用方缓冲。out_xy 按 x0,y0,x1,y1,... 交错存放，
+// 把最近一次找到的 compact path 拷进调用方缓冲。JPS.Native 不暴露 expanded per-cell path。
+// out_xy 按 x0,y0,x1,y1,... 交错存放，
 // capacity_points 为可容纳点数（out_xy 至少 capacity_points*2 个 int）。
 // 返回实际写入点数 = min(path_count, capacity_points)。
 JPS_API int JPS_CALL jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity_points);
@@ -57,7 +57,7 @@ JPS_API int JPS_CALL jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out
 // 把最近一次寻路的**平滑路径**拷进调用方缓冲：视线拉直后的连续格中心点（cx+0.5, cy+0.5），
 // out_xy 按 x0,y0,x1,y1,... 交错的 float（至少 capacity_points*2 个）。
 //
-// 平滑在 find_path 成功后**自动完成并缓存**（首次调 smoothed_path_count / 本函数时惰性算一次），
+// 平滑在 find_path 成功后**自动完成并缓存**，
 // 这里只是拷已算好的结果——**无二次计算、不需要 system**。返回实际写入点数 = min(smoothed_path_count, capacity_points)。
 // 典型用法：n = jps_pathfinder_smoothed_path_count(pf); 分配 n*2 float; jps_pathfinder_copy_smoothed_path(pf, buf, n)。
 // 无路径时返回 0；因内部会填充缓存，pf 非 const。

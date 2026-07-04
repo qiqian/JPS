@@ -1,7 +1,7 @@
 /*
  * Native.cs
  * JPS Pathfinding — JPS.Native（C DLL）的 P/Invoke 封装与每线程运行器，
- * 供正确性测试把 C 版 JPS 的寻路结果与 C# 版逐格比对（强一致校验）。
+ * 供正确性测试把 C 版 JPS 的 compact path 与 C# 版比对（强一致校验）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  */
 
@@ -91,6 +91,10 @@ namespace JPS.Accuracy
         public static extern int jps_pathfinder_find_path(IntPtr pf, IntPtr system, int sx, int sy, int gx, int gy);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         public static extern int jps_pathfinder_copy_path(IntPtr pf, int[] outXy, int capacityPoints);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int jps_pathfinder_smoothed_path_count(IntPtr pf);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int jps_pathfinder_copy_smoothed_path(IntPtr pf, float[] outXy, int capacityPoints);
     }
 
     /// <summary>
@@ -138,18 +142,31 @@ namespace JPS.Accuracy
 
         public NativePathfinder() => _pf = NativeJps.jps_pathfinder_create();
 
-        /// <summary>在给定 system 上寻路。返回 (是否有解, 路径)；无解时路径为 null。</summary>
-        public (bool ok, List<(int X, int Y)>? path) Find(NativeSystem sys, int sx, int sy, int gx, int gy)
+        /// <summary>
+        /// 在给定 system 上寻路。返回 (是否有解, compact path, 平滑路径)；无解时后两者为 null。
+        /// 平滑路径与 C# 版 PathResult.SmoothedPath 同构（连续格中心点），供强一致逐点比对。
+        /// </summary>
+        public (bool ok, List<(int X, int Y)>? path, List<(float X, float Y)>? smooth) Find(
+            NativeSystem sys, int sx, int sy, int gx, int gy)
         {
             int n = NativeJps.jps_pathfinder_find_path(_pf, sys.Handle, sx, sy, gx, gy);
-            if (n < 0) return (false, null);
+            if (n < 0) return (false, null, null);
 
             var buf = new int[(long)n * 2];
             int got = NativeJps.jps_pathfinder_copy_path(_pf, buf, n);
             var path = new List<(int X, int Y)>(got);
             for (int k = 0; k < got; k++)
                 path.Add((buf[k * 2], buf[k * 2 + 1]));
-            return (true, path);
+
+            // 平滑路径（find_path 已算好并缓存，这里只取缓存，无二次计算）。
+            int sn = NativeJps.jps_pathfinder_smoothed_path_count(_pf);
+            var sbuf = new float[(long)sn * 2];
+            int sgot = NativeJps.jps_pathfinder_copy_smoothed_path(_pf, sbuf, sn);
+            var smooth = new List<(float X, float Y)>(sgot);
+            for (int k = 0; k < sgot; k++)
+                smooth.Add((sbuf[k * 2], sbuf[k * 2 + 1]));
+
+            return (true, path, smooth);
         }
 
         public void Dispose()

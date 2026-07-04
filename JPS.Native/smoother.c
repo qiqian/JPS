@@ -41,7 +41,7 @@ static bool jps__bit_range_walkable(const uint64_t *line, int a, int b)
     return (line[w1] & mask) == 0ULL;
 }
 
-bool jps_line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1)
+bool jps__line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1)
 {
     int nx, ny, sign_x, sign_y, x, y, ix, iy;
     long long decision, step_x, step_y, step_diag;
@@ -115,38 +115,12 @@ static jps_point_f jps__center(jps_point c)
     return p;
 }
 
-int jps_smooth_path(const jps_grid_map *m, const jps_point *path, int path_count,
-                    jps_point_f **out_points)
-{
-    /* 为兼容旧 API，分配缓冲并调用 jps_smooth_path_into 写入，然后返回分配的数组。
-     * 这样既保持向后兼容，又避免复制核心逻辑。 */
-    int cap = path_count;
-    jps_point_f *result;
-    int produced;
-
-    if (path_count == 0)
-    {
-        *out_points = NULL;
-        return 0;
-    }
-
-    result = (jps_point_f *)malloc((size_t)cap * sizeof(jps_point_f));
-    if (result == NULL)
-    {
-        *out_points = NULL;
-        return 0;
-    }
-
-    produced = jps_smooth_path_into(m, path, path_count, result, cap);
-    *out_points = result;
-    return produced;
-}
-
-int jps_smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
-                         jps_point_f *out_points, int capacity_points)
+int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
+                          jps_point_f *out_points, int capacity_points)
 {
     int count = 0;
-    int anchor, i;
+    int segment;
+    jps_point anchor, previous;
 
     if (path_count == 0)
         return 0;
@@ -157,14 +131,34 @@ int jps_smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_
     if (path_count == 1)
         return count;
 
-    anchor = 0;
-    for (i = 2; i < path_count; i++)
+    anchor = path[0];
+    previous = path[0];
+    for (segment = 1; segment < path_count; segment++)
     {
-        if (!jps_line_of_sight(m, path[anchor].x, path[anchor].y, path[i].x, path[i].y))
+        jps_point from = path[segment - 1];
+        jps_point to = path[segment];
+        int step_x = jps_sign(to.x - from.x);
+        int step_y = jps_sign(to.y - from.y);
+        int dx = abs(to.x - from.x);
+        int dy = abs(to.y - from.y);
+        int steps = dx > dy ? dx : dy;
+        int step;
+
+        for (step = 1; step <= steps; step++)
         {
-            if (count < capacity_points) out_points[count] = jps__center(path[i - 1]);
-            count++;
-            anchor = i - 1;
+            jps_point current;
+            current.x = from.x + step_x * step;
+            current.y = from.y + step_y * step;
+
+            if ((previous.x != anchor.x || previous.y != anchor.y) &&
+                !jps__line_of_sight(m, anchor.x, anchor.y, current.x, current.y))
+            {
+                if (count < capacity_points) out_points[count] = jps__center(previous);
+                count++;
+                anchor = previous;
+            }
+
+            previous = current;
         }
     }
 

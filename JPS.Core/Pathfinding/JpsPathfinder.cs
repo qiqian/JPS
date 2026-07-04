@@ -7,6 +7,11 @@
 using System;
 using System.Collections.Generic;
 using JPS.Models;
+#if UNITY_2022_1_OR_NEWER
+using Vector2 = UnityEngine.Vector2;
+#else
+using Vector2 = System.Numerics.Vector2;
+#endif
 
 namespace JPS.Pathfinding
 {
@@ -35,12 +40,19 @@ namespace JPS.Pathfinding
 
     /// <summary>
     /// 寻路结果（纯算法产物，不含任何可视化数据）。
+    /// JPS 返回 compact path（起点、跳点/拐点、终点）；A* baseline 返回相邻格路径。
     /// 可视化所需的展开 / 前沿 / 扫描格子通过 <see cref="ISearchObserver"/> 在搜索过程中获取。
     /// </summary>
     public sealed class PathResult
     {
         public bool Success { get; set; }
+        /// <summary>
+        /// JPS exposes only compact path points. It does not expose an expanded per-cell path.
+        /// A* keeps its adjacent-cell baseline path for cost/accuracy comparison.
+        /// </summary>
         public List<(int X, int Y)> Path { get; set; } = new List<(int X, int Y)>();
+        /// <summary>Smoothed path, computed by FindPath together with Path.</summary>
+        public List<Vector2> SmoothedPath { get; set; } = new List<Vector2>();
         public int ExpandedNodes { get; set; }
         public string Message { get; set; } = string.Empty;
     }
@@ -119,7 +131,7 @@ namespace JPS.Pathfinding
                 obs?.OnExpand(cx, cy);
 
                 if (current == goalId)
-                    return Success(startId, goalId, expandedCount);
+                    return Success(map, startId, goalId, expandedCount);
 
                 int dirCount = FillDirections(map, cx, cy, _parentDir[current]);
 
@@ -248,15 +260,16 @@ namespace JPS.Pathfinding
 
         // ---------------- 结果构造 ----------------
 
-        private PathResult Success(int startId, int goalId, int expandedCount)
+        private PathResult Success(GridMap map, int startId, int goalId, int expandedCount)
         {
             var path = ReconstructPath(startId, goalId);
             return new PathResult
             {
                 Success = true,
                 Path = path,
+                SmoothedPath = PathSmoother.Smooth(map, path),
                 ExpandedNodes = expandedCount,
-                Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 格。"
+                Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 点。"
             };
         }
 
@@ -476,36 +489,11 @@ namespace JPS.Pathfinding
             }
             nodes.Reverse();
 
-            // start==goal 退化：只有一个节点，段循环会跑 0 次而漏掉它——直接补回该格
-            // （与 A* 一致：到自身的路径应含该格本身，否则返回空路径）。
-            if (nodes.Count == 1)
-                return new List<(int X, int Y)> { (goalId % _w, goalId / _w) };
-
-            var path = new List<(int X, int Y)>();
-            for (int i = 0; i < nodes.Count - 1; i++)
-            {
-                int fromId = nodes[i];
-                int toId = nodes[i + 1];
-                AppendSegment(path, fromId % _w, fromId / _w, toId % _w, toId / _w);
-            }
+            // compact path = JPS 原始跳点序列（起点、跳点/拐点、终点），不做共线合并、不展开中间格。
+            var path = new List<(int X, int Y)>(nodes.Count);
+            for (int i = 0; i < nodes.Count; i++)
+                path.Add((nodes[i] % _w, nodes[i] / _w));
             return path;
-        }
-
-        private static void AppendSegment(List<(int X, int Y)> path, int fx, int fy, int tx, int ty)
-        {
-            int dx = Math.Sign(tx - fx);
-            int dy = Math.Sign(ty - fy);
-            int x = fx, y = fy;
-
-            if (path.Count == 0 || path[path.Count - 1] != (fx, fy))
-                path.Add((fx, fy));
-
-            while (x != tx || y != ty)
-            {
-                x += dx;
-                y += dy;
-                path.Add((x, y));
-            }
         }
     }
 }

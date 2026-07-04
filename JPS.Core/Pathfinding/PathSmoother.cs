@@ -21,9 +21,9 @@ namespace JPS.Pathfinding
     /// 每个路径点只做一次视线检测，最坏复杂度 O(n·L)。
     /// 输出为连续格坐标（格中心 = cx+0.5），仅用于显示，不参与整数寻路。
     /// </summary>
-    public static class PathSmoother
+    internal static class PathSmoother
     {
-        public static List<Vector2> Smooth(GridMap map, List<(int X, int Y)> path)
+        internal static List<Vector2> Smooth(GridMap map, List<(int X, int Y)> path)
         {
             var result = new List<Vector2>();
             if (path.Count == 0)
@@ -34,15 +34,30 @@ namespace JPS.Pathfinding
             if (path.Count == 1)
                 return result;
 
-            int anchor = 0;
-            // 注意从 i=2 开始：锚点与其相邻点(anchor+1)必然通视，无需检测
-            for (int i = 2; i < path.Count; i++)
+            var anchor = path[0];
+            var previous = path[0];
+
+            // 输入是 compact path，不额外构造 expanded path；但平滑判断仍沿每个 compact 段逐格前进。
+            // anchor -> previous 是已知可通的原路径前缀，只测试 anchor 能否继续跨到 current。
+            for (int segment = 1; segment < path.Count; segment++)
             {
-                // 锚点到 path[i] 失去视线：path[i-1] 是从锚点出发仍可见的最远点，定为新拐点
-                if (!LineOfSight(map, path[anchor].X, path[anchor].Y, path[i].X, path[i].Y))
+                var from = path[segment - 1];
+                var to = path[segment];
+                int stepX = Math.Sign(to.X - from.X);
+                int stepY = Math.Sign(to.Y - from.Y);
+                int steps = Math.Max(Math.Abs(to.X - from.X), Math.Abs(to.Y - from.Y));
+
+                for (int step = 1; step <= steps; step++)
                 {
-                    result.Add(Center(path[i - 1]));
-                    anchor = i - 1;
+                    var current = (X: from.X + stepX * step, Y: from.Y + stepY * step);
+                    if (previous != anchor &&
+                        !LineOfSight(map, anchor.X, anchor.Y, current.X, current.Y))
+                    {
+                        result.Add(Center(previous));
+                        anchor = previous;
+                    }
+
+                    previous = current;
                 }
             }
 
@@ -61,7 +76,7 @@ namespace JPS.Pathfinding
         ///   对角穿越是否检查两侧由 JPS_ALLOW_CORNER_CUTTING 控制，与寻路移动规则保持一致。
         /// 全整数运算，可被整数寻路安全复用。
         /// </summary>
-        public static bool LineOfSight(GridMap map, int x0, int y0, int x1, int y1)
+        internal static bool LineOfSight(GridMap map, int x0, int y0, int x1, int y1)
         {
             if (!map.IsWalkable(x0, y0))
                 return false;

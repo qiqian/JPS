@@ -71,7 +71,7 @@ namespace JPS.Pathfinding
                 obs?.OnExpand(cx, cy);
 
                 if (current == goalId)
-                    return Success(startId, goalId, expandedCount);
+                    return Success(map, startId, goalId, expandedCount);
 
                 long gCur = _g[current];
 
@@ -108,13 +108,14 @@ namespace JPS.Pathfinding
             return Failure(expandedCount);
         }
 
-        private PathResult Success(int startId, int goalId, int expandedCount)
+        private PathResult Success(GridMap map, int startId, int goalId, int expandedCount)
         {
             var path = ReconstructPath(startId, goalId);
             return new PathResult
             {
                 Success = true,
                 Path = path,
+                SmoothedPath = PathSmoother.Smooth(map, path),
                 ExpandedNodes = expandedCount,
                 Message = $"A*：扩展 {expandedCount}，路径 {path.Count} 格。"
             };

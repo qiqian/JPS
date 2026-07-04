@@ -31,7 +31,8 @@ typedef struct
 static const jps__jump_entry JPS__JUMP_NONE = { false, 0, 0, 0 };
 
 /*
- * 寻路结果（纯内部状态，不进公共头）：path 是动态数组，path_count 个格坐标，
+ * 寻路结果（纯内部状态，不进公共头）：path 是 compact path 动态数组，
+ * path_count 为起点、跳点/拐点与终点的点数。
  * 缓冲可跨次查询复用。对外只通过 copy/count 等访问器暴露，不跨 ABI 传结构体。
  */
 typedef struct
@@ -96,14 +97,15 @@ struct jps_pathfinder
     int *rebuild_nodes;            /* 路径重建用父链节点栈，跨查询复用，避免每次 malloc/free */
     int rebuild_nodes_capacity;
 
-    /* 平滑路径缓存：find_path 成功后**惰性**算一次（首次取平滑时）并缓存，copy_smoothed_path 直接拷。
-     * 惰性的意义：不取平滑的纯寻路（benchmark 计时 / 只要原始格路径）零平滑开销。 */
-    const jps_grid_map *smooth_map;   /* 寻路所用地图，供惰性平滑（LOS 需要） */
+    /* 平滑路径缓存：find_path 成功时同步算好并缓存，copy_smoothed_path 直接拷。 */
+    const jps_grid_map *smooth_map;   /* 寻路所用地图，供平滑 LOS 使用 */
     jps_point_f *smoothed;            /* 平滑点缓存（连续格中心），跨查询复用 */
     int smoothed_count;
     int smoothed_capacity;
     bool smoothed_valid;              /* 本次寻路结果的平滑是否已算 */
 };
+
+static void jps__ensure_smoothed(jps_pathfinder *pf);
 
 /* ---------------- PathResult（内部） ---------------- */
 
@@ -428,13 +430,31 @@ static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
     pf->rebuild_nodes_capacity = n;
 }
 
+static int jps__expanded_path_count(const jps_point *path, int path_count)
+{
+    int total, i;
+
+    if (path_count <= 0)
+        return 0;
+
+    total = 1;
+    for (i = 1; i < path_count; i++)
+    {
+        int dx = abs(path[i].x - path[i - 1].x);
+        int dy = abs(path[i].y - path[i - 1].y);
+        total += dx > dy ? dx : dy;
+    }
+    return total;
+}
+
 static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id, jps_path_result *r)
 {
-    /* 先沿父链收集跳点节点（goal → start），再从数组尾到头顺序写出完整逐格路径。 */
+    /* 沿父链收集 compact path（goal → start），再反向写出 start → goal。
+     * 对外只暴露 compact path：起点、跳点/拐点、终点；不展开跳跃段中间格。 */
     int *nodes = pf->rebuild_nodes;
     int nodes_count = 0;
     int current = goal_id;
-    int total_count, i, write;
+    int i, write;
 
     /* 收集 */
     for (;;)
@@ -459,52 +479,16 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
         }
     }
 
-    /* start==goal 退化：只有一个节点，段循环跑 0 次而漏掉它——直接补回该格。 */
-    if (nodes_count == 1)
-    {
-        jps__ensure_path_capacity(r, 1);
-        r->path[0].x = goal_id % pf->w;
-        r->path[0].y = goal_id / pf->w;
-        r->path_count = 1;
-        return;
-    }
-
-    total_count = 1;
-    for (i = nodes_count - 1; i > 0; i--)
-    {
-        int from_id = nodes[i];
-        int to_id = nodes[i - 1];
-        int dx = abs((to_id % pf->w) - (from_id % pf->w));
-        int dy = abs((to_id / pf->w) - (from_id / pf->w));
-        total_count += dx > dy ? dx : dy;
-    }
-
-    jps__ensure_path_capacity(r, total_count);
+    /* compact path = JPS 原始跳点序列（起点、跳点/拐点、终点），不做共线合并、不展开中间格。
+     * nodes 为 goal→start，反向写出 start→goal。 */
+    jps__ensure_path_capacity(r, nodes_count);
     write = 0;
+    for (i = nodes_count - 1; i >= 0; i--)
     {
-        int start = nodes[nodes_count - 1];
-        r->path[write].x = start % pf->w;
-        r->path[write].y = start / pf->w;
+        int id = nodes[i];
+        r->path[write].x = id % pf->w;
+        r->path[write].y = id / pf->w;
         write++;
-    }
-
-    for (i = nodes_count - 1; i > 0; i--)
-    {
-        int from_id = nodes[i];
-        int to_id = nodes[i - 1];
-        int fx = from_id % pf->w, fy = from_id / pf->w;
-        int tx = to_id % pf->w, ty = to_id / pf->w;
-        int dx = jps_sign(tx - fx);
-        int dy = jps_sign(ty - fy);
-
-        while (fx != tx || fy != ty)
-        {
-            fx += dx;
-            fy += dy;
-            r->path[write].x = fx;
-            r->path[write].y = fy;
-            write++;
-        }
     }
     r->path_count = write;
 }
@@ -571,8 +555,9 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             jps__reconstruct_path(pf, start_id, goal_id, out);
             out->success = true;
             out->expanded_nodes = expanded_count;
-            pf->smooth_map = map;         /* 记住地图，供惰性平滑（copy/count 首次触发） */
-            pf->smoothed_valid = false;   /* 本次结果的平滑待算 */
+            pf->smooth_map = map;         /* 记住地图，供平滑 LOS 使用 */
+            pf->smoothed_valid = false;
+            jps__ensure_smoothed(pf);     /* benchmark 计时包含平滑；copy/count 只读缓存 */
             return out->path_count;
         }
 
@@ -648,8 +633,8 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
     return n;
 }
 
-/* 惰性平滑：find_path 成功后首次取平滑时算一次并缓存。前提：pf->result.success（path_count≥1）。
- * 平滑（视线拉直只抽稀、不加点）点数 ≤ 原路径点数，故按 path_count 备足容量一次算完。 */
+/* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
+ * 输入为 compact path；平滑会沿 compact 段隐式逐格推进，所以容量按隐式展开后的最大点数准备。 */
 static void jps__ensure_smoothed(jps_pathfinder *pf)
 {
     int need;
@@ -657,7 +642,7 @@ static void jps__ensure_smoothed(jps_pathfinder *pf)
     if (pf->smoothed_valid)
         return;
 
-    need = pf->result.path_count;
+    need = jps__expanded_path_count(pf->result.path, pf->result.path_count);
     if (need > pf->smoothed_capacity)
     {
         int n = pf->smoothed_capacity < 16 ? 16 : pf->smoothed_capacity * 2;
@@ -666,8 +651,8 @@ static void jps__ensure_smoothed(jps_pathfinder *pf)
         pf->smoothed = (jps_point_f *)realloc(pf->smoothed, (size_t)n * sizeof(jps_point_f));
         pf->smoothed_capacity = n;
     }
-    pf->smoothed_count = jps_smooth_path_into(pf->smooth_map, pf->result.path, pf->result.path_count,
-                                              pf->smoothed, pf->smoothed_capacity);
+    pf->smoothed_count = jps__smooth_path_into(pf->smooth_map, pf->result.path, pf->result.path_count,
+                                               pf->smoothed, pf->smoothed_capacity);
     pf->smoothed_valid = true;
 }
 
@@ -675,7 +660,7 @@ int jps_pathfinder_smoothed_path_count(jps_pathfinder *pf)
 {
     if (pf == NULL || !pf->result.success)
         return 0;
-    jps__ensure_smoothed(pf);   /* 首次触发惰性平滑；已算则直接返回 */
+    jps__ensure_smoothed(pf);   /* find_path 已算；保留兜底，已算则直接返回 */
     return pf->smoothed_count;
 }
 
