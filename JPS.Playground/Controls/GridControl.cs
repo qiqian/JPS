@@ -605,7 +605,7 @@ public sealed class GridControl : ScrollableControl
         {
             var monster = _monsters[i];
             var next = GetMonsterNextStep(monster);
-            if (!IsDynamicFreeForMonster(next.X, next.Y, exceptMonster: i) || !reserved.Add(next.Y * DynamicWidth + next.X))
+            if (!CanMonsterStep(monster.X, monster.Y, next.X, next.Y, i) || !reserved.Add(next.Y * DynamicWidth + next.X))
             {
                 PickMonsterTarget(i);
                 next = (monster.X, monster.Y);
@@ -862,7 +862,7 @@ public sealed class GridControl : ScrollableControl
         if (next.X == monster.X && next.Y == monster.Y)
             return false;
 
-        return IsDynamicFreeForMonster(next.X, next.Y, exceptMonster: index);
+        return CanMonsterStep(monster.X, monster.Y, next.X, next.Y, index);
     }
 
     private static (int X, int Y) GetMonsterNextStep(DynamicMonster monster)
@@ -1025,6 +1025,31 @@ public sealed class GridControl : ScrollableControl
     private bool IsInDynamicBlock(int x, int y) =>
         x >= _dynamicBlockX && x < _dynamicBlockX + DynamicBlockW &&
         y >= _dynamicBlockY && y < _dynamicBlockY + DynamicBlockH;
+
+    // 格是否为“墙/障碍”（静态刷的 + 移动障碍块 + 越界），不含其他怪——用于 no-cc 斜穿角判定。
+    private bool IsDynamicWall(int x, int y)
+    {
+        if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
+            return true;
+        if (_dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y])
+            return true;
+        return IsInDynamicBlock(x, y);
+    }
+
+    // 怪物从 (fx,fy) 走一步到相邻格 (tx,ty) 是否合法：目标格 free（含避让其他怪），
+    // 且在**禁止斜穿角的构建**下（JpsBuildInfo.CornerCutting==false），对角移动时两个共角格不能是墙/障碍。
+    // 是否允许斜穿角与 core 的寻路规则保持一致：cc 构建允许，no-cc 构建禁止。
+    // 障碍移动后必须靠它挡住旧路径里现在会斜穿墙角的那一步，并触发重新寻路。
+    private bool CanMonsterStep(int fx, int fy, int tx, int ty, int exceptMonster)
+    {
+        if (!IsDynamicFreeForMonster(tx, ty, exceptMonster))
+            return false;
+        int dx = tx - fx, dy = ty - fy;
+        if (!JpsBuildInfo.CornerCutting && dx != 0 && dy != 0 &&
+            (IsDynamicWall(tx, fy) || IsDynamicWall(fx, ty)))
+            return false;   // no-cc 构建：对角两侧共角格若有墙 → 斜穿角，禁止
+        return true;
+    }
 
     private void MoveDynamicBlock(int dx, int dy)
     {
