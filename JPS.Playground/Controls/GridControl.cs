@@ -23,6 +23,7 @@ public sealed class GridControl : ScrollableControl
     private const int DynamicMaxBlockStepsPerTick = 1;
     private const int DynamicMonsterMoveInterval = 10;
     private const float DynamicMonsterVisualLerp = 0.18f;
+    private const float DynamicMonsterVisualSpeed = 0.16f;   // 沿平滑折线的视觉滑行速度（格/帧），略大于逻辑推进以贴住不掉队
     private const int DynamicObstacleMoveInterval = 30;
     private const int DynamicObstacleMaxDrift = 3;
     private const double DynamicObstacleMoveChance = 0.18;
@@ -41,6 +42,7 @@ public sealed class GridControl : ScrollableControl
         public int PathIndex;
         public readonly List<System.Numerics.Vector2> SmoothPath = new();
         public int SmoothPathIndex;
+        public float VisualArc;   // 视觉沿平滑折线已滑行的弧长（格单位），用于连续匀速跟随
 
         public DynamicMonster(int x, int y, int targetX, int targetY)
         {
@@ -585,6 +587,7 @@ public sealed class GridControl : ScrollableControl
             monster.SmoothPath.Clear();
             monster.SmoothPath.AddRange(plan.SmoothPath);
             monster.SmoothPathIndex = 0;
+            monster.VisualArc = 0f;   // 新平滑折线从小怪当前格起，视觉弧长归零
         }
 
         if (failedPlans > 0)
@@ -712,34 +715,87 @@ public sealed class GridControl : ScrollableControl
     private void UpdateDynamicMonsterVisuals()
     {
         for (int i = 0; i < _monsters.Length; i++)
-        {
-            var monster = _monsters[i];
-            var target = GetMonsterVisualTarget(monster);
-            monster.VisualX = Approach(monster.VisualX, target.X, DynamicMonsterVisualLerp);
-            monster.VisualY = Approach(monster.VisualY, target.Y, DynamicMonsterVisualLerp);
-        }
+            UpdateMonsterVisual(_monsters[i]);
     }
 
-    private static (float X, float Y) GetMonsterVisualTarget(DynamicMonster monster)
+    // 视觉沿平滑折线按弧长**匀速滑行**（连续，不再是“追逻辑格投影点”的顿挫）。
+    // 逻辑格 (X,Y) 在折线上的弧长是上限：视觉只滑到逻辑格处、不越过它（避免穿墙/穿怪）。
+    private static void UpdateMonsterVisual(DynamicMonster m)
     {
-        if (monster.SmoothPath.Count < 2)
-            return (monster.X, monster.Y);
+        if (m.SmoothPath.Count < 2)
+        {
+            // 无平滑折线（退化/未就绪）：回退到向逻辑格中心插值。
+            m.VisualX = Approach(m.VisualX, m.X, DynamicMonsterVisualLerp);
+            m.VisualY = Approach(m.VisualY, m.Y, DynamicMonsterVisualLerp);
+            m.VisualArc = 0f;
+            return;
+        }
 
-        AdvanceMonsterSmoothPathIndex(monster);
-        if (monster.SmoothPathIndex >= monster.SmoothPath.Count - 1)
-            return SmoothCell(monster.SmoothPath[^1]);
+        float targetArc = LogicalArcOnSmooth(m);
+        if (m.VisualArc < targetArc)
+            m.VisualArc = Math.Min(targetArc, m.VisualArc + DynamicMonsterVisualSpeed);
+        else
+            m.VisualArc = targetArc;   // 逻辑落后（阻塞/新路径回退）→ 直接收敛到逻辑位置
 
-        var a = SmoothCell(monster.SmoothPath[monster.SmoothPathIndex]);
-        var b = SmoothCell(monster.SmoothPath[monster.SmoothPathIndex + 1]);
-        float vx = b.X - a.X;
-        float vy = b.Y - a.Y;
-        float len2 = vx * vx + vy * vy;
+        var (vx, vy) = SmoothPointAtArc(m.SmoothPath, m.VisualArc);
+        m.VisualX = vx;
+        m.VisualY = vy;
+    }
+
+    // 逻辑格 (X,Y) 投影到当前平滑段，返回其沿折线的累积弧长（格单位）。
+    private static float LogicalArcOnSmooth(DynamicMonster m)
+    {
+        AdvanceMonsterSmoothPathIndex(m);
+        var sp = m.SmoothPath;
+        int idx = m.SmoothPathIndex;
+
+        float arc = 0f;
+        for (int k = 0; k < idx && k < sp.Count - 1; k++)
+            arc += SmoothSegLen(sp[k], sp[k + 1]);
+
+        if (idx >= sp.Count - 1)
+            return arc;   // 已到最后一个顶点
+
+        var a = SmoothCell(sp[idx]);
+        var b = SmoothCell(sp[idx + 1]);
+        float dx = b.X - a.X, dy = b.Y - a.Y;
+        float len2 = dx * dx + dy * dy;
         if (len2 <= float.Epsilon)
-            return b;
+            return arc;
+        float t = Math.Clamp(((m.X - a.X) * dx + (m.Y - a.Y) * dy) / len2, 0f, 1f);
+        return arc + t * MathF.Sqrt(len2);
+    }
 
-        float t = ((monster.X - a.X) * vx + (monster.Y - a.Y) * vy) / len2;
-        t = Math.Clamp(t, 0f, 1f);
-        return (a.X + vx * t, a.Y + vy * t);
+    // 平滑折线上弧长 arc 处的点（SmoothCell 坐标系，与 VisualX/Y 一致）。
+    private static (float X, float Y) SmoothPointAtArc(List<System.Numerics.Vector2> sp, float arc)
+    {
+        var start = SmoothCell(sp[0]);
+        if (arc <= 0f)
+            return start;
+
+        float acc = 0f;
+        for (int k = 0; k < sp.Count - 1; k++)
+        {
+            float seg = SmoothSegLen(sp[k], sp[k + 1]);
+            if (seg <= float.Epsilon)
+                continue;
+            if (arc <= acc + seg)
+            {
+                var a = SmoothCell(sp[k]);
+                var b = SmoothCell(sp[k + 1]);
+                float t = (arc - acc) / seg;
+                return (a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
+            }
+            acc += seg;
+        }
+        var last = SmoothCell(sp[^1]);
+        return (last.X, last.Y);
+    }
+
+    private static float SmoothSegLen(System.Numerics.Vector2 a, System.Numerics.Vector2 b)
+    {
+        float dx = b.X - a.X, dy = b.Y - a.Y;
+        return MathF.Sqrt(dx * dx + dy * dy);
     }
 
     private static float Approach(float current, float target, float factor)
@@ -796,6 +852,7 @@ public sealed class GridControl : ScrollableControl
         monster.PathIndex = 0;
         monster.SmoothPath.Clear();
         monster.SmoothPathIndex = 0;
+        monster.VisualArc = 0f;
     }
 
     private bool IsMonsterPathNextUsable(DynamicMonster monster, int index)
@@ -1051,6 +1108,8 @@ public sealed class GridControl : ScrollableControl
         for (int y = newY; y < newY + DynamicBlockH; y++)
             for (int x = newX; x < newX + DynamicBlockW; x++)
                 _map.SetBlocked(x, y, true);
+
+        _system.Sync();
     }
 
     public void ClearMap()
@@ -1058,6 +1117,7 @@ public sealed class GridControl : ScrollableControl
         StopDynamicDemo();
         EnsureGrid();
         _map.ClearAll();
+        _system.Sync();
         _startX = _startY = _endX = _endY = -1;
         _overlay.Clear();
         Invalidate();
@@ -1673,6 +1733,7 @@ public sealed class GridControl : ScrollableControl
                     PaintObstacleBlock(x, y);        // 点在空地：刷 2×2 阻挡
                     ClearMarkersOnObstacles();       // 起终点被刷成阻挡则清除
                 }
+                _system.Sync();
                 Invalidate();
                 break;
 
