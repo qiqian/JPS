@@ -44,9 +44,13 @@ _A **production-ready, reusable Jump Point Search implementation**. The core is 
   - [3. 平滑方案的选择](#3-平滑方案的选择) · [Path Smoothing](#3-path-smoothing)
   - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [Lock-Free Multithreading](#4-lock-free-multithreading)
   - [5. C Native 极致优化层](#5-c-native-极致优化层) · [C Native Optimization Layer](#5-c-native-optimization-layer)
-- [三、可视化说明](#三可视化说明) · [Visualization](#iii-visualization)
-- [四、工程与性能要点](#四工程与性能要点) · [Engineering and Performance](#iv-engineering-and-performance)
-- [运行](#运行) · [Run](#run)
+- [三、工程与性能要点](#三工程与性能要点) · [Engineering and Performance](#iii-engineering-and-performance)
+  - [1. 内存开销对比](#1-内存开销对比) · [Memory Footprint](#1-memory-footprint)
+  - [2. 性能表现（最新实测）](#2-性能表现最新实测) · [Performance](#2-performance-latest-measured)
+- [四、使用说明](#四使用说明) · [Usage Guide](#iv-usage-guide)
+  - [1. 项目结构](#1-项目结构) · [Project Structure](#1-project-structure)
+  - [2. 运行测试](#2-运行测试) · [Run Tests](#2-run-tests)
+  - [3. 运行 Playground](#3-运行-playground) · [Run Playground](#3-run-playground)
 
 ---
 
@@ -273,7 +277,7 @@ flowchart TD
 - 某个区域只要被**任意一个**线程第一个走到，就被它一次性扫描洗白；此后**所有线程**再经过该区域全是 O(1) 命中。
 - 于是整段并行寻路里，每条线段的 O(L) 扫描代价**全局只付一次**，而不是"每线程各付一次"。线程越多、查询越密集、路径越重叠，复用率越高，**平均每次寻路反而越快**。
 
-换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第四章工程与性能要点](#四工程与性能要点)：C hot overall 仍比 C# hot 快 1.44×，且比 A\* 快 48.3×。）
+换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第三章工程与性能要点](#三工程与性能要点)：C hot overall 仍比 C# hot 快 1.44×，且比 A\* 快 48.3×。）
 
 > ⚠️ 前提：并行寻路**之前**必须由**单线程**调用一次 `JpsSystem.Sync()`（确定缓存版本），且并行期间**不得修改地图**。要改地图就先 join 掉所有寻路线程，改完再 Sync、再并行。
 
@@ -332,7 +336,7 @@ void worker(const query *queries, int count, int *path_xy, int capacity_points)
 jps_system_destroy(system);
 ```
 
-> **正确性验证**：[`JPS.Accuracy`](#运行) 默认在已开启 `JPS_CONCURRENT_CACHE` 时，按每张图加载后用 `CPU/2` 线程共享同一 `JpsSystem` 跑全部 `.scen`；最新结果覆盖 **142.3 万条**官方真实查询，JPS vs A\* 失败 0、C vs C# 路径不一致 0、冷缓存随机改图+还原不一致 0，相当于持续复核共享缓存的多线程安全。
+> **正确性验证**：[`JPS.Accuracy`](#2-运行测试) 默认在已开启 `JPS_CONCURRENT_CACHE` 时，按每张图加载后用 `CPU/2` 线程共享同一 `JpsSystem` 跑全部 `.scen`；最新结果覆盖 **142.3 万条**官方真实查询，JPS vs A\* 失败 0、C vs C# 路径不一致 0、冷缓存随机改图+还原不一致 0，相当于持续复核共享缓存的多线程安全。
 
 ### 5. C Native 极致优化层
 
@@ -359,29 +363,7 @@ jps_system_destroy(system);
 
 ---
 
-## 三、可视化说明
-
-| 颜色 / 标记 | 含义 |
-|---|---|
-| 灰底 / 近黑 | 可走格 / 阻挡 |
-| 🟩 绿 | 已扩展（出队展开的跳点） |
-| 🟪 紫 | 已入队未扩展（前沿） |
-| 🟦 蓝灰 | 扫描跳过（射线经过但未进 open 的格子） |
-| 🟡 金线 | 最终路径 |
-| 🔴 红线 | 平滑后路径 |
-| S / G | 起点 / 终点 |
-
-**每格的十字 4 点** = 该格 4 个正交方向跳点缓存的状态（位置即方向：上 N、下 S、左 W、右 E）：
-
-- 空心 = **dirty**（待计算）
-- 白色实心 = 之前已缓存
-- 橙色实心 = **本次寻路新更新**的方向
-
-这组点让"惰性跳点表"的工作过程一目了然：编辑单格障碍后，受影响行/列上的相关方向变空心；跑一次寻路，只有被触及的方向被点亮，其中本次新洗白的显示为橙色。
-
----
-
-## 四、工程与性能要点
+## 三、工程与性能要点
 
 - **三层验证**：A\* 作最短路准确性基准；C# JPS 作基础算法参考；C JPS 作 native 优化实现，必须与 C# 逐格一致。
 - **整数寻路**：代价、启发、g/f 全用整数（`long`），A\* 与 JPS 在同一度量下比较，避免浮点误差污染判定。
@@ -392,7 +374,7 @@ jps_system_destroy(system);
 - **低分配搜索热路径**：堆采用 hole-sift，路径重建 nodes、剪枝方向、搜索状态等缓冲按地图尺寸持久复用。
 - **基准与准确性验证**：benchmark 按地图分组多线程执行并按分发顺序输出；accuracy 对 142.3 万条官方 `.scen` 做 A\*/C#/C 交叉验证。
 
-### JPS vs A\* 内存开销对比
+### 1. 内存开销对比
 
 两者的逐节点状态都是"按地图尺寸一次性分配、跨查询复用"的扁平数组（`N = 宽 × 高`）。逐格字节数精确如下：
 
@@ -417,7 +399,7 @@ jps_system_destroy(system);
 - 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
 - 可视化数据完全不在算法核心里：寻路器只通过 [`ISearchObserver`](JPS.Core/Pathfinding/ISearchObserver.cs) 在展开/入队/扫描时发事件，收集与存储由 UI 层的采集器（[`SearchOverlay`](JPS.Playground/Controls/SearchOverlay.cs)）负责；不传 observer（`null`）时纯算法运行零额外开销。
 
-### C# / C JPS vs A\* 性能表现（最新实测）
+### 2. 性能表现（最新实测）
 
 当前性能口径与准确性口径分开：**A\*** 主要用来证明最优性，不再作为性能目标；**C# JPS** 是基础 JPS 算法的可移植参考；**C JPS** 是 native 优化目标。最新结果来自 `benchmark-results/combo-all-q1000-t6-20260704-104152.txt`，这是 Windows x64 / MSVC native 构建下的实测：**AMD Ryzen 7 5800X3D**（16 逻辑核，6 个 map worker）、.NET 10、`corner-cutting=off`、`concurrent-cache=on`、全部 7 个 MovingAI 地图集 **562 张图**。同一套 `JPS.Native` 源码也可面向 iOS/Android 构建，移动端绝对耗时需以目标设备重测。
 
@@ -457,50 +439,9 @@ dotnet run -c Release --project JPS.Accuracy
 
 ---
 
-## 运行
+## 四、使用说明
 
-需要 .NET（Windows，WinForms）。
-
-```powershell
-dotnet run --project JPS.Playground
-```
-
-界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文）——工具栏按钮、提示、图例、状态栏、存档对话框一并切换（见 [`Loc`](JPS.Playground/Controls/Loc.cs)）。
-
-工具栏按钮（中文标签 · 英文标签）：
-
-| 按钮 | 作用 |
-|---|---|
-| **刷阻挡** · Wall | 刷障碍：点空地刷 2×2 阻挡，点阻挡清除 1 格 |
-| **起点** · Start | 设置起点 |
-| **终点** · Goal | 设置终点 |
-| **清除** · Clear | 清空整张地图 |
-| **JPS寻路** · JPS Path | 运行 JPS 并可视化搜索过程与路径 |
-| **A\*寻路** · A* Path | 运行 A\*（对照）以作比较 |
-| **保存** · Save | 把阻挡 + 起终点保存为 JSON |
-| **载入** · Load | 从 JSON 载入地图 |
-| **打开地图** · Open .map | 打开 **MovingAI** `.map` 基准地图（保持格子原始大小，超出窗口用滚动条查看） |
-
-典型流程：**刷阻挡** 画障碍 → **起点** / **终点** 标记 → **JPS寻路** 或 **A\*寻路** 对比 → **保存** / **载入** 复现场景。
-
-图例（工具栏与网格之间）把每种叠加色映射到含义，同样会本地化。
-
-**MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。也可在命令行自检单图：`dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`；或**递归遍历 `movingai/` 全部子目录（现含 562 张地图）、每图随机取若干可解起终点对比 JPS/A***：`dotnet run -c Release --project JPS.Benchmark -- mapbench 100`（每图样本数可调；可加第二参数只跑某子集，如 `mapbench 100 sc1-map`；输出每图尺寸/可走率/扩展节点/耗时/加速比/与 A* 是否一致及总汇总，并同时写入仓库 `benchmark-results/` 下带时间戳的报告文件，方便日后查看）。
-
-### 动态模式
-
-点击 Playground 工具栏的 **动态（Dynamic）** 切换到一个围绕单个共享 `JpsSystem` 构建的固定尺寸压力场景。
-
-- 方向键移动那块大的玩家可控障碍；阻挡画刷的编辑同样作用在这张实时 `GridMap` 上，怪物寻路前会先跑一次 `JpsSystem.Sync()`。
-- 不规则的环境障碍在小范围内缓慢随机漂移，且不与怪物或玩家可控块重叠。
-- 怪物是动画位图角色、不是地图障碍；它们靠每帧的预约表（reservation table）互相避让。
-- 每只怪物缓存自己的路径，仅在以下情形才重新寻路：到达目标、下一步被阻挡/被预约、目标失效、或触发随机重寻概率。
-- 并行的怪物寻路共享同一份跳点缓存，并从可复用对象池租借 `JpsPathfinder` 实例；若某一帧需要的并发寻路器多于现有数量，池会自动扩容。
-- 怪物路径按各自颜色绘制。状态栏只统计**实际提交了寻路请求的帧**的平均寻路墙钟耗时，外加最近一次的请求数与累计失败数。
-
----
-
-## 项目结构
+### 1. 项目结构
 
 解决方案 `JPS.slnx` 拆成**六个职责清晰的工程**：
 
@@ -563,6 +504,89 @@ JPS.slnx                         # 解决方案
 >
 > **并发**：[无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)**默认开启**（`JPS.Core` 已定义 `JPS_CONCURRENT_CACHE`），多个 `JpsPathfinder` 可共享同一 `JpsSystem` 并行寻路；移除该符号则退回单线程极速模式。
 
+### 2. 运行测试
+
+运行完整正确性测试：
+
+```powershell
+dotnet run -c Release --project JPS.Accuracy
+```
+
+运行完整性能基准（随机投点 + 官方 `.scen` 合并，默认按地图分组并行）：
+
+```powershell
+dotnet run -c Release --project JPS.Benchmark -- combo 1000
+```
+
+常用缩小范围命令（`combo [q] [子目录|workers] [workers]`：第二参为数字时作 worker 线程数、否则作 `movingai/` 子目录；`workers` 默认约为逻辑核数的一半）：
+
+```powershell
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 sc1-map
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 6
+dotnet run -c Release --project JPS.Accuracy -- dao 100
+```
+
+测试结果会写入 `accuracy-results/` 与 `benchmark-results/`，benchmark 主线程会按分发顺序持续输出结果，并每 50 行重打一遍表头。
+
+### 3. 运行 Playground
+
+需要 .NET（Windows，WinForms）。
+
+```powershell
+dotnet run --project JPS.Playground
+```
+
+界面语言按系统区域**自动选择**（`zh*` 为中文，其余英文）——工具栏按钮、提示、图例、状态栏、存档对话框一并切换（见 [`Loc`](JPS.Playground/Controls/Loc.cs)）。
+
+工具栏按钮（中文标签 · 英文标签）：
+
+| 按钮 | 作用 |
+|---|---|
+| **刷阻挡** · Wall | 刷障碍：点空地刷 2×2 阻挡，点阻挡清除 1 格 |
+| **起点** · Start | 设置起点 |
+| **终点** · Goal | 设置终点 |
+| **清除** · Clear | 清空整张地图 |
+| **JPS寻路** · JPS Path | 运行 JPS 并可视化搜索过程与路径 |
+| **A\*寻路** · A* Path | 运行 A\*（对照）以作比较 |
+| **保存** · Save | 把阻挡 + 起终点保存为 JSON |
+| **载入** · Load | 从 JSON 载入地图 |
+| **打开地图** · Open .map | 打开 **MovingAI** `.map` 基准地图（保持格子原始大小，超出窗口用滚动条查看） |
+
+典型流程：**刷阻挡** 画障碍 → **起点** / **终点** 标记 → **JPS寻路** 或 **A\*寻路** 对比 → **保存** / **载入** 复现场景。
+
+图例（工具栏与网格之间）把每种叠加色映射到含义，同样会本地化：
+
+| 颜色 / 标记 | 含义 |
+|---|---|
+| 灰底 / 近黑 | 可走格 / 阻挡 |
+| 🟩 绿 | 已扩展（出队展开的跳点） |
+| 🟪 紫 | 已入队未扩展（前沿） |
+| 🟦 蓝灰 | 扫描跳过（射线经过但未进 open 的格子） |
+| 🟡 金线 | 最终路径 |
+| 🔴 红线 | 平滑后路径 |
+| S / G | 起点 / 终点 |
+
+**每格的十字 4 点** = 该格 4 个正交方向跳点缓存的状态（位置即方向：上 N、下 S、左 W、右 E）：
+
+- 空心 = **dirty**（待计算）
+- 白色实心 = 之前已缓存
+- 橙色实心 = **本次寻路新更新**的方向
+
+这组点让"惰性跳点表"的工作过程一目了然：编辑单格障碍后，受影响行/列上的相关方向变空心；跑一次寻路，只有被触及的方向被点亮，其中本次新洗白的显示为橙色。
+
+**MovingAI 地图**：点 **打开地图** 可载入任意 [MovingAI 基准地图](https://movingai.com/benchmarks/) `.map`（octile 格式）——例如仓库 `movingai/` 下的文件。网格会调整到地图的精确尺寸，**格子保持原始大小不缩小**，超出窗口的部分用滚动条查看（大图如 `orz900d` 1491×656 只渲染当前可见区域，滚动流畅）。滚轮可滚动查看，**`Ctrl` + 滚轮以鼠标位置为锚点缩放格子**（放大/缩小，2–64px）。地形按 MovingAI 约定二值化（`.`/`G`/`S` 可走，其余阻挡）。
+
+**动态模式**：
+
+点击 Playground 工具栏的 **动态（Dynamic）** 切换到一个围绕单个共享 `JpsSystem` 构建的固定尺寸压力场景。
+
+- 方向键移动那块大的玩家可控障碍；阻挡画刷的编辑同样作用在这张实时 `GridMap` 上，怪物寻路前会先跑一次 `JpsSystem.Sync()`。
+- 不规则的环境障碍在小范围内缓慢随机漂移，且不与怪物或玩家可控块重叠。
+- 怪物是动画位图角色、不是地图障碍；它们靠每帧的预约表（reservation table）互相避让。
+- 每只怪物缓存自己的路径，仅在以下情形才重新寻路：到达目标、下一步被阻挡/被预约、目标失效、或触发随机重寻概率。
+- 并行的怪物寻路共享同一份跳点缓存，并从可复用对象池租借 `JpsPathfinder` 实例；若某一帧需要的并发寻路器多于现有数量，池会自动扩容。
+- 怪物路径按各自颜色绘制。状态栏只统计**实际提交了寻路请求的帧**的平均寻路墙钟耗时，外加最近一次的请求数与累计失败数。
+
 ---
 
 ## 许可证
@@ -574,7 +598,7 @@ JPS.slnx                         # 解决方案
 
 # English Translation
 
-> Full English translation of the body above. Use the right-hand links in the [table of contents](#目录--table-of-contents) to jump here. ([↑ back to top](#jps-pathfinding-playground))
+> Full English translation of the body above. Use the right-hand links in the [table of contents](#目录--table-of-contents) to jump here. ([↑ back to top](#jps-pathfinding--playground-visualization))
 
 ## Features
 
@@ -795,7 +819,7 @@ Field references use a static `ref` method on the struct (`Dir4Byte.Slot`) plus 
 - A region scanned first by **any** thread is whitened once; afterward **all threads** hit it in O(1).
 - So across the whole parallel run, each strip's O(L) scan is **paid globally once**, not "once per thread". The more threads, the denser the queries, the more the paths overlap — the higher the reuse, and the **lower the average time per search**.
 
-In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter IV](#iv-engineering-and-performance): C hot overall is still 1.44× faster than C# hot and 48.3× faster than A\*.)
+In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter III](#iii-engineering-and-performance): C hot overall is still 1.44× faster than C# hot and 48.3× faster than A\*.)
 
 > ⚠️ Prerequisite: **before** parallel pathfinding, a **single thread** must call `JpsSystem.Sync()` once (to fix the cache version), and the map **must not change** during parallel runs. To edit the map, join all pathfinding threads first, then Sync, then go parallel again.
 
@@ -854,7 +878,7 @@ void worker(const query *queries, int count, int *path_xy, int capacity_points)
 jps_system_destroy(system);
 ```
 
-> **Correctness check:** with `JPS_CONCURRENT_CACHE` on, [`JPS.Accuracy`](#run) runs each map's full `.scen` set across `CPU/2` threads sharing one `JpsSystem` by default. The latest result covers **1.423M** official real-world queries with 0 JPS-vs-A\* failures, 0 C-vs-C# path mismatches, and 0 cold-cache edit+restore mismatches, continuously re-checking shared-cache thread safety.
+> **Correctness check:** with `JPS_CONCURRENT_CACHE` on, [`JPS.Accuracy`](#2-run-tests) runs each map's full `.scen` set across `CPU/2` threads sharing one `JpsSystem` by default. The latest result covers **1.423M** official real-world queries with 0 JPS-vs-A\* failures, 0 C-vs-C# path mismatches, and 0 cold-cache edit+restore mismatches, continuously re-checking shared-cache thread safety.
 
 ### 5. C Native Optimization Layer
 
@@ -879,27 +903,7 @@ Main optimizations:
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
 
-## III. Visualization
-
-| Color / marker | Meaning |
-|---|---|
-| Gray / near-black | walkable cell / obstacle |
-| 🟩 green | expanded (dequeued and expanded jump point) |
-| 🟪 purple | frontier (enqueued, not yet expanded) |
-| 🟦 blue-gray | scanned-skipped (cells a ray passed through but never entered open) |
-| 🟡 gold line | final path |
-| 🔴 red line | smoothed path |
-| S / G | start / goal |
-
-**The 4 dots in each cell's cross** = the cache state of that cell's 4 cardinal directions (position = direction: up N, down S, left W, right E):
-
-- hollow = **dirty** (to be computed)
-- solid white = previously cached
-- solid orange = direction **newly updated by this search**
-
-These dots make the "lazy jump table" process obvious: after a single-cell obstacle edit, the affected row/column directions turn hollow; run one search and only the touched directions light up, with the ones newly whitened this run shown in orange.
-
-## IV. Engineering and Performance
+## III. Engineering and Performance
 
 - **Three-tier validation:** A\* is the shortest-path accuracy baseline; C# JPS is the base algorithm reference; C JPS is the optimized native build and must match C# cell-for-cell.
 - **Integer pathfinding:** cost, heuristic, g/f are all integer (`long`), so A\* and JPS are compared under the same metric with no floating-point noise.
@@ -910,7 +914,7 @@ These dots make the "lazy jump table" process obvious: after a single-cell obsta
 - **Low-allocation hot path:** the heap uses hole-sift, while path-rebuild nodes, pruning directions, and search state buffers are retained per map size.
 - **Benchmark and accuracy harnesses:** benchmarks run map-grouped workers and emit rows in dispatch order; accuracy cross-checks A\*/C#/C over 1.423M official `.scen` cases.
 
-### JPS vs A\* Memory Footprint
+### 1. Memory Footprint
 
 Both keep per-node state as flat arrays "allocated once per map size, reused across queries" (`N = width × height`). Exact bytes per cell:
 
@@ -935,7 +939,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 - The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
 - Visualization data lives entirely outside the algorithm core: the pathfinders only emit events via [`ISearchObserver`](JPS.Core/Pathfinding/ISearchObserver.cs) on expand/enqueue/scan, and collection/storage is handled by a UI-layer collector ([`SearchOverlay`](JPS.Playground/Controls/SearchOverlay.cs)); with no observer (`null`) a pure run has zero extra overhead.
 
-### C# / C JPS vs A\* Performance (latest measured)
+### 2. Performance (latest measured)
 
 Performance and correctness now have separate roles: **A\*** primarily proves optimality and is no longer the performance target; **C# JPS** is the portable reference for the base JPS algorithm; **C JPS** is the native optimization target. The latest run is `benchmark-results/combo-all-q1000-t6-20260704-104152.txt`, measured with the Windows x64 / MSVC native build on **AMD Ryzen 7 5800X3D** (16 logical cores, 6 map workers), .NET 10, `corner-cutting=off`, `concurrent-cache=on`, across all 7 MovingAI map sets (**562 maps**). The same `JPS.Native` source can also be built for iOS/Android; absolute mobile timings should be measured on the target device.
 
@@ -973,48 +977,9 @@ dotnet run -c Release --project JPS.Benchmark -- combo 1000
 dotnet run -c Release --project JPS.Accuracy
 ```
 
-## Run
+## IV. Usage Guide
 
-Requires .NET (Windows, WinForms).
-
-```powershell
-dotnet run --project JPS.Playground
-```
-
-The UI **auto-selects its language from the system locale** — Chinese on `zh*` systems, English otherwise — so toolbar buttons, tooltips, the legend, the status bar and the save/load dialogs all switch accordingly (see [`Loc`](JPS.Playground/Controls/Loc.cs)).
-
-Toolbar buttons (English label · Chinese label):
-
-| Button | Action |
-|---|---|
-| **Wall** · 刷阻挡 | Brush obstacles: click empty to paint a 2×2 wall; click a wall to erase 1 cell |
-| **Start** · 起点 | Set the start cell |
-| **Goal** · 终点 | Set the goal cell |
-| **Clear** · 清除 | Clear the whole map |
-| **JPS Path** · JPS寻路 | Run JPS and visualize the search + path |
-| **A\* Path** · A*寻路 | Run A\* (baseline) for comparison |
-| **Save** · 保存 | Save obstacles + start/goal to JSON |
-| **Load** · 载入 | Load a map from JSON |
-| **Open .map** · 打开地图 | Open a **MovingAI** `.map` benchmark map (keeps the native cell size; scroll to view maps larger than the window) |
-
-Typical flow: **Wall** to draw obstacles → **Start** / **Goal** to mark → **JPS Path** or **A\* Path** to compare → **Save** / **Load** to reproduce a scene.
-
-The legend (between the toolbar and the grid) maps every overlay color to its meaning; it is localized too.
-
-**MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked). You can sanity-check a single map from the CLI: `dotnet run --project JPS.Benchmark -- map movingai/mapf-map/den520d.map`; or **benchmark JPS vs A\* recursively across all of `movingai/` (562 maps), each with random solvable start/goal pairs**: `dotnet run -c Release --project JPS.Benchmark -- mapbench 100` (samples-per-map is configurable; an optional second arg limits to one subset, e.g. `mapbench 100 sc1-map`; prints per-map size/walkable%/expanded/time/speedup/A*-match plus a grand total, and also writes a timestamped report under `benchmark-results/`).
-
-### Dynamic Mode
-
-Click **Dynamic** in the Playground toolbar to switch to a fixed-size stress scene built around one shared `JpsSystem`.
-
-- Arrow keys move the large user-controlled obstacle; edits from the wall brush update the same live `GridMap`, and `JpsSystem.Sync()` runs before monster pathfinding.
-- Irregular environment obstacles drift slowly in a small random range without overlapping monsters or the user-controlled block.
-- Monsters are animated bitmap actors, not map obstacles. They avoid each other with a per-frame reservation table.
-- Each monster keeps its cached path and only re-paths when it reaches the target, the next step becomes blocked/reserved, the target becomes invalid, or the random re-path chance fires.
-- Parallel monster pathfinding shares the same jump cache and rents `JpsPathfinder` instances from a reusable pool; the pool grows if one frame needs more concurrent finders than are currently available.
-- Monster paths are drawn in per-monster colors. The status bar reports average pathfinding wall time only across frames that actually submitted path requests, plus the latest request count and accumulated failure count.
-
-## Project Structure
+### 1. Project Structure
 
 The `JPS.slnx` solution splits into **six clearly-scoped projects**:
 
@@ -1076,6 +1041,87 @@ JPS.slnx                         # solution
 > **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale. **JPS.Native** is a cross-platform C native core: Windows can use the bundled MSVC x64 project, while iOS/Android can build it as native plugins (iOS static library/framework, Android `.so`). Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
 >
 > **Concurrency:** [lock-free multithreading](#4-lock-free-multithreading) is **on by default** (`JPS.Core` defines `JPS_CONCURRENT_CACHE`), so multiple `JpsPathfinder`s can share one `JpsSystem` in parallel; remove the symbol to fall back to single-thread max-speed mode.
+
+### 2. Run Tests
+
+Run the full correctness test:
+
+```powershell
+dotnet run -c Release --project JPS.Accuracy
+```
+
+Run the full performance benchmark (random sampling + official `.scen` combined, map-grouped parallel by default):
+
+```powershell
+dotnet run -c Release --project JPS.Benchmark -- combo 1000
+```
+
+Common narrowing commands (`combo [q] [subdir|workers] [workers]`: a numeric 2nd arg is the worker-thread count, otherwise a `movingai/` subdirectory; `workers` defaults to roughly half the logical cores):
+
+```powershell
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 sc1-map
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 6
+dotnet run -c Release --project JPS.Accuracy -- dao 100
+```
+
+Results are written to `accuracy-results/` and `benchmark-results/`; the benchmark's main thread streams rows in dispatch order and reprints the header every 50 rows.
+
+### 3. Run Playground
+
+Requires .NET (Windows, WinForms).
+
+```powershell
+dotnet run --project JPS.Playground
+```
+
+The UI **auto-selects its language from the system locale** — Chinese on `zh*` systems, English otherwise — so toolbar buttons, tooltips, the legend, the status bar and the save/load dialogs all switch accordingly (see [`Loc`](JPS.Playground/Controls/Loc.cs)).
+
+Toolbar buttons (English label · Chinese label):
+
+| Button | Action |
+|---|---|
+| **Wall** · 刷阻挡 | Brush obstacles: click empty to paint a 2×2 wall; click a wall to erase 1 cell |
+| **Start** · 起点 | Set the start cell |
+| **Goal** · 终点 | Set the goal cell |
+| **Clear** · 清除 | Clear the whole map |
+| **JPS Path** · JPS寻路 | Run JPS and visualize the search + path |
+| **A\* Path** · A*寻路 | Run A\* (baseline) for comparison |
+| **Save** · 保存 | Save obstacles + start/goal to JSON |
+| **Load** · 载入 | Load a map from JSON |
+| **Open .map** · 打开地图 | Open a **MovingAI** `.map` benchmark map (keeps the native cell size; scroll to view maps larger than the window) |
+
+Typical flow: **Wall** to draw obstacles → **Start** / **Goal** to mark → **JPS Path** or **A\* Path** to compare → **Save** / **Load** to reproduce a scene.
+
+The legend (between the toolbar and the grid) maps every overlay color to its meaning; it is localized too:
+
+| Color / marker | Meaning |
+|---|---|
+| Gray / near-black | walkable cell / obstacle |
+| 🟩 green | expanded (dequeued and expanded jump point) |
+| 🟪 purple | frontier (enqueued, not yet expanded) |
+| 🟦 blue-gray | scanned-skipped (cells a ray passed through but never entered open) |
+| 🟡 gold line | final path |
+| 🔴 red line | smoothed path |
+| S / G | start / goal |
+
+**The 4 dots in each cell's cross** = the cache state of that cell's 4 cardinal directions (position = direction: up N, down S, left W, right E):
+
+- hollow = **dirty** (to be computed)
+- solid white = previously cached
+- solid orange = direction **newly updated by this search**
+
+These dots make the "lazy jump table" process obvious: after a single-cell obstacle edit, the affected row/column directions turn hollow; run one search and only the touched directions light up, with the ones newly whitened this run shown in orange.
+
+**MovingAI maps:** click **Open .map** to load any [MovingAI benchmark](https://movingai.com/benchmarks/) `.map` (octile format) — e.g. the files under `movingai/`. The grid resizes to the map's exact dimensions, **keeps the native cell size (no shrinking)**, and you scroll to view anything larger than the window (large maps like `orz900d` at 1491×656 only render the visible region, so scrolling stays smooth). The mouse wheel scrolls; **`Ctrl` + wheel zooms the cells anchored at the cursor** (2–64px). Terrain is binarized per the MovingAI convention (`.`/`G`/`S` walkable, everything else blocked).
+
+**Dynamic mode:** click **Dynamic** in the Playground toolbar to switch to a fixed-size stress scene built around one shared `JpsSystem`.
+
+- Arrow keys move the large user-controlled obstacle; edits from the wall brush update the same live `GridMap`, and `JpsSystem.Sync()` runs before monster pathfinding.
+- Irregular environment obstacles drift slowly in a small random range without overlapping monsters or the user-controlled block.
+- Monsters are animated bitmap actors, not map obstacles. They avoid each other with a per-frame reservation table.
+- Each monster keeps its cached path and only re-paths when it reaches the target, the next step becomes blocked/reserved, the target becomes invalid, or the random re-path chance fires.
+- Parallel monster pathfinding shares the same jump cache and rents `JpsPathfinder` instances from a reusable pool; the pool grows if one frame needs more concurrent finders than are currently available.
+- Monster paths are drawn in per-monster colors. The status bar reports average pathfinding wall time only across frames that actually submitted path requests, plus the latest request count and accumulated failure count.
 
 ## License
 
