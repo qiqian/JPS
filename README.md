@@ -521,9 +521,8 @@ dotnet run -c Release --project JPS.Benchmark -- combo 1000
 常用缩小范围命令（`combo [q] [子目录|workers] [workers]`：第二参为数字时作 worker 线程数、否则作 `movingai/` 子目录；`workers` 默认约为逻辑核数的一半）：
 
 ```powershell
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 sc1-map
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 6
-dotnet run -c Release --project JPS.Accuracy -- dao 100
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 
+dotnet run -c Release --project JPS.Accuracy
 ```
 
 测试结果会写入 `accuracy-results/` 与 `benchmark-results/`，benchmark 主线程会按分发顺序持续输出结果，并每 50 行重打一遍表头。
@@ -1059,9 +1058,8 @@ dotnet run -c Release --project JPS.Benchmark -- combo 1000
 Common narrowing commands (`combo [q] [subdir|workers] [workers]`: a numeric 2nd arg is the worker-thread count, otherwise a `movingai/` subdirectory; `workers` defaults to roughly half the logical cores):
 
 ```powershell
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 sc1-map
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 6
-dotnet run -c Release --project JPS.Accuracy -- dao 100
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 
+dotnet run -c Release --project JPS.Accuracy
 ```
 
 Results are written to `accuracy-results/` and `benchmark-results/`; the benchmark's main thread streams rows in dispatch order and reprints the header every 50 rows.
