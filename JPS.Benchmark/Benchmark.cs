@@ -7,41 +7,71 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Collections.Concurrent;
 using JPS.Data;
 using JPS.Models;
 using JPS.Pathfinding;
 
 namespace JPS.Benchmark
 {
-    /// <summary>
-    /// 命令行合并基准（唯一模式）：
-    ///   dotnet run -- [每图随机样本数=30] [子目录]
-    ///
-    /// 先归并去重所有 .scen；再对每张被引用的地图（每张只解析一次）依次做「随机投点(rand)」与「scen」两段。
-    /// 每段都测：JPS(C#) 与 JPS(C) 的**冷/热**路径耗时、A* 耗时，并给出 A*/C 的冷、热加速比。
-    ///   冷路径 = 每次寻路前在一个小窗口内翻转少量格子（模拟动态地图的局部更新）并 Sync，再在改后地图上寻路；
-    ///   热路径 = 缓存复用（Sync 一次后连续寻路）。
-    /// 不校验路径正确性（由 JPS.Accuracy 负责）。
-    /// </summary>
     internal static class Benchmark
     {
         private const int ResultHeaderRepeat = 50;
+        private const int Repeats = 3;
+
+
+        // Thread affinity helpers: only used on Windows. Bind threads to specific logical processors.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetCurrentThread();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern UIntPtr SetThreadAffinityMask(IntPtr hThread, UIntPtr dwThreadAffinityMask);
+
+        private static bool TrySetCurrentThreadAffinity(int cpuIndex)
+        {
+            if (!OperatingSystem.IsWindows())
+                return false;
+            if (cpuIndex < 0 || cpuIndex >= (IntPtr.Size * 8))
+                ; // still try, mask may be larger on the system
+            try
+            {
+                IntPtr h = GetCurrentThread();
+                UIntPtr mask = new UIntPtr(1UL << cpuIndex);
+                UIntPtr prev = SetThreadAffinityMask(h, mask);
+                return prev != UIntPtr.Zero;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         static int Main(string[] args)
         {
-            // 唯一模式 combo：容忍首参写成 "combo"；其余参数为 [每图随机样本数] [子目录]。
             var a = args;
-            if (a.Length > 0 && string.Equals(a[0], "combo", StringComparison.OrdinalIgnoreCase)) a = a[1..];
+            if (a.Length > 0 && string.Equals(a[0], "combo", StringComparison.OrdinalIgnoreCase))
+                a = a[1..];
+
             int q = a.Length >= 1 && int.TryParse(a[0], out int v) ? v : 30;
-            string? sub = a.Length >= 2 ? a[1] : null;
-            ComboBench(q, sub);
+            string? sub = null;
+            int workers = Math.Max(1, Environment.ProcessorCount / 2 - 2);
+
+            if (a.Length >= 2)
+            {
+                if (int.TryParse(a[1], out int t) && t > 0)
+                    workers = t;
+                else
+                    sub = a[1];
+            }
+            if (a.Length >= 3 && int.TryParse(a[2], out int t3) && t3 > 0)
+                workers = t3;
+
+            ComboBench(q, sub, workers);
             return 0;
         }
 
-        // 由 JPS.Core 的编译期常量组织出一行构建配置摘要。
         private static string BuildConfig() =>
-            $"斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}，" +
-            $"多线程共享缓存={(JpsBuildInfo.ConcurrentCache ? "开启" : "关闭")}";
+            $"corner-cutting={(JpsBuildInfo.CornerCutting ? "on" : "off")}, " +
+            $"concurrent-cache={(JpsBuildInfo.ConcurrentCache ? "on" : "off")}";
 
         private static string FindDir(string name)
         {
@@ -56,11 +86,17 @@ namespace JPS.Benchmark
             throw new DirectoryNotFoundException(name);
         }
 
-        // 同时把输出写到控制台与报告文件（接管 Console.Out，无需改动任何 WriteLine）。
         private sealed class TeeTextWriter : TextWriter
         {
-            private readonly TextWriter _a, _b;
-            public TeeTextWriter(TextWriter a, TextWriter b) { _a = a; _b = b; }
+            private readonly TextWriter _a;
+            private readonly TextWriter _b;
+
+            public TeeTextWriter(TextWriter a, TextWriter b)
+            {
+                _a = a;
+                _b = b;
+            }
+
             public override Encoding Encoding => _a.Encoding;
             public override void Write(char value) { _a.Write(value); _b.Write(value); }
             public override void Write(string? value) { _a.Write(value); _b.Write(value); }
@@ -68,15 +104,13 @@ namespace JPS.Benchmark
             public override void Flush() { _a.Flush(); _b.Flush(); }
         }
 
-        // 进度行：只用 \r 在真实终端底部刷新（直接写真实 console，不经 TeeTextWriter，
-        // 因此绝不会进入报告文件）。输出被重定向（管道/文件）时自动关闭，避免污染。
         private sealed class ConsoleProgress
         {
             private readonly TextWriter _console;
             private readonly bool _enabled;
             private int _lastLen;
             private long _lastShownMs = -100000;
-            private const long MinIntervalMs = 1000;
+            private const long MinIntervalMs = 250;
 
             public ConsoleProgress(TextWriter console)
             {
@@ -90,11 +124,13 @@ namespace JPS.Benchmark
                 long now = Environment.TickCount64;
                 if (!force && now - _lastShownMs < MinIntervalMs) return;
                 _lastShownMs = now;
+
                 int max = SafeWidth();
                 if (text.Length > max) text = text.Substring(0, max);
                 _console.Write('\r');
                 _console.Write(text);
-                if (_lastLen > text.Length) _console.Write(new string(' ', _lastLen - text.Length));
+                if (_lastLen > text.Length)
+                    _console.Write(new string(' ', _lastLen - text.Length));
                 _console.Write('\r');
                 _console.Flush();
                 _lastLen = text.Length;
@@ -117,7 +153,6 @@ namespace JPS.Benchmark
             }
         }
 
-        // 按“地图”归并所有 .scen 用例：每张 .map 只被 Parse 一次；重复起终点对去重（每对只跑一次）。
         private sealed class ScenGroup
         {
             public readonly string MapPath;
@@ -126,37 +161,73 @@ namespace JPS.Benchmark
             public ScenGroup(string mapPath) { MapPath = mapPath; }
         }
 
-        // 只读所有 .scen（不 Parse 任何 .map），按“地图实际路径”归并用例并去重。
+        private sealed class MapJob
+        {
+            public int Index;
+            public string SortKey = string.Empty;
+            public ScenGroup Group = null!;
+        }
+
+        private sealed class BenchRow
+        {
+            public string SortKey = string.Empty;
+            public string Tag = string.Empty;
+            public string Plain = string.Empty;
+            public string Colored = string.Empty;
+            public double Cj, Wj, Cn, Wn, A;
+            public int N;
+        }
+
+        // Result of one phase (rand or scen) of one map. Row == null = no matching pairs; Error != null = failed.
+        private sealed class PhaseResult
+        {
+            public BenchRow? Row;
+            public string? Error;
+        }
+
         private static (Dictionary<string, ScenGroup> groups, long totalEntries, int scenFileCount) CollectScenGroups(string dir, string root)
         {
             var groups = new Dictionary<string, ScenGroup>(StringComparer.OrdinalIgnoreCase);
             long totalEntries = 0;
             int scenFileCount = 0;
+
             foreach (var f in Directory.GetFiles(dir, "*.scen", SearchOption.AllDirectories))
             {
                 string scenDir = Path.GetDirectoryName(f)!;
                 string? mapField = null;
                 var pairs = new List<(int sx, int sy, int gx, int gy)>();
+
                 foreach (var raw in File.ReadLines(f))
                 {
                     string line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith("version", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (line.Length == 0 || line.StartsWith("version", StringComparison.OrdinalIgnoreCase))
+                        continue;
                     var t = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length < 9) continue;
+                    if (t.Length < 9)
+                        continue;
                     mapField ??= t[1];
                     pairs.Add((int.Parse(t[4]), int.Parse(t[5]), int.Parse(t[6]), int.Parse(t[7])));
                 }
-                if (mapField == null || pairs.Count == 0) continue;
+
+                if (mapField == null || pairs.Count == 0)
+                    continue;
 
                 string? mapPath = ResolveMapPath(scenDir, mapField, root);
-                if (mapPath == null) continue;
+                if (mapPath == null)
+                    continue;
 
-                if (!groups.TryGetValue(mapPath, out var g)) { g = new ScenGroup(mapPath); groups[mapPath] = g; }
+                if (!groups.TryGetValue(mapPath, out var g))
+                {
+                    g = new ScenGroup(mapPath);
+                    groups[mapPath] = g;
+                }
                 g.ScenCount++;
-                foreach (var p in pairs) g.Pairs.Add(p);
+                foreach (var p in pairs)
+                    g.Pairs.Add(p);
                 totalEntries += pairs.Count;
                 scenFileCount++;
             }
+
             return (groups, totalEntries, scenFileCount);
         }
 
@@ -172,13 +243,11 @@ namespace JPS.Benchmark
             return Path.GetFullPath(p);
         }
 
-        private static string Trunc(string s, int max) => s.Length <= max ? s : s.Substring(0, max - 1) + "…";
-
-        // ANSI 前景色包裹（绿=更快，红=更慢），仅用于控制台着色。
+        private static string Trunc(string s, int max) => s.Length <= max ? s : s.Substring(0, max - 1) + "~";
         private static string Green(string s) => "\x1b[32m" + s + "\x1b[0m";
         private static string Red(string s) => "\x1b[31m" + s + "\x1b[0m";
 
-#pragma warning disable SYSLIB1054   // 一处控制台着色，用经典 DllImport，不为此把整类改成 partial
+#pragma warning disable SYSLIB1054
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetStdHandle(int nStdHandle);
         [DllImport("kernel32.dll")]
@@ -187,395 +256,658 @@ namespace JPS.Benchmark
         private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 #pragma warning restore SYSLIB1054
 
-        // 在 Windows 旧版 conhost 上启用 ANSI 转义（Windows Terminal 默认已启用）；失败则忽略。
         private static void EnableVirtualTerminal()
         {
             try
             {
-                IntPtr h = GetStdHandle(-11);          // STD_OUTPUT_HANDLE
+                IntPtr h = GetStdHandle(-11);
                 if (GetConsoleMode(h, out uint mode))
-                    SetConsoleMode(h, mode | 0x0004);  // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                    SetConsoleMode(h, mode | 0x0004);
             }
-            catch { /* 非 Windows 或调用失败：忽略，退化为无色 */ }
+            catch { }
         }
 
-        // 用一张小合成图跑少量查询，触发 JIT 编译（不计入正式计时，避免首图被编译开销污染）。
         private static void WarmupJit()
         {
             var m = new GridMap(64, 64);
             var rng = new Random(1);
-            for (int i = 0; i < 300; i++) m.SetBlocked(rng.Next(64), rng.Next(64), true);
+            for (int i = 0; i < 300; i++)
+                m.SetBlocked(rng.Next(64), rng.Next(64), true);
+
             var sys = new JpsSystem(m);
             sys.Sync();
             var j = new JpsPathfinder();
             var a = new AStarPathfinder();
+
             for (int i = 0; i < 100; i++)
             {
                 var s = (rng.Next(64), rng.Next(64));
-                var gg = (rng.Next(64), rng.Next(64));
-                j.FindPath(sys, s, gg);
-                a.FindPath(m, s, gg);
+                var g = (rng.Next(64), rng.Next(64));
+                j.FindPath(sys, s, g);
+                a.FindPath(m, s, g);
             }
         }
 
-        // ============ 合并基准：随机投点 + .scen，测 JPS(C#/C) 冷/热 与 A* ============
-        private static void ComboBench(int q, string? sub)
+        private static void ComboBench(int q, string? sub, int workers)
         {
             string root = FindDir("movingai");
-            string dir = string.IsNullOrEmpty(sub) ? root : Path.Combine(root, sub!);
-            if (!Directory.Exists(dir)) { Console.WriteLine($"目录不存在：{dir}"); return; }
+            string dir = string.IsNullOrEmpty(sub) ? root : Path.Combine(root, sub);
+            if (!Directory.Exists(dir))
+            {
+                Console.WriteLine($"Directory not found: {dir}");
+                return;
+            }
 
             var (groups, totalEntries, scenFileCount) = CollectScenGroups(dir, root);
-            if (groups.Count == 0) { Console.WriteLine($"未找到可用 .scen 文件：{dir}"); return; }
+            if (groups.Count == 0)
+            {
+                Console.WriteLine($"No usable .scen files found: {dir}");
+                return;
+            }
 
+            workers = Math.Max(1, Math.Min(workers, groups.Count));
             string repoRoot = Directory.GetParent(root)?.FullName ?? root;
             string reportsDir = Path.Combine(repoRoot, "benchmark-results");
             Directory.CreateDirectory(reportsDir);
-            string scopeTag = string.IsNullOrEmpty(sub) ? "all" : sub!.Replace('/', '-').Replace('\\', '-');
-            string reportPath = Path.Combine(reportsDir, $"combo-{scopeTag}-q{q}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            string scopeTag = string.IsNullOrEmpty(sub) ? "all" : sub.Replace('/', '-').Replace('\\', '-');
+            string reportPath = Path.Combine(reportsDir, $"combo-{scopeTag}-q{q}-t{workers}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+
             var consoleOut = Console.Out;
-            var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
+            using var fileOut = new StreamWriter(reportPath) { AutoFlush = true };
             Console.SetOut(new TeeTextWriter(consoleOut, fileOut));
+
             var progress = new ConsoleProgress(consoleOut);
-            void Emit(string s) { progress.Clear(); Console.WriteLine(s); }
+            object progressLock = new object();
+            void ShowProgress(string text, bool force = false)
+            {
+                lock (progressLock)
+                    progress.Show(text, force);
+            }
+            void ClearProgress()
+            {
+                lock (progressLock)
+                    progress.Clear();
+            }
 
             bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
-
-            // 行着色：ANSI 颜色码只写真实控制台，报告文件仍写纯文本（避免转义码污染报告）。
             bool useColor = !Console.IsOutputRedirected;
-            if (useColor && OperatingSystem.IsWindows()) EnableVirtualTerminal();
+            if (useColor && OperatingSystem.IsWindows())
+                EnableVirtualTerminal();
 
-            string scope = string.IsNullOrEmpty(sub) ? "movingai/ 全部" : $"movingai/{sub}";
+            string scope = string.IsNullOrEmpty(sub) ? "movingai/" : $"movingai/{sub}";
             long dedup = groups.Values.Sum(x => (long)x.Pairs.Count);
-            Console.WriteLine($"# JPS(C#/C) 冷·热路径 vs A* · 随机投点 + .scen 合并基准   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            Console.WriteLine($"构建配置（JPS.Core）：{BuildConfig()}");
-            Console.WriteLine($"原生库：{(nativeEnabled ? $"JPS.Native.dll 已加载（{nativeInfo}）→ 同时测 C 版" : $"未启用（{nativeInfo}）→ 仅测 C# 版")}");
-            Console.WriteLine($"范围：{scope}，{scenFileCount} 个 .scen / {groups.Count} 张地图；随机投点每图目标 {q} 组，scen 去重后用例 {dedup}（原始 {totalEntries}）");
-            Console.WriteLine("流程：每张图只解析一次 → 先随机投点(rand)、后 scen 两段；每段测 C#/C 冷/热与 A* 耗时（多轮取最小）。");
-            Console.WriteLine("冷=每次寻路前在小窗口内翻转少量格子(模拟局部更新)+Sync 令受影响行/列失效，再在改后地图上寻路；热=缓存复用。不校验路径（由 JPS.Accuracy 负责）。");
+            Console.WriteLine($"# JPS(C#/C) cold/hot vs A* benchmark   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Build config: {BuildConfig()}");
+            Console.WriteLine($"Native: {(nativeEnabled ? $"enabled ({nativeInfo})" : $"disabled ({nativeInfo})")}");
+            Console.WriteLine($"Scope: {scope}; {scenFileCount} .scen / {groups.Count} maps; rand target {q}/map; scen dedup {dedup} from {totalEntries}");
+            Console.WriteLine($"Parallelism: {workers} map workers (default is half of logical cores)");
+            Console.WriteLine("Timing mode: parallel throughput by map group. Rows are emitted in map dispatch order as results arrive.");
             Console.WriteLine();
-            Console.WriteLine("列说明：");
-            Console.WriteLine("  map           地图名");
-            Console.WriteLine("  size          地图尺寸（宽 x 高）");
-            Console.WriteLine("  tag           段：rand=随机投点 / scen=场景用例");
-            Console.WriteLine("  pairs         用例对数");
-            Console.WriteLine("  JPSexp/A*exp  平均每次寻路的扩展节点数（JPS / A*）");
-            if (nativeEnabled)
-            {
-                Console.WriteLine("  cC# / cC      C# / C 版 JPS 冷路径平均耗时（微秒/次）");
-                Console.WriteLine("  wC# / wC      C# / C 版 JPS 热路径平均耗时（微秒/次）");
-                Console.WriteLine("  着色：cC/wC 比同类 C# 快=绿 慢=红；四列(cC#/cC/wC#/wC)比 A* 慢=红（红优先）");
-            }
-            else
-            {
-                Console.WriteLine("  cC# / wC#     C# 版 JPS 冷 / 热路径平均耗时（微秒/次）");
-                Console.WriteLine("  着色(cC#/wC#)：红=比 A* 慢");
-            }
-            Console.WriteLine("  A*us          A* 平均每次寻路耗时（微秒/次）");
-            Console.WriteLine(nativeEnabled
-                ? "  A*/cC A*/wC   A*us ÷ C 版冷、热耗时（越大表示 C 版 JPS 相对 A* 越快）"
-                : "  A*/cC# A*/wC# A*us ÷ C# 版冷、热耗时");
-            Console.WriteLine();
+
             string hdr = nativeEnabled
                 ? $"{"map",-30}{"size",11}{"tag",6}{"pairs",8}{"JPSexp",8}{"A*exp",8}{"cC#",9}{"cC",9}{"wC#",9}{"wC",9}{"A*us",9}{"A*/cC",8}{"A*/wC",8}"
                 : $"{"map",-30}{"size",11}{"tag",6}{"pairs",8}{"JPSexp",8}{"A*exp",8}{"cC#",9}{"wC#",9}{"A*us",9}{"A*/cC#",8}{"A*/wC#",8}";
             int rule = nativeEnabled ? 132 : 114;
             void PrintResultHeader()
             {
-                progress.Clear();
+                ClearProgress();
                 Console.WriteLine(hdr);
                 Console.WriteLine(new string('-', rule));
             }
+
+            var jobs = groups
+                .OrderBy(k => Path.GetRelativePath(root, k.Key), StringComparer.OrdinalIgnoreCase)
+                .Select((kv, i) => new MapJob
+                {
+                    Index = i + 1,
+                    SortKey = Path.GetRelativePath(root, kv.Key).Replace('\\', '/'),
+                    Group = kv.Value
+                })
+                .ToList();
+
+            WarmupJit();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            var rows = new List<BenchRow>();
+            var errors = new List<string>();
+            int started = 0;
+            int completed = 0;
+            int total = jobs.Count;
+
+            PrintResultHeader();
             int resultRows = 0;
-            void EmitRow(string plain, string colored)
+            void EmitRow(BenchRow row)
             {
-                progress.Clear();
-                fileOut.WriteLine(plain);
-                consoleOut.WriteLine(useColor ? colored : plain);
+                ClearProgress();
+                fileOut.WriteLine(row.Plain);
+                consoleOut.WriteLine(useColor ? row.Colored : row.Plain);
+                rows.Add(row);
                 if (++resultRows % ResultHeaderRepeat == 0)
                     PrintResultHeader();
             }
-            PrintResultHeader();
 
-            WarmupJit();
-
-            // 累计（各图“多轮最小”之和），rand 与 scen 分开
-            double rCJ = 0, rWJ = 0, rCN = 0, rWN = 0, rA = 0; long rP = 0;
-            double sCJ = 0, sWJ = 0, sCN = 0, sWN = 0, sA = 0; long sP = 0;
-            var sw = new Stopwatch();
-
-            int total = groups.Count, gi = 0;
-            foreach (var kv in groups.OrderBy(k => Path.GetRelativePath(root, k.Key), StringComparer.OrdinalIgnoreCase))
+            // Dispatch jobs to workers in order. Each job submits its two phases (rand / scen) separately,
+            // so we allocate a TaskCompletionSource per phase (main waits rand -> scen in job order and prints).
+            var jobsQueue = new BlockingCollection<MapJob>();
+            var randTcs = new TaskCompletionSource<PhaseResult>[jobs.Count + 1];
+            var scenTcs = new TaskCompletionSource<PhaseResult>[jobs.Count + 1];
+            for (int i = 0; i < randTcs.Length; i++)
             {
-                gi++;
-                progress.Show($"[{gi}/{total}] {Path.GetRelativePath(root, kv.Key).Replace('\\', '/')}");
-                var grp = kv.Value;
-                GridMap map;
-                try { map = MovingAiMap.Parse(File.ReadAllText(grp.MapPath)); }
-                catch { continue; }
+                randTcs[i] = new TaskCompletionSource<PhaseResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                scenTcs[i] = new TaskCompletionSource<PhaseResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
 
-                string rel = Path.GetRelativePath(root, grp.MapPath).Replace('\\', '/');
-                string name = rel.EndsWith(".map", StringComparison.OrdinalIgnoreCase) ? rel.Substring(0, rel.Length - 4) : rel;
-
-                var walk = new List<(int X, int Y)>();
-                for (int y = 0; y < map.Height; y++)
-                    for (int x = 0; x < map.Width; x++)
-                        if (map.IsWalkable(x, y)) walk.Add((x, y));
-                if (walk.Count < 2) continue;
-
-                var system = new JpsSystem(map);
-                system.Sync();
-                var jps = new JpsPathfinder();
-                var astar = new AStarPathfinder();
-                using var nat = nativeEnabled ? new NativeMap(map) : null;
-
-                // 冷路径模拟「动态地图的局部更新」：每次查询前只在一个小窗口内翻转少量格子
-                // （建筑放置 / 门开合 / 一小队单位移动那种局部改动），而非全图散点。
-                // 散点 1% 会几乎命中所有行列 → 退化成整表失效，量不出行/列增量失效的收益；
-                // 局部簇只失效窗口覆盖的 ~窗口边长+2 条行/列，才能体现增量失效相对整表重建的优势。
-                int coldWindow = Math.Min(16, Math.Min(map.Width, map.Height));
-                int coldEditCount = Math.Min(24, Math.Max(1, coldWindow * coldWindow / 4));
-                var coldSeen = new int[map.Width * map.Height];
-                int coldSeenStamp = 0;
-
-                List<(int x, int y, bool oldBlocked)> MakeColdEdits(Random rng, int sx, int sy, int gx, int gy)
+            Task[] workerTasks = new Task[workers];
+            int[] cpuList = new int[] { 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
+            var workerReady = new TaskCompletionSource<bool>[workers];
+            for (int i = 0; i < workers; i++) workerReady[i] = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            for (int wi = 0; wi < workerTasks.Length; wi++)
+            {
+                int localWorkerIndex = wi; // capture
+                workerTasks[wi] = Task.Run(() =>
                 {
-                    var edits = new List<(int x, int y, bool oldBlocked)>(coldEditCount);
-                    int stamp = ++coldSeenStamp;
-                    // 随机挑一个 coldWindow×coldWindow 的局部窗口（左上角落在图内），改动全部集中于此。
-                    int ox = rng.Next(map.Width - coldWindow + 1);
-                    int oy = rng.Next(map.Height - coldWindow + 1);
-                    int maxAttempts = coldEditCount * 20 + 200;
-                    for (int attempts = 0; attempts < maxAttempts && edits.Count < coldEditCount; attempts++)
+
+                    // Pin this worker thread to a CPU from cpuList (worker index modulo list length).
+                    try
                     {
-                        int x = ox + rng.Next(coldWindow);
-                        int y = oy + rng.Next(coldWindow);
-                        if ((x == sx && y == sy) || (x == gx && y == gy)) continue;
-                        int id = y * map.Width + x;
-                        if (coldSeen[id] == stamp) continue;
-                        coldSeen[id] = stamp;
-                        edits.Add((x, y, map.IsBlocked(x, y)));
+                        int desiredCpu = cpuList[localWorkerIndex % cpuList.Length];
+                        TrySetCurrentThreadAffinity(desiredCpu);
                     }
-                    return edits;
-                }
+                    catch { }
 
-                void RestoreCs(List<(int x, int y, bool oldBlocked)> edits)
-                {
-                    foreach (var e in edits)
-                        map.SetBlocked(e.x, e.y, e.oldBlocked);
-                }
+                    // Give the thread an initial name (Thread.Name can only be set once).
+                    try { System.Threading.Thread.CurrentThread.Name ??= $"init-{localWorkerIndex}"; } catch { }
 
-                void ApplyCs(List<(int x, int y, bool oldBlocked)> edits)
-                {
-                    foreach (var e in edits)
-                        map.SetBlocked(e.x, e.y, !e.oldBlocked);
-                }
+                    // Signal the main thread that this worker finished init and is ready.
+                    try { workerReady[localWorkerIndex].TrySetResult(true); } catch { }
 
-                // 批量增量：一次 P/Invoke 应用整簇改动，避免逐格 P/Invoke 的开销污染 C 冷路径计时。
-                void RestoreNative(List<(int x, int y, bool oldBlocked)> edits) => nat?.SetBlockedBatch(edits, apply: false);
-                void ApplyNative(List<(int x, int y, bool oldBlocked)> edits) => nat?.SetBlockedBatch(edits, apply: true);
-
-                // 测一段：C# 冷/热、C 冷/热、A*（多轮取最小），输出一行，返回各项 ms 与对数。
-                (double cj, double wj, double cn, double wn, double a, int n) RunSegment(string tag, List<(int sx, int sy, int gx, int gy)> pairs)
-                {
-                    int n = pairs.Count;
-                    if (n == 0) return (0, 0, 0, 0, 0, 0);
-
-                    void ShowPathProgress(string phase, int done, int count, int rep = 0)
+                    foreach (var job in jobsQueue.GetConsumingEnumerable())
                     {
-                        if (done % 100 == 0 || done == count)
+                        // Best-effort rename to job-{job.Index} (Thread.Name may already be set; ignore failures).
+                        try { System.Threading.Thread.CurrentThread.Name = $"job-{job.Index}"; } catch { }
+
+                        // MapRunner runs rand -> scen for one map, submitting each phase to randTcs/scenTcs as it finishes.
+                        // Exceptions are caught inside Run and posted to the unsubmitted phase(s), so both TCS always resolve.
+                        try
                         {
-                            string repText = rep > 0 ? $" {rep}/3" : "";
-                            progress.Show($"[{gi}/{total}] {name} {tag} {phase}{repText} {done}/{count}", force: true);
+                            using var runner = new MapRunner(job, nativeEnabled, q, ShowProgress, () => completed, total);
+                            runner.Run(randTcs[job.Index], scenTcs[job.Index]);
+                        }
+                        finally
+                        {
+                            int done = Interlocked.Increment(ref completed);
+                            ShowProgress($"[{done}/{total} done] {job.SortKey}", true);
                         }
                     }
+                });
+            }
 
-                    // 展开节点（非计时遍；JPS 顺便预热，冷路径每次都会随机局部改图）
-                    long jExp = 0, aExp = 0;
+            // Wait until all workers finish init before dispatching, so the first job is not delayed by thread startup/affinity.
+            Task.WhenAll(workerReady.Select(w => w.Task)).GetAwaiter().GetResult();
+
+            // Dispatch all jobs into the queue in order (main thread only enqueues).
+            foreach (var job in jobs)
+            {
+                int localStarted = Interlocked.Increment(ref started);
+                ShowProgress($"[{completed}/{total} done, {localStarted}/{total} started] {job.SortKey}", true);
+                jobsQueue.Add(job);
+            }
+            jobsQueue.CompleteAdding();
+
+            // Main thread: consume each job result in dispatch order (= SortKey order).
+            // Wait for each job's rand and print it, then wait for its scen and print it.
+            // So a map's rand row appears without waiting for its scen; EmitRow reprints the header every 50 rows.
+            for (int idx = 1; idx <= jobs.Count; idx++)
+            {
+                string sortKey = jobs[idx - 1].SortKey;
+
+                var randRes = randTcs[idx].Task.GetAwaiter().GetResult();
+                bool jobErrored = false;
+                if (randRes.Error != null)
+                {
+                    errors.Add($"{sortKey}: {randRes.Error}");
+                    jobErrored = true;
+                }
+                else if (randRes.Row != null)
+                {
+                    EmitRow(randRes.Row);
+                }
+
+                var scenRes = scenTcs[idx].Task.GetAwaiter().GetResult();
+                if (scenRes.Error != null)
+                {
+                    // On setup failure both phases carry the same error; if rand already reported it, don't double-count.
+                    if (!jobErrored)
+                        errors.Add($"{sortKey}: {scenRes.Error}");
+                }
+                else if (scenRes.Row != null)
+                {
+                    EmitRow(scenRes.Row);
+                }
+            }
+
+            // Wait for all worker tasks to finish.
+            Task.WaitAll(workerTasks);
+
+            ClearProgress();
+            Console.WriteLine(new string('-', rule));
+
+            Summary("rand", rows.Where(r => r.Tag == "rand"));
+            Summary("scen", rows.Where(r => r.Tag == "scen"));
+
+            if (errors.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"Skipped maps: {errors.Count}");
+                foreach (var e in errors.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(20))
+                    Console.WriteLine($"  {e}");
+                if (errors.Count > 20)
+                    Console.WriteLine($"  ... {errors.Count - 20} more");
+            }
+
+            Console.Out.Flush();
+            Console.SetOut(consoleOut);
+            Console.WriteLine($"Report saved: {reportPath}");
+
+            void Summary(string tag, IEnumerable<BenchRow> seq)
+            {
+                var list = seq.ToList();
+                long p = list.Sum(r => (long)r.N);
+                if (p == 0)
+                    return;
+
+                double cj = list.Sum(r => r.Cj);
+                double wj = list.Sum(r => r.Wj);
+                double cn = list.Sum(r => r.Cn);
+                double wn = list.Sum(r => r.Wn);
+                double a = list.Sum(r => r.A);
+
+                if (nativeEnabled)
+                {
+                    Console.WriteLine($"[{tag}] {p} pairs: C# cold {cj:F0}ms / hot {wj:F0}ms; " +
+                        $"C cold {cn:F0}ms / hot {wn:F0}ms; A* {a:F0}ms; " +
+                        $"A*/C cold {a / Math.Max(0.001, cn):F1}x hot {a / Math.Max(0.001, wn):F1}x; " +
+                        $"C#/C cold {cj / Math.Max(0.001, cn):F2}x hot {wj / Math.Max(0.001, wn):F2}x");
+                }
+                else
+                {
+                    Console.WriteLine($"[{tag}] {p} pairs: C# cold {cj:F0}ms / hot {wj:F0}ms; A* {a:F0}ms; " +
+                        $"A*/C# cold {a / Math.Max(0.001, cj):F1}x hot {a / Math.Max(0.001, wj):F1}x");
+                }
+            }
+        }
+
+        // Runs the full benchmark (rand + scen) for one map. Keeping all per-map state in fields turns the
+        // former deeply nested local functions into flat methods that read as straight-line code.
+        private sealed class MapRunner : IDisposable
+        {
+            // Injected dependencies.
+            private readonly MapJob _job;
+            private readonly bool _nativeEnabled;
+            private readonly int _q;
+            private readonly Action<string, bool> _showProgress;
+            private readonly Func<int> _completed;   // global finished-map count, for progress text only
+            private readonly int _total;
+
+            // Per-map state (populated by Load).
+            private GridMap _map = null!;
+            private string _name = string.Empty;
+            private JpsSystem _system = null!;
+            private JpsPathfinder _jps = null!;
+            private AStarPathfinder _astar = null!;
+            private NativeMap? _nat;
+            private readonly Stopwatch _sw = new Stopwatch();
+
+            // Cold-edit scratch state (random local edits, reused across cold reps).
+            private int _coldWindow;
+            private int _coldEditCount;
+            private int[] _coldSeen = Array.Empty<int>();
+            private int _coldSeenStamp;
+
+            public MapRunner(MapJob job, bool nativeEnabled, int q,
+                             Action<string, bool> showProgress, Func<int> completed, int total)
+            {
+                _job = job;
+                _nativeEnabled = nativeEnabled;
+                _q = q;
+                _showProgress = showProgress;
+                _completed = completed;
+                _total = total;
+            }
+
+            public void Dispose() => _nat?.Dispose();
+
+            // Run rand then scen, submitting each phase to its TCS as it finishes. All exceptions are caught and
+            // posted to the still-unsubmitted phase(s), so both TCS always resolve (the awaiting main thread never hangs).
+            public void Run(TaskCompletionSource<PhaseResult> randOut, TaskCompletionSource<PhaseResult> scenOut)
+            {
+                try
+                {
+                    var walk = Load();
+                    if (walk == null)
+                    {
+                        randOut.TrySetResult(new PhaseResult());   // empty (walkable cells < 2) -> no row, no error
+                        scenOut.TrySetResult(new PhaseResult());
+                        return;
+                    }
+
+                    // rand phase: submit as soon as it finishes (don't wait for scen).
+                    var rand = RunSegment("rand", SampleRandPairs(walk));
+                    randOut.TrySetResult(new PhaseResult { Row = rand });
+
+                    // scen phase: submit when it finishes.
+                    var scen = RunSegment("scen", CollectScenPairs());
+                    scenOut.TrySetResult(new PhaseResult { Row = scen });
+                }
+                catch (Exception ex)
+                {
+                    // Post the error to the unsubmitted phase(s) (TrySetResult is a no-op if already submitted).
+                    randOut.TrySetResult(new PhaseResult { Error = ex.Message });
+                    scenOut.TrySetResult(new PhaseResult { Error = ex.Message });
+                }
+            }
+
+            // Parse the map and build the pathfinders + cold-edit state. Returns the walkable cells,
+            // or null when the map has fewer than two walkable cells (nothing to benchmark).
+            private List<(int X, int Y)>? Load()
+            {
+                _map = MovingAiMap.Parse(File.ReadAllText(_job.Group.MapPath));
+
+                string rel = _job.SortKey;
+                _name = rel.EndsWith(".map", StringComparison.OrdinalIgnoreCase)
+                    ? rel.Substring(0, rel.Length - 4)
+                    : rel;
+
+                var walk = new List<(int X, int Y)>();
+                for (int y = 0; y < _map.Height; y++)
+                    for (int x = 0; x < _map.Width; x++)
+                        if (_map.IsWalkable(x, y))
+                            walk.Add((x, y));
+                if (walk.Count < 2)
+                    return null;
+
+                _system = new JpsSystem(_map);
+                _system.Sync();
+                _jps = new JpsPathfinder();
+                _astar = new AStarPathfinder();
+                _nat = _nativeEnabled ? new NativeMap(_map) : null;
+
+                _coldWindow = Math.Min(16, Math.Min(_map.Width, _map.Height));
+                _coldEditCount = Math.Min(24, Math.Max(1, _coldWindow * _coldWindow / 4));
+                _coldSeen = new int[_map.Width * _map.Height];
+                _coldSeenStamp = 0;
+                return walk;
+            }
+
+            // Sample up to _q solvable random start/goal pairs.
+            private List<(int sx, int sy, int gx, int gy)> SampleRandPairs(List<(int X, int Y)> walk)
+            {
+                var pairs = new List<(int sx, int sy, int gx, int gy)>(_q);
+                var rng = new Random(12345);
+                int maxAtt = _q * 40 + 500;
+                for (int at = 0; at < maxAtt && pairs.Count < _q; at++)
+                {
+                    var s = walk[rng.Next(walk.Count)];
+                    var g = walk[rng.Next(walk.Count)];
+                    if (s.Equals(g))
+                        continue;
+                    if (_jps.FindPath(_system, s, g).Success)
+                    {
+                        pairs.Add((s.X, s.Y, g.X, g.Y));
+                        if (pairs.Count % 100 == 0 || pairs.Count == _q)
+                            Progress($"rand sample {pairs.Count}/{_q}", true);
+                    }
+                }
+                return pairs;
+            }
+
+            // Collect the in-bounds, walkable scen pairs for this map.
+            private List<(int sx, int sy, int gx, int gy)> CollectScenPairs()
+            {
+                var grpPairs = _job.Group.Pairs;
+                var pairs = new List<(int sx, int sy, int gx, int gy)>(grpPairs.Count);
+                foreach (var p in grpPairs)
+                {
+                    if (p.sx < 0 || p.sy < 0 || p.gx < 0 || p.gy < 0) continue;
+                    if (p.sx >= _map.Width || p.sy >= _map.Height || p.gx >= _map.Width || p.gy >= _map.Height) continue;
+                    if (!_map.IsWalkable(p.sx, p.sy) || !_map.IsWalkable(p.gx, p.gy)) continue;
+                    pairs.Add(p);
+                }
+                return pairs;
+            }
+
+            // Time one segment (rand or scen): expansions, then Repeats rounds of C#/C cold+hot and A*, min per column.
+            private BenchRow? RunSegment(string tag, List<(int sx, int sy, int gx, int gy)> pairs)
+            {
+                int n = pairs.Count;
+                if (n == 0)
+                    return null;
+
+                long jExp = 0;
+                long aExp = 0;
+                for (int pi = 0; pi < pairs.Count; pi++)
+                {
+                    var p = pairs[pi];
+                    jExp += _jps.FindPath(_system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                    aExp += _astar.FindPath(_map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
+                    ShowPathProgress(tag, "exp", pi + 1, n);
+                }
+
+                double cj = double.MaxValue;
+                double wj = double.MaxValue;
+                double a = double.MaxValue;
+                double cn = _nat != null ? double.MaxValue : 0;
+                double wn = _nat != null ? double.MaxValue : 0;
+
+                for (int rep = 0; rep < Repeats; rep++)
+                {
+                    Progress($"{tag} C# cold {rep + 1}/{Repeats}");
+                    _sw.Restart();
+                    {
+                        var rngCold = new Random(1000003 + rep * 9176 + _job.Index * 131);
+                        var previousEdits = new List<(int x, int y, bool oldBlocked)>();
+                        for (int pi = 0; pi < pairs.Count; pi++)
+                        {
+                            var p = pairs[pi];
+                            RestoreCs(previousEdits);
+                            previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
+                            ApplyCs(previousEdits);
+                            _system.Sync();
+                            _jps.FindPath(_system, (p.sx, p.sy), (p.gx, p.gy));
+                            ShowPathProgress(tag, "C#cold", pi + 1, n, rep + 1);
+                        }
+                        RestoreCs(previousEdits);
+                        _system.Sync();
+                    }
+                    _sw.Stop();
+                    cj = Math.Min(cj, _sw.Elapsed.TotalMilliseconds);
+
+                    _system.Sync();
+                    Progress($"{tag} C# hot {rep + 1}/{Repeats}");
+                    _sw.Restart();
                     for (int pi = 0; pi < pairs.Count; pi++)
                     {
                         var p = pairs[pi];
-                        jExp += jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
-                        aExp += astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy)).ExpandedNodes;
-                        ShowPathProgress("exp", pi + 1, n);
+                        _jps.FindPath(_system, (p.sx, p.sy), (p.gx, p.gy));
+                        ShowPathProgress(tag, "C#hot", pi + 1, n, rep + 1);
                     }
+                    _sw.Stop();
+                    wj = Math.Min(wj, _sw.Elapsed.TotalMilliseconds);
 
-                    double cj = double.MaxValue, wj = double.MaxValue, a = double.MaxValue;
-                    double cn = nat != null ? double.MaxValue : 0, wn = nat != null ? double.MaxValue : 0;
-                    for (int rep = 0; rep < 3; rep++)
+                    if (_nat != null)
                     {
-                        // C# 冷（每次前随机局部改图）
-                        progress.Show($"[{gi}/{total}] {name} {tag} C#冷 {rep + 1}/3");
-                        GC.Collect(); GC.WaitForPendingFinalizers();
-                        sw.Restart();
+                        Progress($"{tag} C cold {rep + 1}/{Repeats}");
+                        _sw.Restart();
                         {
-                            var rngCold = new Random(1000003 + rep * 9176 + gi * 131);
+                            var rngCold = new Random(1000003 + rep * 9176 + _job.Index * 131);
                             var previousEdits = new List<(int x, int y, bool oldBlocked)>();
                             for (int pi = 0; pi < pairs.Count; pi++)
                             {
                                 var p = pairs[pi];
-                                RestoreCs(previousEdits);
-                                previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
-                                ApplyCs(previousEdits);
-                                system.Sync();
-                                jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
-                                ShowPathProgress("C#cold", pi + 1, n, rep + 1);
-                            }
-                            RestoreCs(previousEdits);
-                            system.Sync();
-                        }
-                        sw.Stop(); cj = Math.Min(cj, sw.Elapsed.TotalMilliseconds);
-
-                        // C# 热（Sync 一次后复用）
-                        system.Sync();
-                        GC.Collect(); GC.WaitForPendingFinalizers();
-                        sw.Restart();
-                        for (int pi = 0; pi < pairs.Count; pi++)
-                        {
-                            var p = pairs[pi];
-                            jps.FindPath(system, (p.sx, p.sy), (p.gx, p.gy));
-                            ShowPathProgress("C#hot", pi + 1, n, rep + 1);
-                        }
-                        sw.Stop(); wj = Math.Min(wj, sw.Elapsed.TotalMilliseconds);
-
-                        if (nat != null)
-                        {
-                            // C 冷
-                            progress.Show($"[{gi}/{total}] {name} {tag} C冷 {rep + 1}/3");
-                            GC.Collect(); GC.WaitForPendingFinalizers();
-                            sw.Restart();
-                            {
-                                var rngCold = new Random(1000003 + rep * 9176 + gi * 131);
-                                var previousEdits = new List<(int x, int y, bool oldBlocked)>();
-                                for (int pi = 0; pi < pairs.Count; pi++)
-                                {
-                                    var p = pairs[pi];
-                                    RestoreNative(previousEdits);
-                                    previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
-                                    ApplyNative(previousEdits);
-                                    nat.Sync();
-                                    nat.Find(p.sx, p.sy, p.gx, p.gy);
-                                    ShowPathProgress("Ccold", pi + 1, n, rep + 1);
-                                }
                                 RestoreNative(previousEdits);
-                                nat.Sync();
+                                previousEdits = MakeColdEdits(rngCold, p.sx, p.sy, p.gx, p.gy);
+                                ApplyNative(previousEdits);
+                                _nat.Sync();
+                                _nat.Find(p.sx, p.sy, p.gx, p.gy);
+                                ShowPathProgress(tag, "Ccold", pi + 1, n, rep + 1);
                             }
-                            sw.Stop(); cn = Math.Min(cn, sw.Elapsed.TotalMilliseconds);
-
-                            // C 热
-                            nat.Sync();
-                            GC.Collect(); GC.WaitForPendingFinalizers();
-                            sw.Restart();
-                            for (int pi = 0; pi < pairs.Count; pi++)
-                            {
-                                var p = pairs[pi];
-                                nat.Find(p.sx, p.sy, p.gx, p.gy);
-                                ShowPathProgress("Chot", pi + 1, n, rep + 1);
-                            }
-                            sw.Stop(); wn = Math.Min(wn, sw.Elapsed.TotalMilliseconds);
+                            RestoreNative(previousEdits);
+                            _nat.Sync();
                         }
+                        _sw.Stop();
+                        cn = Math.Min(cn, _sw.Elapsed.TotalMilliseconds);
 
-                        // A*（无缓存，冷热一致）
-                        progress.Show($"[{gi}/{total}] {name} {tag} A* {rep + 1}/3");
-                        GC.Collect(); GC.WaitForPendingFinalizers();
-                        sw.Restart();
+                        _nat.Sync();
+                        Progress($"{tag} C hot {rep + 1}/{Repeats}");
+                        _sw.Restart();
                         for (int pi = 0; pi < pairs.Count; pi++)
                         {
                             var p = pairs[pi];
-                            astar.FindPath(map, (p.sx, p.sy), (p.gx, p.gy));
-                            ShowPathProgress("A*", pi + 1, n, rep + 1);
+                            _nat.Find(p.sx, p.sy, p.gx, p.gy);
+                            ShowPathProgress(tag, "Chot", pi + 1, n, rep + 1);
                         }
-                        sw.Stop(); a = Math.Min(a, sw.Elapsed.TotalMilliseconds);
+                        _sw.Stop();
+                        wn = Math.Min(wn, _sw.Elapsed.TotalMilliseconds);
                     }
 
-                    double cjus = cj / n * 1000, wjus = wj / n * 1000, aus = a / n * 1000;
-                    string size = $"{map.Width}x{map.Height}";
-                    string hd = $"{Trunc(name, 30),-30}{size,11}{tag,6}{n,8}{jExp / n,8}{aExp / n,8}";
-                    if (nat != null)
+                    Progress($"{tag} A* {rep + 1}/{Repeats}");
+                    _sw.Restart();
+                    for (int pi = 0; pi < pairs.Count; pi++)
                     {
-                        double cnus = cn / n * 1000, wnus = wn / n * 1000;
-                        string cjStr = $"{cjus,9:F2}", cnStr = $"{cnus,9:F2}", wjStr = $"{wjus,9:F2}", wnStr = $"{wnus,9:F2}";
-                        // 优先：四列比 A* 慢=红。否则 cC/wC 比同类 C# 快=绿、慢=红；cC#/wC# 无相对对比。
-                        string cjCol = cjus > aus ? Red(cjStr) : cjStr;
-                        string cnCol = cnus > aus ? Red(cnStr) : cnus < cjus ? Green(cnStr) : cnus > cjus ? Red(cnStr) : cnStr;
-                        string wjCol = wjus > aus ? Red(wjStr) : wjStr;
-                        string wnCol = wnus > aus ? Red(wnStr) : wnus < wjus ? Green(wnStr) : wnus > wjus ? Red(wnStr) : wnStr;
-                        double rcn = aus / Math.Max(0.001, cnus), rwn = aus / Math.Max(0.001, wnus);
-                        string ausStr = $"{aus,9:F2}", rcnStr = $"{rcn,8:F1}", rwnStr = $"{rwn,8:F1}";
-                        // A*/cC、A*/wC < 1（C 版 JPS 比 A* 还慢）标红
-                        string rcnCol = rcn < 1 ? Red(rcnStr) : rcnStr;
-                        string rwnCol = rwn < 1 ? Red(rwnStr) : rwnStr;
-                        EmitRow(hd + cjStr + cnStr + wjStr + wnStr + ausStr + rcnStr + rwnStr,   // 顺序：cC# cC wC# wC
-                                hd + cjCol + cnCol + wjCol + wnCol + ausStr + rcnCol + rwnCol);
+                        var p = pairs[pi];
+                        _astar.FindPath(_map, (p.sx, p.sy), (p.gx, p.gy));
+                        ShowPathProgress(tag, "A*", pi + 1, n, rep + 1);
                     }
-                    else
-                    {
-                        string cjStr = $"{cjus,9:F2}", wjStr = $"{wjus,9:F2}";
-                        string cjCol = cjus > aus ? Red(cjStr) : cjStr;
-                        string wjCol = wjus > aus ? Red(wjStr) : wjStr;
-                        double rcj = aus / Math.Max(0.001, cjus), rwj = aus / Math.Max(0.001, wjus);
-                        string ausStr = $"{aus,9:F2}", rcjStr = $"{rcj,8:F1}", rwjStr = $"{rwj,8:F1}";
-                        // A*/cC#、A*/wC# < 1（C# 版 JPS 比 A* 还慢）标红
-                        string rcjCol = rcj < 1 ? Red(rcjStr) : rcjStr;
-                        string rwjCol = rwj < 1 ? Red(rwjStr) : rwjStr;
-                        EmitRow(hd + cjStr + wjStr + ausStr + rcjStr + rwjStr,
-                                hd + cjCol + wjCol + ausStr + rcjCol + rwjCol);
-                    }
-                    return (cj, wj, cn, wn, a, n);
+                    _sw.Stop();
+                    a = Math.Min(a, _sw.Elapsed.TotalMilliseconds);
                 }
 
-                // ① 随机投点：采样 q 组可解起终点（此处会预热 C# 缓存，计时段每次都会随机局部改图）
-                var randPairs = new List<(int sx, int sy, int gx, int gy)>(q);
-                var rng = new Random(12345);
-                int maxAtt = q * 40 + 500;
-                for (int at = 0; at < maxAtt && randPairs.Count < q; at++)
-                {
-                    var s = walk[rng.Next(walk.Count)];
-                    var g = walk[rng.Next(walk.Count)];
-                    if (s.Equals(g)) continue;
-                    if (jps.FindPath(system, s, g).Success)
-                    {
-                        randPairs.Add((s.X, s.Y, g.X, g.Y));
-                        if (randPairs.Count % 100 == 0 || randPairs.Count == q)
-                            progress.Show($"[{gi}/{total}] {name} rand sample {randPairs.Count}/{q}", force: true);
-                    }
-                }
-                var r = RunSegment("rand", randPairs);
-                rCJ += r.cj; rWJ += r.wj; rCN += r.cn; rWN += r.wn; rA += r.a; rP += r.n;
-
-                // ② scen：去重后有效对
-                var scenPairs = new List<(int sx, int sy, int gx, int gy)>(grp.Pairs.Count);
-                foreach (var p in grp.Pairs)
-                {
-                    if (p.sx < 0 || p.sy < 0 || p.gx < 0 || p.gy < 0) continue;
-                    if (p.sx >= map.Width || p.sy >= map.Height || p.gx >= map.Width || p.gy >= map.Height) continue;
-                    if (!map.IsWalkable(p.sx, p.sy) || !map.IsWalkable(p.gx, p.gy)) continue;
-                    scenPairs.Add(p);
-                }
-                var ss = RunSegment("scen", scenPairs);
-                sCJ += ss.cj; sWJ += ss.wj; sCN += ss.cn; sWN += ss.wn; sA += ss.a; sP += ss.n;
+                return BuildRow(tag, n, jExp, aExp, cj, wj, cn, wn, a);
             }
 
-            progress.Clear();
-            Console.WriteLine(new string('-', rule));
-
-            void Summary(string tag, double cj, double wj, double cn, double wn, double a, long p)
+            // Format one output row (plain + ANSI-colored) from the per-column timings.
+            private BenchRow BuildRow(string tag, int n, long jExp, long aExp, double cj, double wj, double cn, double wn, double a)
             {
-                if (p == 0) return;
-                if (nativeEnabled)
-                    Console.WriteLine($"[{tag}] {p} 组：C# 冷 {cj:F0}ms/热 {wj:F0}ms  C 冷 {cn:F0}ms/热 {wn:F0}ms  A* {a:F0}ms；" +
-                        $"A*/C 冷={a / Math.Max(0.001, cn):F1}x 热={a / Math.Max(0.001, wn):F1}x；C#/C 冷={cj / Math.Max(0.001, cn):F2}x 热={wj / Math.Max(0.001, wn):F2}x");
-                else
-                    Console.WriteLine($"[{tag}] {p} 组：C# 冷 {cj:F0}ms/热 {wj:F0}ms  A* {a:F0}ms；" +
-                        $"A*/C# 冷={a / Math.Max(0.001, cj):F1}x 热={a / Math.Max(0.001, wj):F1}x");
-            }
-            Summary("rand", rCJ, rWJ, rCN, rWN, rA, rP);
-            Summary("scen", sCJ, sWJ, sCN, sWN, sA, sP);
+                double cjus = cj / n * 1000;
+                double wjus = wj / n * 1000;
+                double aus = a / n * 1000;
+                string size = $"{_map.Width}x{_map.Height}";
+                string hd = $"{Trunc(_name, 30),-30}{size,11}{tag,6}{n,8}{jExp / n,8}{aExp / n,8}";
 
-            Console.Out.Flush();
-            Console.SetOut(consoleOut);
-            fileOut.Dispose();
-            Console.WriteLine($"报告已保存：{reportPath}");
+                string plain;
+                string colored;
+                if (_nat != null)
+                {
+                    double cnus = cn / n * 1000;
+                    double wnus = wn / n * 1000;
+                    string cjStr = $"{cjus,9:F2}";
+                    string cnStr = $"{cnus,9:F2}";
+                    string wjStr = $"{wjus,9:F2}";
+                    string wnStr = $"{wnus,9:F2}";
+                    string ausStr = $"{aus,9:F2}";
+                    double rcn = aus / Math.Max(0.001, cnus);
+                    double rwn = aus / Math.Max(0.001, wnus);
+                    string rcnStr = $"{rcn,8:F1}";
+                    string rwnStr = $"{rwn,8:F1}";
+
+                    string cjCol = cjus > aus ? Red(cjStr) : cjStr;
+                    string cnCol = cnus > aus ? Red(cnStr) : cnus < cjus ? Green(cnStr) : cnus > cjus ? Red(cnStr) : cnStr;
+                    string wjCol = wjus > aus ? Red(wjStr) : wjStr;
+                    string wnCol = wnus > aus ? Red(wnStr) : wnus < wjus ? Green(wnStr) : wnus > wjus ? Red(wnStr) : wnStr;
+                    string rcnCol = rcn < 1 ? Red(rcnStr) : rcnStr;
+                    string rwnCol = rwn < 1 ? Red(rwnStr) : rwnStr;
+
+                    plain = hd + cjStr + cnStr + wjStr + wnStr + ausStr + rcnStr + rwnStr;
+                    colored = hd + cjCol + cnCol + wjCol + wnCol + ausStr + rcnCol + rwnCol;
+                }
+                else
+                {
+                    string cjStr = $"{cjus,9:F2}";
+                    string wjStr = $"{wjus,9:F2}";
+                    string ausStr = $"{aus,9:F2}";
+                    double rcj = aus / Math.Max(0.001, cjus);
+                    double rwj = aus / Math.Max(0.001, wjus);
+                    string rcjStr = $"{rcj,8:F1}";
+                    string rwjStr = $"{rwj,8:F1}";
+
+                    string cjCol = cjus > aus ? Red(cjStr) : cjStr;
+                    string wjCol = wjus > aus ? Red(wjStr) : wjStr;
+                    string rcjCol = rcj < 1 ? Red(rcjStr) : rcjStr;
+                    string rwjCol = rwj < 1 ? Red(rwjStr) : rwjStr;
+
+                    plain = hd + cjStr + wjStr + ausStr + rcjStr + rwjStr;
+                    colored = hd + cjCol + wjCol + ausStr + rcjCol + rwjCol;
+                }
+
+                return new BenchRow
+                {
+                    SortKey = _job.SortKey,
+                    Tag = tag,
+                    Plain = plain,
+                    Colored = colored,
+                    Cj = cj,
+                    Wj = wj,
+                    Cn = cn,
+                    Wn = wn,
+                    A = a,
+                    N = n
+                };
+            }
+
+            // Pick _coldEditCount distinct random cells in a small window (excluding start/goal); returns
+            // (x, y, oldBlocked) so the edit can be applied then restored, invalidating the jump-point cache.
+            private List<(int x, int y, bool oldBlocked)> MakeColdEdits(Random rng, int sx, int sy, int gx, int gy)
+            {
+                var edits = new List<(int x, int y, bool oldBlocked)>(_coldEditCount);
+                int stamp = ++_coldSeenStamp;
+                int ox = rng.Next(_map.Width - _coldWindow + 1);
+                int oy = rng.Next(_map.Height - _coldWindow + 1);
+                int maxAttempts = _coldEditCount * 20 + 200;
+
+                for (int attempts = 0; attempts < maxAttempts && edits.Count < _coldEditCount; attempts++)
+                {
+                    int x = ox + rng.Next(_coldWindow);
+                    int y = oy + rng.Next(_coldWindow);
+                    if ((x == sx && y == sy) || (x == gx && y == gy))
+                        continue;
+                    int id = y * _map.Width + x;
+                    if (_coldSeen[id] == stamp)
+                        continue;
+                    _coldSeen[id] = stamp;
+                    edits.Add((x, y, _map.IsBlocked(x, y)));
+                }
+                return edits;
+            }
+
+            private void RestoreCs(List<(int x, int y, bool oldBlocked)> edits)
+            {
+                foreach (var e in edits)
+                    _map.SetBlocked(e.x, e.y, e.oldBlocked);
+            }
+
+            private void ApplyCs(List<(int x, int y, bool oldBlocked)> edits)
+            {
+                foreach (var e in edits)
+                    _map.SetBlocked(e.x, e.y, !e.oldBlocked);
+            }
+
+            private void RestoreNative(List<(int x, int y, bool oldBlocked)> edits) => _nat?.SetBlockedBatch(edits, apply: false);
+            private void ApplyNative(List<(int x, int y, bool oldBlocked)> edits) => _nat?.SetBlockedBatch(edits, apply: true);
+
+            // Progress helpers: both prepend the shared "[done/total done] #index name" prefix.
+            private void Progress(string suffix, bool force = false)
+                => _showProgress($"[{_completed()}/{_total} done] #{_job.Index} {_name} {suffix}", force);
+
+            private void ShowPathProgress(string tag, string phase, int done, int count, int rep = 0)
+            {
+                if (done % 100 == 0 || done == count)
+                {
+                    string repText = rep > 0 ? $" {rep}/{Repeats}" : "";
+                    Progress($"{tag} {phase}{repText} {done}/{count}", true);
+                }
+            }
         }
     }
 }
