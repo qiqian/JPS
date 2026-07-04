@@ -24,20 +24,6 @@ namespace JPS.Pathfinding
     /// </summary>
     public sealed class AStarPathfinder
     {
-        /// <summary>每个方向的移动代价（正交 1000 / 对角 1414），按方向索引预存。</summary>
-        private static readonly long[] DirCost = BuildDirCost();
-
-        private static long[] BuildDirCost()
-        {
-            var costs = new long[JpsDirections.Count];
-            for (int i = 0; i < JpsDirections.Count; i++)
-            {
-                var (dx, dy) = JpsDirections.All[i];
-                costs[i] = JpsDirections.MoveCost(dx, dy);
-            }
-            return costs;
-        }
-
         // ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ----
         private int _w, _size;
         private long[] _g = new long[0];           // 各节点已知最短代价 g
@@ -104,7 +90,7 @@ namespace JPS.Pathfinding
                     if (_mark[nbId] == closedMark)
                         continue;
 
-                    long tentative = gCur + DirCost[i];
+                    long tentative = gCur + ((i >= 4) ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost);
                     bool firstSeen = _mark[nbId] < openMark;
                     if (!firstSeen && tentative >= _g[nbId])
                         continue;
