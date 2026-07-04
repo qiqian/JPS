@@ -149,6 +149,7 @@ public sealed class GridControl : ScrollableControl
     public static readonly Color EndColor = Color.FromArgb(255, 0, 170);
     public static readonly Color JumpCleanColor = Color.FromArgb(240, 240, 240);   // 之前已缓存的跳点方向（白）
     public static readonly Color JumpFreshColor = Color.FromArgb(255, 140, 0);      // 本次寻路新更新的跳点方向（橙）
+    public static readonly Color JumpDirtyColor = Color.FromArgb(150, 96, 108, 132);// 待计算/已失效的跳点方向（暗灰蓝）
     public static readonly Color DynamicBlockColor = Color.FromArgb(34, 34, 38);
     public static readonly Color MonsterColor = Color.FromArgb(255, 74, 58);
     private static readonly Color[] DynamicPathColors =
@@ -1823,8 +1824,9 @@ public sealed class GridControl : ScrollableControl
         }
     }
 
-    // 在每个可走格内按方位摆成十字的 4 个点，表示该格 4 个正交方向跳点缓存的状态：
-    // 实心=clean（已缓存），空心=dirty（待计算）。位置即方向：上=N、下=S、左=W、右=E。
+    // 在每个可走格内按方位摆 4 个指向外侧的三角箭头，表示该格 4 个正交方向跳点缓存的状态。
+    // (Ox,Oy) 既是箭头在格内的方位偏移，也是箭头的指向：E→右、W→左、S→下、N→上。
+    // 颜色区分三态：橙=本次寻路新算，白=之前已缓存，暗灰蓝=dirty（待计算/已失效）。
     private static readonly (int Dir, float Ox, float Oy)[] DotLayout =
     [
         (0,  1f,  0f),   // E → 右
@@ -1855,13 +1857,16 @@ public sealed class GridControl : ScrollableControl
 
         var cacheSystem = _system;
         var cacheMap = cacheSystem.Map;
-        float r = Math.Max(2f, cs * 0.1f);
-        float off = cs * 0.30f;
+        float off = cs * 0.34f;                       // 箭头方位（边中点）偏移
+        float len = Math.Max(3f, cs * 0.20f);         // 箭头从中心到尖端的长度
+        float half = Math.Max(2.2f, cs * 0.135f);     // 箭头底边半宽
         bool snapOk = !_dynamicMode && _snapW == _map.Width && _snapH == _map.Height;
 
         using var cleanBrush = new SolidBrush(JumpCleanColor);
         using var freshBrush = new SolidBrush(JumpFreshColor);
-        using var ringPen = new Pen(Color.FromArgb(200, 240, 240, 240), Math.Max(1.2f, cs / 22f));
+        using var dirtyBrush = new SolidBrush(JumpDirtyColor);
+        using var edgePen = new Pen(Color.FromArgb(110, 20, 20, 24), Math.Max(0.8f, cs / 40f));
+        var tri = new PointF[3];
 
         var prev = g.SmoothingMode;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
@@ -1880,18 +1885,25 @@ public sealed class GridControl : ScrollableControl
 
                 foreach (var (dir, ox, oy) in DotLayout)
                 {
-                    float dx = cx + ox * off;
-                    float dy = cy + oy * off;
-
+                    Brush brush;
                     if (!cacheSystem.Cache.IsClean(cacheMap, x, y, dir))
+                        brush = dirtyBrush;   // dirty：待计算/已失效
+                    else
                     {
-                        g.DrawEllipse(ringPen, dx - r, dy - r, r * 2, r * 2);   // dirty：空心
-                        continue;
+                        // clean：本次寻路新算（之前 dirty）用橙，之前已缓存用白
+                        bool wasClean = snapOk && _cleanBefore[((y * _map.Width + x) * 4) + dir];
+                        brush = wasClean ? cleanBrush : freshBrush;
                     }
 
-                    // clean：本次寻路新更新（之前 dirty）用橙色，之前已缓存用白色
-                    bool wasClean = snapOk && _cleanBefore[((y * _map.Width + x) * 4) + dir];
-                    g.FillEllipse(wasClean ? cleanBrush : freshBrush, dx - r, dy - r, r * 2, r * 2);
+                    // 箭头中心 = 边中点；指向 (ox,oy)；(px,py) 为其垂直向量（底边方向）
+                    float mx = cx + ox * off, my = cy + oy * off;
+                    float px = -oy, py = ox;
+                    tri[0] = new PointF(mx + ox * len, my + oy * len);                              // 尖端（朝外）
+                    tri[1] = new PointF(mx - ox * len * 0.55f + px * half, my - oy * len * 0.55f + py * half);
+                    tri[2] = new PointF(mx - ox * len * 0.55f - px * half, my - oy * len * 0.55f - py * half);
+                    g.FillPolygon(brush, tri);
+                    if (cs >= 22)
+                        g.DrawPolygon(edgePen, tri);   // 放大时描边，增强对比
                 }
             }
         }
