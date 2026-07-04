@@ -46,14 +46,15 @@ static inline int jps_sign(int v) { return (v > 0) - (v < 0); }
  * 默认（未定义 JPS_ALLOW_CORNER_CUTTING）：禁止斜穿角——目标格 + 两侧正交格都必须可走。
  * 定义 JPS_ALLOW_CORNER_CUTTING：恢复“允许斜穿拐角”——只要目标格可走。
  */
+/* 仅从界内格 (x,y) 以 dx,dy∈{-1,+1} 调用 → 邻查坐标 ∈ [-1,width]×[-1,height]，用哨兵版免边界检查。 */
 static inline bool jps_diagonal_allowed(const jps_grid_map *m, int x, int y, int dx, int dy)
 {
 #ifdef JPS_ALLOW_CORNER_CUTTING
-    return jps_grid_map_is_walkable(m, x + dx, y + dy);
+    return jps_grid_map_is_walkable_g(m, x + dx, y + dy);
 #else
-    return jps_grid_map_is_walkable(m, x + dx, y + dy) &&
-           jps_grid_map_is_walkable(m, x + dx, y) &&
-           jps_grid_map_is_walkable(m, x, y + dy);
+    return jps_grid_map_is_walkable_g(m, x + dx, y + dy) &&
+           jps_grid_map_is_walkable_g(m, x + dx, y) &&
+           jps_grid_map_is_walkable_g(m, x, y + dy);
 #endif
 }
 

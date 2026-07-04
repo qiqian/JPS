@@ -17,10 +17,11 @@ static int jps__logical_stride(int dim)
     return (dim + 63) >> 6;
 }
 
-static int jps__simd_stride(int dim)
+/* 数据字数：向上取偶（两个 uint64 = 128 位对齐），不含哨兵字。 */
+static int jps__data_stride(int dim)
 {
     int words = jps__logical_stride(dim);
-    return (words + 1) & ~1;   /* 向上取偶：两个 uint64 = 128 位对齐 */
+    return (words + 1) & ~1;
 }
 
 static void *jps__aligned_alloc16(size_t size)
@@ -42,25 +43,35 @@ static void jps__aligned_free(void *p)
 }
 
 /*
- * 通用 padding：把一份“按线(line)排布”位图里每条线上 across ≥ valid_across 的位置 1（阻挡）。
- * 行排布：line=y、across=x、valid_across=width；列排布：line=x、across=y、valid_across=height。
- * 这样取反即得可走位，扫描无需逐字屏蔽；且对齐补出的整字也置为全阻挡。
+ * 填充哨兵带 + 行尾 padding（位图须已整体清零）。origin 指向数据(0,0)；pstride=物理线宽；
+ * n_lines=有效线数；data_stride=数据字数（=pstride-2*GUARD）；valid_across=有效跨度(width/height)。
+ * 置 1（阻挡）的部分：上/下哨兵线整条、每数据线两侧哨兵字、行尾 across≥valid 的 padding。
  */
-static void jps__mark_padding(uint64_t *bits, int stride, int n_lines, int valid_across)
+static void jps__fill_bitmap(uint64_t *origin, int pstride, int n_lines, int data_stride, int valid_across)
 {
     int first_pad_word = valid_across >> 6;
     int first_pad_bit = valid_across & 63;
-    int line, w;
+    int line;
+    ptrdiff_t w;
 
+    /* 上哨兵线(line=-1)、下哨兵线(line=n_lines)：整条物理线（含两侧哨兵字）全阻挡。 */
+    for (w = -JPS_GUARD_WORDS; w < data_stride + JPS_GUARD_WORDS; w++)
+    {
+        origin[(ptrdiff_t)(-1) * pstride + w] = ~0ULL;
+        origin[(ptrdiff_t)n_lines * pstride + w] = ~0ULL;
+    }
+
+    /* 每条数据线：左哨兵字 + (行尾 padding ∪ 右哨兵字)。 */
     for (line = 0; line < n_lines; line++)
     {
-        uint64_t *lb = &bits[(size_t)line * stride];
-        for (w = first_pad_word; w < stride; w++)
-        {
-            uint64_t mask;
-            if (w > first_pad_word)      mask = ~0ULL;                          /* 整字全 padding */
-            else if (first_pad_bit == 0) mask = ~0ULL;                          /* 恰好字边界 */
-            else                         mask = ~((1ULL << first_pad_bit) - 1); /* 该字内 ≥ 有效位的部分 */
+        uint64_t *lb = origin + (ptrdiff_t)line * pstride;
+        for (w = -JPS_GUARD_WORDS; w < 0; w++)
+            lb[w] = ~0ULL;                                  /* 左哨兵字 */
+        for (w = first_pad_word; w < data_stride + JPS_GUARD_WORDS; w++)
+        {                                                   /* padding + 右哨兵字 */
+            uint64_t mask = (w == first_pad_word && first_pad_bit != 0)
+                                ? ~((1ULL << first_pad_bit) - 1)   /* 该字内 ≥ 有效位的部分 */
+                                : ~0ULL;                           /* 整字全阻挡 */
             lb[w] |= mask;
         }
     }
@@ -89,7 +100,8 @@ static void jps__bump_all_line_versions(jps_grid_map *m)
 jps_grid_map *jps_grid_map_create(int width, int height)
 {
     jps_grid_map *m;
-    size_t row_bytes, col_bytes;
+    int data_stride_r, data_stride_c;
+    size_t row_words, col_words;
 
     if (width <= 0 || height <= 0)
         return NULL;
@@ -106,30 +118,42 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->version = 0;
     m->row_version = NULL;
     m->col_version = NULL;
-    m->stride = jps__simd_stride(width);      /* 行排布：每行 128 位对齐 */
-    m->col_stride = jps__simd_stride(height); /* 列排布：每列 128 位对齐 */
+    m->blocked = NULL;
+    m->col_blocked = NULL;
+    m->blocked_alloc = NULL;
+    m->col_blocked_alloc = NULL;
 
-    row_bytes = (size_t)m->stride * height * sizeof(uint64_t);
-    col_bytes = (size_t)m->col_stride * width * sizeof(uint64_t);
-    m->blocked = (uint64_t *)jps__aligned_alloc16(row_bytes);
-    m->col_blocked = (uint64_t *)jps__aligned_alloc16(col_bytes);
+    data_stride_r = jps__data_stride(width);
+    data_stride_c = jps__data_stride(height);
+    m->stride     = data_stride_r + 2 * JPS_GUARD_WORDS;   /* 物理行宽（含两侧哨兵字） */
+    m->col_stride = data_stride_c + 2 * JPS_GUARD_WORDS;   /* 物理列宽 */
+
+    row_words = (size_t)(height + 2) * m->stride;     /* +2 = 上下哨兵线 */
+    col_words = (size_t)(width + 2) * m->col_stride;
+    m->blocked_alloc     = (uint64_t *)jps__aligned_alloc16(row_words * sizeof(uint64_t));
+    m->col_blocked_alloc = (uint64_t *)jps__aligned_alloc16(col_words * sizeof(uint64_t));
     m->row_version = (int *)calloc((size_t)height, sizeof(int));
     m->col_version = (int *)calloc((size_t)width, sizeof(int));
-    if (m->blocked == NULL || m->col_blocked == NULL || m->row_version == NULL || m->col_version == NULL)
+    if (m->blocked_alloc == NULL || m->col_blocked_alloc == NULL ||
+        m->row_version == NULL || m->col_version == NULL)
     {
-        jps__aligned_free(m->blocked);
-        jps__aligned_free(m->col_blocked);
+        jps__aligned_free(m->blocked_alloc);
+        jps__aligned_free(m->col_blocked_alloc);
         free(m->row_version);
         free(m->col_version);
         free(m);
         return NULL;
     }
 
-    /* 对齐分配器用 malloc，不清零 → 必须先清零，否则有效格残留垃圾（= 随机阻挡）。 */
-    memset(m->blocked, 0, row_bytes);
-    memset(m->col_blocked, 0, col_bytes);
-    jps__mark_padding(m->blocked, m->stride, height, width);       /* 行排布 padding：x ≥ width */
-    jps__mark_padding(m->col_blocked, m->col_stride, width, height); /* 列排布 padding：y ≥ height */
+    /* origin = 跳过上哨兵线(1 条 = stride 字) + 左哨兵字，指向数据(0,0)。
+     * 偏移 = stride + GUARD 为偶数（stride 偶）→ origin 保持 16 字节对齐。 */
+    m->blocked     = m->blocked_alloc     + (size_t)m->stride     + JPS_GUARD_WORDS;
+    m->col_blocked = m->col_blocked_alloc + (size_t)m->col_stride + JPS_GUARD_WORDS;
+
+    memset(m->blocked_alloc, 0, row_words * sizeof(uint64_t));
+    memset(m->col_blocked_alloc, 0, col_words * sizeof(uint64_t));
+    jps__fill_bitmap(m->blocked,     m->stride,     height, data_stride_r, width);   /* 行排布 */
+    jps__fill_bitmap(m->col_blocked, m->col_stride, width,  data_stride_c, height);  /* 列排布 */
     return m;
 }
 
@@ -137,8 +161,8 @@ void jps_grid_map_destroy(jps_grid_map *m)
 {
     if (m == NULL)
         return;
-    jps__aligned_free(m->blocked);
-    jps__aligned_free(m->col_blocked);
+    jps__aligned_free(m->blocked_alloc);
+    jps__aligned_free(m->col_blocked_alloc);
     free(m->row_version);
     free(m->col_version);
     free(m);
@@ -146,7 +170,7 @@ void jps_grid_map_destroy(jps_grid_map *m)
 
 void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
 {
-    size_t rword, cword;
+    ptrdiff_t rword, cword;
     uint64_t rmask, cmask;
 
     if (!jps_grid_map_in_bounds(m, x, y))
@@ -155,9 +179,9 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
     if (jps__grid_map_get_bit(m, x, y) == blocked)
         return;   /* 无变化，不动版本号；行/列两份始终一致 */
 
-    rword = (size_t)y * m->stride + (x >> 6);        /* 行排布位置 */
+    rword = (ptrdiff_t)y * m->stride + (x >> 6);        /* 行排布位置（物理线宽） */
     rmask = 1ULL << (x & 63);
-    cword = (size_t)x * m->col_stride + (y >> 6);    /* 列排布位置（转置） */
+    cword = (ptrdiff_t)x * m->col_stride + (y >> 6);    /* 列排布位置（转置） */
     cmask = 1ULL << (y & 63);
     if (blocked)
     {
@@ -176,10 +200,15 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
 
 void jps_grid_map_clear_all(jps_grid_map *m)
 {
-    memset(m->blocked, 0, (size_t)m->stride * m->height * sizeof(uint64_t));
-    memset(m->col_blocked, 0, (size_t)m->col_stride * m->width * sizeof(uint64_t));
-    jps__mark_padding(m->blocked, m->stride, m->height, m->width);       /* memset 抹掉了 padding，需重置 */
-    jps__mark_padding(m->col_blocked, m->col_stride, m->width, m->height);
+    int data_stride_r = m->stride - 2 * JPS_GUARD_WORDS;
+    int data_stride_c = m->col_stride - 2 * JPS_GUARD_WORDS;
+    size_t row_words = (size_t)(m->height + 2) * m->stride;
+    size_t col_words = (size_t)(m->width + 2) * m->col_stride;
+
+    memset(m->blocked_alloc, 0, row_words * sizeof(uint64_t));
+    memset(m->col_blocked_alloc, 0, col_words * sizeof(uint64_t));
+    jps__fill_bitmap(m->blocked,     m->stride,     m->height, data_stride_r, m->width);
+    jps__fill_bitmap(m->col_blocked, m->col_stride, m->width,  data_stride_c, m->height);
     m->version++;
     jps__bump_all_line_versions(m);
 }

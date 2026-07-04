@@ -205,8 +205,15 @@ static int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + 
 static jps__jump_entry jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
                                           int x, int y, int dx, int dy, int dir, int gx, int gy)
 {
-    int dist = jps_jump_point_cache_cardinal_dist(pf->cache, m, x, y, dx, dy, dir);
-    int max_travel = dist > 0 ? dist : -dist;
+    /* 先内联快探 clean 命中（一次 acquire 字节读 + int16 读），miss 才走完整慢路——
+     * 与 jps__diagonal_jump 的正交子探测同构，省掉命中时的函数调用与平面基址/世代解算。 */
+    const jps_jump_point_cache *c = pf->cache;
+    uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];
+    int dist, max_travel;
+    if (!jps_jump_probe(c->dist + (size_t)dir * c->size, c->gen + (size_t)dir * c->size,
+                        y * c->w + x, line_gen, &dist))
+        dist = jps_jump_point_cache_cardinal_dist(pf->cache, m, x, y, dx, dy, dir);
+    max_travel = dist > 0 ? dist : -dist;
 
     /* 终点正好在这条射线上且可达 → 直接拦截 */
     bool goal_on_ray =
@@ -308,7 +315,7 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
             int dy = jps_dir_dy[i];
             bool allowed = jps_is_diagonal_index(i)
                 ? jps_diagonal_allowed(m, x, y, dx, dy)
-                : jps_grid_map_is_walkable(m, x + dx, y + dy);
+                : jps_grid_map_is_walkable_g(m, x + dx, y + dy);   /* (x,y) 界内、±1 邻查 → 哨兵版免检 */
             if (allowed)
                 pf->dir_buf[n++] = i;
         }
@@ -326,9 +333,9 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
         pf->dir_buf[n++] = jps_dir_index_of(pdx, 0);
         pf->dir_buf[n++] = jps_dir_index_of(0, pdy);
 
-        if (!jps_grid_map_is_walkable(m, x - pdx, y))
+        if (!jps_grid_map_is_walkable_g(m, x - pdx, y))
             pf->dir_buf[n++] = jps_dir_index_of(-pdx, pdy);
-        if (!jps_grid_map_is_walkable(m, x, y - pdy))
+        if (!jps_grid_map_is_walkable_g(m, x, y - pdy))
             pf->dir_buf[n++] = jps_dir_index_of(pdx, -pdy);
 
         return n;
@@ -338,13 +345,13 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
 
     if (pdx != 0)
     {
-        if (!jps_grid_map_is_walkable(m, x, y + 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, 1);
-        if (!jps_grid_map_is_walkable(m, x, y - 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, -1);
+        if (!jps_grid_map_is_walkable_g(m, x, y + 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, 1);
+        if (!jps_grid_map_is_walkable_g(m, x, y - 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, -1);
     }
     else
     {
-        if (!jps_grid_map_is_walkable(m, x + 1, y)) pf->dir_buf[n++] = jps_dir_index_of(1, pdy);
-        if (!jps_grid_map_is_walkable(m, x - 1, y)) pf->dir_buf[n++] = jps_dir_index_of(-1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x + 1, y)) pf->dir_buf[n++] = jps_dir_index_of(1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x - 1, y)) pf->dir_buf[n++] = jps_dir_index_of(-1, pdy);
     }
 
     return n;
@@ -363,12 +370,12 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
 
     if (pdx != 0)   /* 水平移动 */
     {
-        if (jps_grid_map_is_walkable(m, x, y + 1) && !jps_grid_map_is_walkable(m, x - pdx, y + 1))
+        if (jps_grid_map_is_walkable_g(m, x, y + 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y + 1))
         {
             pf->dir_buf[n++] = jps_dir_index_of(0, 1);
             pf->dir_buf[n++] = jps_dir_index_of(pdx, 1);
         }
-        if (jps_grid_map_is_walkable(m, x, y - 1) && !jps_grid_map_is_walkable(m, x - pdx, y - 1))
+        if (jps_grid_map_is_walkable_g(m, x, y - 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y - 1))
         {
             pf->dir_buf[n++] = jps_dir_index_of(0, -1);
             pf->dir_buf[n++] = jps_dir_index_of(pdx, -1);
@@ -376,12 +383,12 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
     }
     else            /* 垂直移动 */
     {
-        if (jps_grid_map_is_walkable(m, x + 1, y) && !jps_grid_map_is_walkable(m, x + 1, y - pdy))
+        if (jps_grid_map_is_walkable_g(m, x + 1, y) && !jps_grid_map_is_walkable_g(m, x + 1, y - pdy))
         {
             pf->dir_buf[n++] = jps_dir_index_of(1, 0);
             pf->dir_buf[n++] = jps_dir_index_of(1, pdy);
         }
-        if (jps_grid_map_is_walkable(m, x - 1, y) && !jps_grid_map_is_walkable(m, x - 1, y - pdy))
+        if (jps_grid_map_is_walkable_g(m, x - 1, y) && !jps_grid_map_is_walkable_g(m, x - 1, y - pdy))
         {
             pf->dir_buf[n++] = jps_dir_index_of(-1, 0);
             pf->dir_buf[n++] = jps_dir_index_of(-1, pdy);

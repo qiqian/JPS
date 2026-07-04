@@ -61,27 +61,25 @@ static int jps__highest_set(uint64_t x)
  */
 
 /*
- * 参数化位图访问器：bits/stride/n_lines 描述一份按“线(line)”排布的位图，扫描沿“跨向(across)”推进：
- *   行排布(原图)：line=y、across=x、stride=行 stride、n_lines=height —— 用于水平扫描；
- *   列排布(转置) ：line=x、across=y、stride=列 stride、n_lines=width  —— 用于垂直扫描。
+ * 参数化位图访问器：bits(数据(0,0))/pstride(物理线宽) 描述一份按“线(line)”排布的位图，扫描沿“跨向(across)”推进：
+ *   行排布(原图)：line=y、across=x、pstride=行物理 stride —— 用于水平扫描；
+ *   列排布(转置) ：line=x、across=y、pstride=列物理 stride —— 用于垂直扫描。
  * 于是“垂直扫描”= 在转置位图上做同一套“水平扫描”，两者共用下面这份 SIMD 代码。
+ * 越界（line-1/n_lines、w2 超界）由 GridMap 哨兵带兜底（恒阻挡），访问器不判界。
  */
 
-/* 取第 line 条线第 w2 个对齐单元(words w2,w2+1)的可走位向量；线/字越界 → 全阻挡(全 0)。
- * 前提：w2 偶、stride 偶 → w2 在界内时 w2+1 也在同一条线内，可安全 16 字节对齐加载。 */
-static inline jps_v128 jps__walk_v128(const uint64_t *bits, int stride, int n_lines, int line, int w2)
+/* 哨兵版：直接对齐读第 line 条线第 w2 个 128 位单元(words w2,w2+1)的可走位（取反），**不判界**——
+ * 越界访问由 GridMap 的哨兵带兜底（恒阻挡）。有符号下标，允许 line=-1/w2=-2 落到负偏移。
+ * 前提：调用方保证 line∈[-1,n_lines]、w2∈[-2,data_stride]（哨兵带覆盖范围）；pstride 偶 → 单元 16 字节对齐。 */
+static inline jps_v128 jps__walk_v128(const uint64_t *bits, int pstride, int line, int w2)
 {
-    if ((uint32_t)line >= (uint32_t)n_lines) return jps_v_zero();
-    if ((uint32_t)w2 >= (uint32_t)stride) return jps_v_zero();
-    return jps_v_not(jps_v_load(&bits[(size_t)line * stride + w2]));
+    return jps_v_not(jps_v_load(&bits[(ptrdiff_t)line * pstride + w2]));
 }
 
-/* 取第 line 条线第 word_col 个 64 位字的可走位（取反）；越界 → 0（全阻挡）。用于跨单元进位。 */
-static inline uint64_t jps__walk_word(const uint64_t *bits, int stride, int n_lines, int line, int word_col)
+/* 哨兵版单字读（取反），用于跨单元进位；越界由哨兵带兜底，不判界。 */
+static inline uint64_t jps__walk_word(const uint64_t *bits, int pstride, int line, int word_col)
 {
-    if ((uint32_t)line >= (uint32_t)n_lines) return 0ULL;
-    if ((uint32_t)word_col >= (uint32_t)stride) return 0ULL;
-    return ~bits[(size_t)line * stride + word_col];
+    return ~bits[(ptrdiff_t)line * pstride + word_col];
 }
 
 /* 保留 bit 0..k（k∈0..63）的低位掩码。 */
@@ -92,10 +90,11 @@ static inline uint64_t jps__mask_le(int k)
 
 /*
  * 沿第 line 条线的 across 方向 dir∈{+1,-1} 扫描最近“停点”（跳点 or 墙），语义与逐格扫描一致。
- * bits/stride/n_lines 选行排布或列排布，从而一套代码同时服务水平与垂直扫描。
+ * bits 指向数据(0,0)、pstride 为物理线宽；行排布或列排布共用同一套代码。越界终止靠 GridMap 哨兵带兜底
+ * （line-1/n_lines、w2 越界都落到全阻挡哨兵内存），故内层无任何边界分支。
  * pos 为当前 across 坐标（行扫=x，列扫=y）；返回步数 *out_s 与是否跳点 *out_jump。
  */
-static void jps__scan_line(const uint64_t *bits, int stride, int n_lines,
+static void jps__scan_line(const uint64_t *bits, int pstride,
                            int line, int pos, int dir, int *out_s, bool *out_jump)
 {
     jps_v128 ones = jps_v_set2(~0ULL, ~0ULL);
@@ -109,13 +108,13 @@ static void jps__scan_line(const uint64_t *bits, int stride, int n_lines,
         jps_v128 sub = off < 64 ? jps_v_set2(~0ULL << off, ~0ULL)
                                 : jps_v_set2(0ULL, ~0ULL << (off - 64));
         /* 进位源 = 单元低字左邻字(unit-1) 的 line±1 两条线；之后每单元由本单元高字滚动复用。 */
-        uint64_t prev_up = jps__walk_word(bits, stride, n_lines, line - 1, unit - 1);
-        uint64_t prev_dn = jps__walk_word(bits, stride, n_lines, line + 1, unit - 1);
+        uint64_t prev_up = jps__walk_word(bits, pstride, line - 1, unit - 1);
+        uint64_t prev_dn = jps__walk_word(bits, pstride, line + 1, unit - 1);
         for (;;)
         {
-            jps_v128 walk_y  = jps__walk_v128(bits, stride, n_lines, line,     unit);
-            jps_v128 walk_up = jps__walk_v128(bits, stride, n_lines, line - 1, unit);
-            jps_v128 walk_dn = jps__walk_v128(bits, stride, n_lines, line + 1, unit);
+            jps_v128 walk_y  = jps__walk_v128(bits, pstride, line,     unit);
+            jps_v128 walk_up = jps__walk_v128(bits, pstride, line - 1, unit);
+            jps_v128 walk_dn = jps__walk_v128(bits, pstride, line + 1, unit);
 
             /* block(c-1) = (~walk << 1)：单元内进位由整 128 位左移完成；低字进位 cin 来自左邻字 bit63。 */
             jps_v128 blk_up = jps_v_shl1(jps_v_not(walk_up), (~prev_up) >> 63);
@@ -166,13 +165,13 @@ static void jps__scan_line(const uint64_t *bits, int stride, int n_lines,
         sub = off >= 64 ? jps_v_set2(~0ULL, jps__mask_le(off - 64))
                         : jps_v_set2(jps__mask_le(off), 0ULL);
         /* 进位源 = 单元高字右邻字(unit+2) 的 line±1 两条线；之后每单元由本单元低字滚动复用。 */
-        next_up = jps__walk_word(bits, stride, n_lines, line - 1, unit + 2);
-        next_dn = jps__walk_word(bits, stride, n_lines, line + 1, unit + 2);
+        next_up = jps__walk_word(bits, pstride, line - 1, unit + 2);
+        next_dn = jps__walk_word(bits, pstride, line + 1, unit + 2);
         for (;;)
         {
-            jps_v128 walk_y  = jps__walk_v128(bits, stride, n_lines, line,     unit);
-            jps_v128 walk_up = jps__walk_v128(bits, stride, n_lines, line - 1, unit);
-            jps_v128 walk_dn = jps__walk_v128(bits, stride, n_lines, line + 1, unit);
+            jps_v128 walk_y  = jps__walk_v128(bits, pstride, line,     unit);
+            jps_v128 walk_up = jps__walk_v128(bits, pstride, line - 1, unit);
+            jps_v128 walk_dn = jps__walk_v128(bits, pstride, line + 1, unit);
 
             /* block(c+1) = (~walk >> 1)：单元内进位由整 128 位右移完成；高字进位 cin 来自右邻字 bit0。 */
             jps_v128 blk_up = jps_v_shr1(jps_v_not(walk_up), (~next_up) & 1ULL);
@@ -375,9 +374,9 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
 
     /* 扫描：从 (x,y) 沿方向找最近跳点或墙。水平走行排布，垂直走列排布(转置) —— 两者共用 SIMD。 */
     if (dy == 0)
-        jps__scan_line(m->blocked, m->stride, m->height, y, x, dx, &s, &jump_found);
+        jps__scan_line(m->blocked, m->stride, y, x, dx, &s, &jump_found);
     else
-        jps__scan_line(m->col_blocked, m->col_stride, m->width, x, y, dy, &s, &jump_found);
+        jps__scan_line(m->col_blocked, m->col_stride, x, y, dy, &s, &jump_found);
 
     /* 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ INT16_MAX。
      * 先写 dist（水平段可 SIMD），再逐格 release-store gen 发布——所有 dist 写在任何 gen 发布之前，
