@@ -64,7 +64,7 @@ jps_jump_point_cache *jps_jump_point_cache_create(void);
 void jps_jump_point_cache_destroy(jps_jump_point_cache *c);
 
 /* 每次搜索开始时调用：按尺寸准备缓冲，并在地图版本变化时同步受影响的行/列。 */
-void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m);
+void jps_jump_point_cache_sync(jps_jump_point_cache *c, jps_grid_map *m);
 
 /*
  * 取 (x,y) 沿正交方向 (dx,dy) 的带符号跳点距离。

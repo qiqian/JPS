@@ -1,4 +1,4 @@
-/*
+﻿/*
  * grid_map.c
  * JPS Pathfinding — C port of JPS.Core/Models/GridMap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -77,15 +77,37 @@ static void jps__fill_bitmap(uint64_t *origin, int pstride, int n_lines, int dat
     }
 }
 
+static void jps__mark_dirty_row(jps_grid_map *m, int y)
+{
+    if ((uint32_t)y >= (uint32_t)m->height)
+        return;
+    m->row_version[y]++;
+    if (!m->dirty_all && !m->dirty_row_mark[y])
+    {
+        m->dirty_row_mark[y] = 1;
+        m->dirty_rows[m->dirty_row_count++] = y;
+    }
+}
+
+static void jps__mark_dirty_col(jps_grid_map *m, int x)
+{
+    if ((uint32_t)x >= (uint32_t)m->width)
+        return;
+    m->col_version[x]++;
+    if (!m->dirty_all && !m->dirty_col_mark[x])
+    {
+        m->dirty_col_mark[x] = 1;
+        m->dirty_cols[m->dirty_col_count++] = x;
+    }
+}
+
 static void jps__bump_line_versions(jps_grid_map *m, int x, int y)
 {
     int i;
     for (i = y - 1; i <= y + 1; i++)
-        if ((uint32_t)i < (uint32_t)m->height)
-            m->row_version[i]++;
+        jps__mark_dirty_row(m, i);
     for (i = x - 1; i <= x + 1; i++)
-        if ((uint32_t)i < (uint32_t)m->width)
-            m->col_version[i]++;
+        jps__mark_dirty_col(m, i);
 }
 
 static void jps__bump_all_line_versions(jps_grid_map *m)
@@ -95,6 +117,7 @@ static void jps__bump_all_line_versions(jps_grid_map *m)
         m->row_version[i]++;
     for (i = 0; i < m->width; i++)
         m->col_version[i]++;
+    m->dirty_all = true;
 }
 
 jps_grid_map *jps_grid_map_create(int width, int height)
@@ -118,6 +141,13 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->version = 0;
     m->row_version = NULL;
     m->col_version = NULL;
+    m->dirty_rows = NULL;
+    m->dirty_cols = NULL;
+    m->dirty_row_mark = NULL;
+    m->dirty_col_mark = NULL;
+    m->dirty_row_count = 0;
+    m->dirty_col_count = 0;
+    m->dirty_all = false;
     m->blocked = NULL;
     m->col_blocked = NULL;
     m->blocked_alloc = NULL;
@@ -134,13 +164,23 @@ jps_grid_map *jps_grid_map_create(int width, int height)
     m->col_blocked_alloc = (uint64_t *)jps__aligned_alloc16(col_words * sizeof(uint64_t));
     m->row_version = (int *)calloc((size_t)height, sizeof(int));
     m->col_version = (int *)calloc((size_t)width, sizeof(int));
+    m->dirty_rows = (int *)malloc((size_t)height * sizeof(int));
+    m->dirty_cols = (int *)malloc((size_t)width * sizeof(int));
+    m->dirty_row_mark = (uint8_t *)calloc((size_t)height, sizeof(uint8_t));
+    m->dirty_col_mark = (uint8_t *)calloc((size_t)width, sizeof(uint8_t));
     if (m->blocked_alloc == NULL || m->col_blocked_alloc == NULL ||
-        m->row_version == NULL || m->col_version == NULL)
+        m->row_version == NULL || m->col_version == NULL ||
+        m->dirty_rows == NULL || m->dirty_cols == NULL ||
+        m->dirty_row_mark == NULL || m->dirty_col_mark == NULL)
     {
         jps__aligned_free(m->blocked_alloc);
         jps__aligned_free(m->col_blocked_alloc);
         free(m->row_version);
         free(m->col_version);
+        free(m->dirty_rows);
+        free(m->dirty_cols);
+        free(m->dirty_row_mark);
+        free(m->dirty_col_mark);
         free(m);
         return NULL;
     }
@@ -165,6 +205,10 @@ void jps_grid_map_destroy(jps_grid_map *m)
     jps__aligned_free(m->col_blocked_alloc);
     free(m->row_version);
     free(m->col_version);
+    free(m->dirty_rows);
+    free(m->dirty_cols);
+    free(m->dirty_row_mark);
+    free(m->dirty_col_mark);
     free(m);
 }
 
@@ -198,6 +242,77 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
     jps__bump_line_versions(m, x, y);
 }
 
+void jps_grid_map_set_blocked_buffer(jps_grid_map *m, const uint8_t *cells, int count)
+{
+    int row_data_words, col_data_words;
+    int x, y, word, bit;
+    bool changed = false;
+
+    if (m == NULL || cells == NULL || count != m->width * m->height)
+        return;
+
+    row_data_words = jps__logical_stride(m->width);
+    col_data_words = jps__logical_stride(m->height);
+
+    for (y = 0; y < m->height; y++)
+    {
+        const uint8_t *src = cells + (ptrdiff_t)y * m->width;
+        uint64_t *row = m->blocked + (ptrdiff_t)y * m->stride;
+        for (word = 0; word < row_data_words; word++)
+        {
+            int base = word << 6;
+            int bit_count = m->width - base;
+            uint64_t bits = 0;
+            uint64_t mask;
+            uint64_t old_bits;
+            if (bit_count > 64)
+                bit_count = 64;
+            mask = bit_count == 64 ? ~0ULL : ((1ULL << bit_count) - 1);
+            for (bit = 0; bit < bit_count; bit++)
+                if (src[base + bit] != 0)
+                    bits |= 1ULL << bit;
+            old_bits = row[word];
+            if ((old_bits & mask) != bits)
+            {
+                row[word] = (old_bits & ~mask) | bits;
+                changed = true;
+            }
+        }
+    }
+
+    for (x = 0; x < m->width; x++)
+    {
+        uint64_t *col = m->col_blocked + (ptrdiff_t)x * m->col_stride;
+        for (word = 0; word < col_data_words; word++)
+        {
+            int base = word << 6;
+            int bit_count = m->height - base;
+            uint64_t bits = 0;
+            uint64_t mask;
+            uint64_t old_bits;
+            if (bit_count > 64)
+                bit_count = 64;
+            mask = bit_count == 64 ? ~0ULL : ((1ULL << bit_count) - 1);
+            for (bit = 0; bit < bit_count; bit++)
+                if (cells[(ptrdiff_t)(base + bit) * m->width + x] != 0)
+                    bits |= 1ULL << bit;
+            old_bits = col[word];
+            if ((old_bits & mask) != bits)
+            {
+                col[word] = (old_bits & ~mask) | bits;
+                changed = true;
+            }
+        }
+    }
+
+    if (!changed)
+        return;
+
+    jps_grid_map_clear_dirty(m);
+    m->version++;
+    jps__bump_all_line_versions(m);
+}
+
 void jps_grid_map_clear_all(jps_grid_map *m)
 {
     int data_stride_r = m->stride - 2 * JPS_GUARD_WORDS;
@@ -211,4 +326,18 @@ void jps_grid_map_clear_all(jps_grid_map *m)
     jps__fill_bitmap(m->col_blocked, m->col_stride, m->width,  data_stride_c, m->height);
     m->version++;
     jps__bump_all_line_versions(m);
+}
+
+void jps_grid_map_clear_dirty(jps_grid_map *m)
+{
+    int i;
+    if (m == NULL)
+        return;
+    for (i = 0; i < m->dirty_row_count; i++)
+        m->dirty_row_mark[m->dirty_rows[i]] = 0;
+    for (i = 0; i < m->dirty_col_count; i++)
+        m->dirty_col_mark[m->dirty_cols[i]] = 0;
+    m->dirty_row_count = 0;
+    m->dirty_col_count = 0;
+    m->dirty_all = false;
 }

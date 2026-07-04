@@ -1,4 +1,4 @@
-/*
+﻿/*
  * grid_map.h
  * JPS Pathfinding — C port of JPS.Core/Models/GridMap.cs
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
@@ -41,6 +41,13 @@ typedef struct jps_grid_map
     /* 行/列影响版本：单格变化只影响 y-1..y+1 的水平扫描、x-1..x+1 的垂直扫描。Sync 据此降失效粒度。 */
     int *row_version;
     int *col_version;
+    int *dirty_rows;
+    int *dirty_cols;
+    uint8_t *dirty_row_mark;
+    uint8_t *dirty_col_mark;
+    int dirty_row_count;
+    int dirty_col_count;
+    bool dirty_all;
     /* **物理**线宽（uint64 数）= 数据字数 + 2*JPS_GUARD_WORDS，偶数、128 位对齐。用于线寻址。 */
     int stride;      /* 行排布 */
     int col_stride;  /* 列排布（转置） */
@@ -63,7 +70,9 @@ jps_grid_map *jps_grid_map_create(int width, int height);
 void jps_grid_map_destroy(jps_grid_map *m);
 
 void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked);
+void jps_grid_map_set_blocked_buffer(jps_grid_map *m, const uint8_t *cells, int count);
 void jps_grid_map_clear_all(jps_grid_map *m);
+void jps_grid_map_clear_dirty(jps_grid_map *m);
 
 /* ---- 热路径访问器：静态内联，与 C# 的属性/方法语义逐一对应 ---- */
 

@@ -36,18 +36,19 @@ namespace JPS.Pathfinding
                 Grow();
 
             int i = _count++;
-            _elem[i] = element;
-            _prio[i] = priority;
-
-            // 上浮
             while (i > 0)
             {
                 int parent = (i - 1) >> 1;
-                if (_prio[parent] <= _prio[i])
+                if (_prio[parent] <= priority)
                     break;
-                Swap(i, parent);
+
+                _elem[i] = _elem[parent];
+                _prio[i] = _prio[parent];
                 i = parent;
             }
+
+            _elem[i] = element;
+            _prio[i] = priority;
         }
 
         public bool TryDequeue(out int element, out long priority)
@@ -64,37 +65,35 @@ namespace JPS.Pathfinding
             _count--;
 
             if (_count > 0)
-            {
-                _elem[0] = _elem[_count];
-                _prio[0] = _prio[_count];
-                SiftDown(0);
-            }
+                SiftDown(0, _elem[_count], _prio[_count]);
 
             return true;
         }
 
-        private void SiftDown(int i)
+        private void SiftDown(int i, int element, long priority)
         {
             while (true)
             {
                 int l = (i << 1) + 1;
                 int r = l + 1;
-                int smallest = i;
+                int child;
 
-                if (l < _count && _prio[l] < _prio[smallest]) smallest = l;
-                if (r < _count && _prio[r] < _prio[smallest]) smallest = r;
-                if (smallest == i)
+                if (l >= _count)
                     break;
 
-                Swap(i, smallest);
-                i = smallest;
-            }
-        }
+                child = l;
+                if (r < _count && _prio[r] < _prio[l])
+                    child = r;
+                if (_prio[child] >= priority)
+                    break;
 
-        private void Swap(int a, int b)
-        {
-            int e = _elem[a]; _elem[a] = _elem[b]; _elem[b] = e;
-            long p = _prio[a]; _prio[a] = _prio[b]; _prio[b] = p;
+                _elem[i] = _elem[child];
+                _prio[i] = _prio[child];
+                i = child;
+            }
+
+            _elem[i] = element;
+            _prio[i] = priority;
         }
 
         private void Grow()

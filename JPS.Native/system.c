@@ -66,20 +66,10 @@ void jps_system_clear_all(jps_system *s)
 
 void jps_system_set_blocked_buffer(jps_system *s, const uint8_t *cells, int count)
 {
-    int w, h, x, y, i;
-
     if (s == NULL || cells == NULL)
         return;
 
-    w = s->map->width;
-    h = s->map->height;
-    if (count != w * h)
-        return;   /* 尺寸不匹配，拒绝（避免越界读取） */
-
-    i = 0;
-    for (y = 0; y < h; y++)
-        for (x = 0; x < w; x++)
-            jps_grid_map_set_blocked(s->map, x, y, cells[i++] != 0);
+    jps_grid_map_set_blocked_buffer(s->map, cells, count);
 }
 
 void jps_system_set_blocked_batch(jps_system *s, const int *xyv, int edit_count)

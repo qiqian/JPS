@@ -279,9 +279,10 @@ static void jps__cache_invalidate_col(jps_jump_point_cache *c, int x)
     }
 }
 
-void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m)
+void jps_jump_point_cache_sync(jps_jump_point_cache *c, jps_grid_map *m)
 {
     int i;
+    bool full_sync;
 
     if (c->w != m->width || c->h != m->height || c->size != m->width * m->height)
     {
@@ -311,23 +312,49 @@ void jps_jump_point_cache_sync(jps_jump_point_cache *c, const jps_grid_map *m)
 
     if (c->map_version != m->version)
     {
-        for (i = 0; i < c->h; i++)
+        full_sync = c->map_version < 0 || m->dirty_all;
+        if (full_sync)
         {
-            if (c->row_version[i] != m->row_version[i])
+            for (i = 0; i < c->h; i++)
             {
-                jps__cache_invalidate_row(c, i);
-                c->row_version[i] = m->row_version[i];
+                if (c->row_version[i] != m->row_version[i])
+                {
+                    jps__cache_invalidate_row(c, i);
+                    c->row_version[i] = m->row_version[i];
+                }
+            }
+            for (i = 0; i < c->w; i++)
+            {
+                if (c->col_version[i] != m->col_version[i])
+                {
+                    jps__cache_invalidate_col(c, i);
+                    c->col_version[i] = m->col_version[i];
+                }
             }
         }
-        for (i = 0; i < c->w; i++)
+        else
         {
-            if (c->col_version[i] != m->col_version[i])
+            for (i = 0; i < m->dirty_row_count; i++)
             {
-                jps__cache_invalidate_col(c, i);
-                c->col_version[i] = m->col_version[i];
+                int y = m->dirty_rows[i];
+                if (c->row_version[y] != m->row_version[y])
+                {
+                    jps__cache_invalidate_row(c, y);
+                    c->row_version[y] = m->row_version[y];
+                }
+            }
+            for (i = 0; i < m->dirty_col_count; i++)
+            {
+                int x = m->dirty_cols[i];
+                if (c->col_version[x] != m->col_version[x])
+                {
+                    jps__cache_invalidate_col(c, x);
+                    c->col_version[x] = m->col_version[x];
+                }
             }
         }
         c->map_version = m->version;
+        jps_grid_map_clear_dirty(m);
     }
 }
 

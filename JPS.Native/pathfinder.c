@@ -123,17 +123,17 @@ static void jps__result_reset(jps_path_result *r)
     r->expanded_nodes = 0;
 }
 
-static void jps__path_push(jps_path_result *r, int x, int y)
+static void jps__ensure_path_capacity(jps_path_result *r, int count)
 {
-    if (r->path_count == r->path_capacity)
-    {
-        int n = r->path_capacity < 16 ? 16 : r->path_capacity * 2;
-        r->path = (jps_point *)realloc(r->path, (size_t)n * sizeof(jps_point));
-        r->path_capacity = n;
-    }
-    r->path[r->path_count].x = x;
-    r->path[r->path_count].y = y;
-    r->path_count++;
+    int n;
+    if (count <= r->path_capacity)
+        return;
+
+    n = r->path_capacity < 16 ? 16 : r->path_capacity * 2;
+    while (n < count)
+        n *= 2;
+    r->path = (jps_point *)realloc(r->path, (size_t)n * sizeof(jps_point));
+    r->path_capacity = n;
 }
 
 /* ---------------- 生命周期 ---------------- */
@@ -401,24 +401,6 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
 
 /* ---------------- 路径重建 ---------------- */
 
-static void jps__append_segment(jps_path_result *r, int fx, int fy, int tx, int ty)
-{
-    int dx = jps_sign(tx - fx);
-    int dy = jps_sign(ty - fy);
-    int x = fx, y = fy;
-
-    if (r->path_count == 0 ||
-        r->path[r->path_count - 1].x != fx || r->path[r->path_count - 1].y != fy)
-        jps__path_push(r, fx, fy);
-
-    while (x != tx || y != ty)
-    {
-        x += dx;
-        y += dy;
-        jps__path_push(r, x, y);
-    }
-}
-
 static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
 {
     int n;
@@ -434,11 +416,11 @@ static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
 
 static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id, jps_path_result *r)
 {
-    /* 先沿父链收集跳点节点（goal → start），再反转。 */
+    /* 先沿父链收集跳点节点（goal → start），再从数组尾到头顺序写出完整逐格路径。 */
     int *nodes = pf->rebuild_nodes;
     int nodes_count = 0;
     int current = goal_id;
-    int i;
+    int total_count, i, write;
 
     /* 收集 */
     for (;;)
@@ -463,29 +445,54 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
         }
     }
 
-    /* 反转为 start → goal */
-    for (i = 0; i < nodes_count / 2; i++)
-    {
-        int t = nodes[i];
-        nodes[i] = nodes[nodes_count - 1 - i];
-        nodes[nodes_count - 1 - i] = t;
-    }
-
-    r->path_count = 0;
-
     /* start==goal 退化：只有一个节点，段循环跑 0 次而漏掉它——直接补回该格。 */
     if (nodes_count == 1)
     {
-        jps__path_push(r, goal_id % pf->w, goal_id / pf->w);
+        jps__ensure_path_capacity(r, 1);
+        r->path[0].x = goal_id % pf->w;
+        r->path[0].y = goal_id / pf->w;
+        r->path_count = 1;
         return;
     }
 
-    for (i = 0; i < nodes_count - 1; i++)
+    total_count = 1;
+    for (i = nodes_count - 1; i > 0; i--)
     {
         int from_id = nodes[i];
-        int to_id = nodes[i + 1];
-        jps__append_segment(r, from_id % pf->w, from_id / pf->w, to_id % pf->w, to_id / pf->w);
+        int to_id = nodes[i - 1];
+        int dx = abs((to_id % pf->w) - (from_id % pf->w));
+        int dy = abs((to_id / pf->w) - (from_id / pf->w));
+        total_count += dx > dy ? dx : dy;
     }
+
+    jps__ensure_path_capacity(r, total_count);
+    write = 0;
+    {
+        int start = nodes[nodes_count - 1];
+        r->path[write].x = start % pf->w;
+        r->path[write].y = start / pf->w;
+        write++;
+    }
+
+    for (i = nodes_count - 1; i > 0; i--)
+    {
+        int from_id = nodes[i];
+        int to_id = nodes[i - 1];
+        int fx = from_id % pf->w, fy = from_id / pf->w;
+        int tx = to_id % pf->w, ty = to_id / pf->w;
+        int dx = jps_sign(tx - fx);
+        int dy = jps_sign(ty - fy);
+
+        while (fx != tx || fy != ty)
+        {
+            fx += dx;
+            fy += dy;
+            r->path[write].x = fx;
+            r->path[write].y = fy;
+            write++;
+        }
+    }
+    r->path_count = write;
 }
 
 /* ---------------- 入口 ---------------- */

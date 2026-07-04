@@ -32,14 +32,6 @@ void jps_min_heap_clear(jps_min_heap *h)
     h->count = 0;
 }
 
-static inline void jps__heap_swap(jps_min_heap *h, int a, int b)
-{
-    int e = h->elem[a]; h->elem[a] = h->elem[b]; h->elem[b] = e;
-    {
-        int64_t p = h->prio[a]; h->prio[a] = h->prio[b]; h->prio[b] = p;
-    }
-}
-
 static void jps__heap_grow(jps_min_heap *h)
 {
     int n = h->capacity * 2;
@@ -56,36 +48,43 @@ void jps_min_heap_enqueue(jps_min_heap *h, int element, int64_t priority)
         jps__heap_grow(h);
 
     i = h->count++;
-    h->elem[i] = element;
-    h->prio[i] = priority;
 
-    /* 上浮 */
+    /* hole sift-up：只搬父节点，最后写入新元素，避免每层 swap 两个数组。 */
     while (i > 0)
     {
         int parent = (i - 1) >> 1;
-        if (h->prio[parent] <= h->prio[i])
+        if (h->prio[parent] <= priority)
             break;
-        jps__heap_swap(h, i, parent);
+        h->elem[i] = h->elem[parent];
+        h->prio[i] = h->prio[parent];
         i = parent;
     }
+    h->elem[i] = element;
+    h->prio[i] = priority;
 }
 
-static inline void jps__heap_sift_down(jps_min_heap *h, int i)
+static inline void jps__heap_sift_down(jps_min_heap *h, int i, int element, int64_t priority)
 {
     while (1)
     {
         int l = (i << 1) + 1;
         int r = l + 1;
-        int smallest = i;
+        int child;
 
-        if (l < h->count && h->prio[l] < h->prio[smallest]) smallest = l;
-        if (r < h->count && h->prio[r] < h->prio[smallest]) smallest = r;
-        if (smallest == i)
+        if (l >= h->count)
+            break;
+        child = l;
+        if (r < h->count && h->prio[r] < h->prio[l])
+            child = r;
+        if (h->prio[child] >= priority)
             break;
 
-        jps__heap_swap(h, i, smallest);
-        i = smallest;
+        h->elem[i] = h->elem[child];
+        h->prio[i] = h->prio[child];
+        i = child;
     }
+    h->elem[i] = element;
+    h->prio[i] = priority;
 }
 
 bool jps_min_heap_try_dequeue(jps_min_heap *h, int *element, int64_t *priority)
@@ -103,9 +102,7 @@ bool jps_min_heap_try_dequeue(jps_min_heap *h, int *element, int64_t *priority)
 
     if (h->count > 0)
     {
-        h->elem[0] = h->elem[h->count];
-        h->prio[0] = h->prio[h->count];
-        jps__heap_sift_down(h, 0);
+        jps__heap_sift_down(h, 0, h->elem[h->count], h->prio[h->count]);
     }
 
     return true;

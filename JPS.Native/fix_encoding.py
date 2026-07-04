@@ -10,9 +10,9 @@ def batch_add_utf8_bom(directory):
             if file.endswith(target_extensions):
                 filepath = os.path.join(root, file)
                 
-                # 1. 尝试读取文件（先试 UTF-8，报错说明可能是 GBK）
+                # 1. 尝试读取文件（先试 UTF-8-SIG；会吞掉已有 BOM，保证重复运行不叠 BOM）
                 try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
+                    with open(filepath, 'r', encoding='utf-8-sig') as f:
                         content = f.read()
                 except UnicodeDecodeError:
                     # 如果 UTF-8 读取失败，降级使用 GBK (代码页 936) 读取
