@@ -24,6 +24,9 @@ typedef struct jps_point_f
  */
 bool jps__line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1);
 
+/* unchecked 版本：调用方保证端点在界内；供 smoother 热循环使用，省掉重复边界检查。 */
+bool jps__line_of_sight_unchecked(const jps_grid_map *m, int x0, int y0, int x1, int y1);
+
 /*
  * 将平滑结果写入调用方提供的缓冲 out_points（容量 capacity_points）。
  * 返回如果无限容量时产生的点数（即平滑后的实际点数）；实际写入不超过 capacity_points。

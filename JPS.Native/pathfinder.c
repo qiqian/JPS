@@ -12,6 +12,8 @@
 #include "directions.h"
 #include "rules.h"
 
+_Static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
+
  /* 索引顺序与 C# JpsDirections.All 严格一致。 */
 static const int jps_dir_dx[JPS_DIR_COUNT] = { 1, -1, 0, 0, 1, -1, 1, -1 };
 static const int jps_dir_dy[JPS_DIR_COUNT] = { 0, 0, 1, -1, 1, 1, -1, -1 };
@@ -97,9 +99,9 @@ struct jps_pathfinder
     int *rebuild_nodes;            /* 路径重建用父链节点栈，跨查询复用，避免每次 malloc/free */
     int rebuild_nodes_capacity;
 
-    /* 平滑路径缓存：find_path 成功时同步算好并缓存，copy_smoothed_path 直接拷。 */
+    /* 平滑路径缓存：find_path 成功后复用 g_dir 内存窗口，copy_smoothed_path 直接拷。 */
     const jps_grid_map *smooth_map;   /* 寻路所用地图，供平滑 LOS 使用 */
-    jps_point_f *smoothed;            /* 平滑点缓存（连续格中心），跨查询复用 */
+    jps_point_f *smoothed;            /* g_dir 的别名，不拥有内存；搜索结束后才可覆盖 */
     int smoothed_count;
     int smoothed_capacity;
     bool smoothed_valid;              /* 本次寻路结果的平滑是否已算 */
@@ -179,7 +181,6 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
     free(pf->steps);
     free(pf->mark);
     free(pf->rebuild_nodes);
-    free(pf->smoothed);
     jps_min_heap_free(&pf->open);
     jps__result_free(&pf->result);
     free(pf);
@@ -207,8 +208,6 @@ uint64_t jps_pathfinder_memory_bytes(const jps_pathfinder *pf)
         bytes += (uint64_t)((size_t)pf->result.path_capacity * sizeof(jps_point));
     if (pf->rebuild_nodes != NULL)
         bytes += (uint64_t)((size_t)pf->rebuild_nodes_capacity * sizeof(int));
-    if (pf->smoothed != NULL)
-        bytes += (uint64_t)((size_t)pf->smoothed_capacity * sizeof(jps_point_f));
     return bytes;
 }
 
@@ -223,6 +222,10 @@ static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
     free(pf->g_dir);
     free(pf->steps);
     free(pf->mark);
+    pf->smoothed = NULL;
+    pf->smoothed_count = 0;
+    pf->smoothed_capacity = 0;
+    pf->smoothed_valid = false;
     pf->g_dir = (uint64_t *)malloc((size_t)pf->size * sizeof(uint64_t));
     pf->steps = (uint16_t *)malloc((size_t)pf->size * sizeof(uint16_t));
     /* mark 必须清零（calloc），使纪元标记方案（mark < 2·epoch 即未访问）对新缓冲成立；
@@ -457,23 +460,6 @@ static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
     pf->rebuild_nodes_capacity = n;
 }
 
-static int jps__expanded_path_count(const jps_point *path, int path_count)
-{
-    int total, i;
-
-    if (path_count <= 0)
-        return 0;
-
-    total = 1;
-    for (i = 1; i < path_count; i++)
-    {
-        int dx = abs(path[i].x - path[i - 1].x);
-        int dy = abs(path[i].y - path[i - 1].y);
-        total += dx > dy ? dx : dy;
-    }
-    return total;
-}
-
 static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id, jps_path_result *r)
 {
     /* 沿父链收集 compact path（goal → start），再反向写出 start → goal。
@@ -661,23 +647,14 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
 }
 
 /* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
- * 输入为 compact path；平滑会沿 compact 段隐式逐格推进，所以容量按隐式展开后的最大点数准备。 */
+ * 搜索已经结束，g_dir 不再需要保留 g/parent_dir，可作为 smoothed path 输出缓冲复用。 */
 static void jps__ensure_smoothed(jps_pathfinder *pf)
 {
-    int need;
-
     if (pf->smoothed_valid)
         return;
 
-    need = jps__expanded_path_count(pf->result.path, pf->result.path_count);
-    if (need > pf->smoothed_capacity)
-    {
-        int n = pf->smoothed_capacity < 16 ? 16 : pf->smoothed_capacity * 2;
-        while (n < need)
-            n *= 2;
-        pf->smoothed = (jps_point_f *)realloc(pf->smoothed, (size_t)n * sizeof(jps_point_f));
-        pf->smoothed_capacity = n;
-    }
+    pf->smoothed = (jps_point_f *)(void *)pf->g_dir;
+    pf->smoothed_capacity = pf->size;
     pf->smoothed_count = jps__smooth_path_into(pf->smooth_map, pf->result.path, pf->result.path_count,
                                                pf->smoothed, pf->smoothed_capacity);
     pf->smoothed_valid = true;
@@ -701,6 +678,8 @@ int jps_pathfinder_copy_smoothed_path(jps_pathfinder *pf, float *out_xy, int cap
     jps__ensure_smoothed(pf);   /* 平滑已在此算好并缓存——无二次计算、无需 system */
 
     n = pf->smoothed_count;
+    if (n > pf->smoothed_capacity)
+        n = pf->smoothed_capacity;
     if (n > capacity_points)
         n = capacity_points;
 

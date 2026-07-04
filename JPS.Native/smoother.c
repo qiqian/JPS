@@ -43,11 +43,16 @@ static bool jps__bit_range_walkable(const uint64_t *line, int a, int b)
 
 bool jps__line_of_sight(const jps_grid_map *m, int x0, int y0, int x1, int y1)
 {
-    int nx, ny, sign_x, sign_y, x, y, ix, iy;
-    long long decision, step_x, step_y, step_diag;
-
     if (!jps_grid_map_in_bounds(m, x0, y0) || !jps_grid_map_in_bounds(m, x1, y1))
         return false;
+
+    return jps__line_of_sight_unchecked(m, x0, y0, x1, y1);
+}
+
+bool jps__line_of_sight_unchecked(const jps_grid_map *m, int x0, int y0, int x1, int y1)
+{
+    int nx, ny, sign_x, sign_y, x, y, ix, iy;
+    long long decision, step_x, step_y, step_diag;
 
     nx = abs(x1 - x0);   /* 水平总步数 */
     ny = abs(y1 - y0);   /* 垂直总步数 */
@@ -171,7 +176,7 @@ int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path
                 break;
             }
 
-            if (jps__line_of_sight(m, anchor.x, anchor.y, to.x, to.y))
+            if (jps__line_of_sight_unchecked(m, anchor.x, anchor.y, to.x, to.y))
             {
                 previous = to;
                 break;
@@ -191,7 +196,7 @@ int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path
                     probe.x = from.x + step_x * mid;
                     probe.y = from.y + step_y * mid;
 
-                    if (jps__line_of_sight(m, anchor.x, anchor.y, probe.x, probe.y))
+                    if (jps__line_of_sight_unchecked(m, anchor.x, anchor.y, probe.x, probe.y))
                     {
                         best = mid;
                         lo = mid + 1;
