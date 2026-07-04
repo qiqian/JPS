@@ -74,12 +74,13 @@ namespace JPS.Pathfinding
             int y = y0;
             int ix = 0;   // 已走的水平步数
             int iy = 0;   // 已走的垂直步数
+            long decision = (long)ny - nx;
+            long stepX = 2L * ny;
+            long stepY = 2L * nx;
+            long stepDiag = 2L * (ny - nx);
 
             while (ix < nx || iy < ny)
             {
-                // decision = (2*ix+1)*ny - (2*iy+1)*nx，比较水平/垂直推进的相对进度
-                long decision = (1L + 2 * ix) * ny - (1L + 2 * iy) * nx;
-
                 if (decision == 0)
                 {
                     // 正好穿过格点：对角推进
@@ -87,6 +88,7 @@ namespace JPS.Pathfinding
                     y += signY;
                     ix++;
                     iy++;
+                    decision += stepDiag;
 #if !JPS_ALLOW_CORNER_CUTTING
                     // 默认禁止斜穿角：对角穿越的两个共角格不能是阻挡（与寻路移动规则一致）
                     if (!map.IsWalkable(x - signX, y) || !map.IsWalkable(x, y - signY))
@@ -97,11 +99,13 @@ namespace JPS.Pathfinding
                 {
                     x += signX;   // 水平推进
                     ix++;
+                    decision += stepX;
                 }
                 else
                 {
                     y += signY;   // 垂直推进
                     iy++;
+                    decision -= stepY;
                 }
 
                 if (!map.IsWalkable(x, y))
