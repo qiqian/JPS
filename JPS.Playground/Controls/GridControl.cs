@@ -533,6 +533,7 @@ public sealed class GridControl : ScrollableControl
             return;
 
         _system.Sync();
+        SnapshotCleanState();   // 本 tick 寻路前的 clean 快照，供跳点缓存可视化区分“本帧新算(橙)/之前已缓存(白)”
         var requests = new List<DynamicMonsterSnapshot>();
 
         for (int i = 0; i < _monsters.Length; i++)
@@ -1885,7 +1886,7 @@ public sealed class GridControl : ScrollableControl
         float off = cs * 0.34f;                       // 箭头方位（边中点）偏移
         float len = Math.Max(3f, cs * 0.20f);         // 箭头从中心到尖端的长度
         float half = Math.Max(2.2f, cs * 0.135f);     // 箭头底边半宽
-        bool snapOk = !_dynamicMode && _snapW == _map.Width && _snapH == _map.Height;
+        bool snapOk = _snapW == _map.Width && _snapH == _map.Height;
 
         using var cleanBrush = new SolidBrush(JumpCleanColor);
         using var freshBrush = new SolidBrush(JumpFreshColor);
