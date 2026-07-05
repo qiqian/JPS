@@ -10,3 +10,4 @@ ndk
 build-android*
 android-ndk-r*
 /JPS.Native/JPS.Native/x64
+JPS.Native/libJPS.Native.so
