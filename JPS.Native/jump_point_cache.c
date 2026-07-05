@@ -379,6 +379,27 @@ static void jps__backfill_dist_run(int16_t *dst, int s, int a, int b)
         dst[t] = (int16_t)(a + b * t);
 }
 
+/*
+ * 发布连续 gen run：对应 dist run 已全部普通写完。
+ * 一次 release fence 保证 dist 写先于后续 gen 写可见，然后用 memset 批量发布同一 line_gen。
+ * 这有意把逐字节 release-store 换成普通字节写；x86 TSO 天然保持 store-store 顺序，
+ * ARM/GCC/Clang 由 release fence 提供 store-store 屏障，避免长 run 被 release-store 循环拖住。
+ */
+static void jps__publish_gen_run(uint8_t *dst, int s, uint8_t line_gen)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+#elif defined(_MSC_VER)
+#  if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_ATOMICS__)
+    atomic_thread_fence(memory_order_release);
+#  else
+__pragma(warning(suppress : 4996))
+    _ReadWriteBarrier();
+#  endif
+#endif
+    memset(dst, line_gen, (size_t)s);
+}
+
 int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_map *m,
                                        int x, int y, int dx, int dy, int dir)
 {
@@ -386,7 +407,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
     int16_t *distp = c->dist + (size_t)dir * c->size;             /* 该方向的 dist 平面 */
     uint8_t *genp = c->gen + (size_t)dir * c->size;               /* 该方向的 gen 平面 */
     uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];   /* E/W → 行世代；S/N → 列世代 */
-    int s, t;
+    int s;
     bool jump_found;
 
     /* acquire 读世代戳：若看到 clean，则发布它的那次 release 写之前的 dist 写均已可见，普通读 dist 即安全。 */
@@ -400,8 +421,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
         jps__scan_line(m->col_blocked, m->col_stride, x, y, dy, &s, &jump_found);
 
     /* 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ INT16_MAX。
-     * 先写 dist（连续段可 SIMD），再逐格 release-store gen 发布——所有 dist 写在任何 gen 发布之前，
-     * 故读者见某格 gen==line_gen 时其 dist 必已可见，acquire/release 语义与旧逐格版一致。 */
+     * 先写 dist（连续段可 SIMD），再一次 release fence + memset 发布 gen run。 */
     if (dy == 0)
     {
         /* 水平：整段 run 在平面内连续。dist(k) 换算成按“升序地址位置 t”的等差 a + b*t：
@@ -420,8 +440,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
             b = jump_found ? 1 : -1;
         }
         jps__backfill_dist_run(distp + block_start, s, a, b);
-        for (t = 0; t < s; t++)
-            jps_gen_store_release(&genp[block_start + t], line_gen);
+        jps__publish_gen_run(genp + block_start, s, line_gen);
     }
     else
     {
@@ -441,8 +460,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
             b = jump_found ? 1 : -1;
         }
         jps__backfill_dist_run(distp + block_start, s, a, b);
-        for (t = 0; t < s; t++)
-            jps_gen_store_release(&genp[block_start + t], line_gen);
+        jps__publish_gen_run(genp + block_start, s, line_gen);
     }
 
     return jump_found ? s : -(s - 1);   /* idx0(k=0) 处的 dist；本线程刚写，直接返回 */
