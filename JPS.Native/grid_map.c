@@ -12,13 +12,13 @@
 #define JPS_MAX_DIM 32767
 #define JPS_SIMD_ALIGNMENT 16
 
-static int jps__logical_stride(int dim)
+static inline int jps__logical_stride(int dim)
 {
     return (dim + 63) >> 6;
 }
 
 /* 数据字数：向上取偶（两个 uint64 = 128 位对齐），不含哨兵字。 */
-static int jps__data_stride(int dim)
+static inline int jps__data_stride(int dim)
 {
     int words = jps__logical_stride(dim);
     return (words + 1) & ~1;

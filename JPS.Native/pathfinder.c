@@ -249,7 +249,7 @@ static void jps__next_epoch(jps_pathfinder *pf)
     pf->epoch = 1;
 }
 
-static int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }
+static inline int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }
 
 /* 堆载荷用打包坐标 (y<<16)|x（边长 ≤ 32767 → x,y 各占 16 位，值 < 2^31 落在 int 正区间）。
  * 出队后用移位取回 (x,y)，免去 current%w / current/w 对运行期除数的真除法（div ≈ 20–40 周期，
