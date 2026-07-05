@@ -274,36 +274,31 @@ void jps_grid_map_set_blocked_buffer(jps_grid_map *m, const uint8_t *cells, int 
             old_bits = row[word];
             if ((old_bits & mask) != bits)
             {
-                row[word] = (old_bits & ~mask) | bits;
+                uint64_t new_word = (old_bits & ~mask) | bits;
+                uint64_t delta = (old_bits & mask) ^ bits; /* bits that changed in this word */
+                row[word] = new_word;
                 changed = true;
+
+                /* update corresponding column words for changed bits */
+                for (bit = 0; bit < bit_count; bit++)
+                {
+                    if ((delta >> bit) & 1ULL)
+                    {
+                        int xidx = base + bit;
+                        uint64_t *col = m->col_blocked + (ptrdiff_t)xidx * m->col_stride;
+                        int cword = y >> 6;
+                        uint64_t cmask = 1ULL << (y & 63);
+                        if ((bits >> bit) & 1ULL)
+                            col[cword] |= cmask;
+                        else
+                            col[cword] &= ~cmask;
+                    }
+                }
             }
         }
     }
 
-    for (x = 0; x < m->width; x++)
-    {
-        uint64_t *col = m->col_blocked + (ptrdiff_t)x * m->col_stride;
-        for (word = 0; word < col_data_words; word++)
-        {
-            int base = word << 6;
-            int bit_count = m->height - base;
-            uint64_t bits = 0;
-            uint64_t mask;
-            uint64_t old_bits;
-            if (bit_count > 64)
-                bit_count = 64;
-            mask = bit_count == 64 ? ~0ULL : ((1ULL << bit_count) - 1);
-            for (bit = 0; bit < bit_count; bit++)
-                if (cells[(ptrdiff_t)(base + bit) * m->width + x] != 0)
-                    bits |= 1ULL << bit;
-            old_bits = col[word];
-            if ((old_bits & mask) != bits)
-            {
-                col[word] = (old_bits & ~mask) | bits;
-                changed = true;
-            }
-        }
-    }
+    /* column bits are updated inline while processing rows above */
 
     if (!changed)
         return;
