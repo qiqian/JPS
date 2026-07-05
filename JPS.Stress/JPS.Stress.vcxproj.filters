@@ -24,7 +24,7 @@
     <ClCompile Include="..\JPS.Native\smoother.c">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="..\JPS.Native\pathfinder.c">
+    <ClCompile Include="..\JPS.Native\pathfinder.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\JPS.Native\min_heap.c">

@@ -13,7 +13,7 @@
 #include "rules.h"
 #include "system.h"
 
-_Static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
+static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
 
  /* 索引顺序与 C# JpsDirections.All 严格一致。 */
 static const int jps_dir_dx[JPS_DIR_COUNT] = { 1, -1, 0, 0, 1, -1, 1, -1 };
@@ -59,8 +59,8 @@ typedef struct
  *   · 哨兵：无父存 0xF 于最高 4 位，(int64_t)g_dir>>60 算术右移读出即 -1，parent_dir<0 判据照旧；
  *   · g_dir 自然 8 对齐、8 节点/line，无跨线、无非对齐访问。
  */
-#define JPS__G_MASK      ((1ULL << 44) - 1)   /* g 的低 44 位 */
 #define JPS__STEPS_SHIFT 44
+#define JPS__G_MASK      ((1ULL << JPS__STEPS_SHIFT) - 1)   /* g 的低 44 位 */
 #define JPS__STEPS_MASK  0xFFFFULL             /* steps 的 16 位 */
 #define JPS__DIR_SHIFT   60
 
@@ -78,6 +78,17 @@ static inline uint64_t jps__pack_gdir(int64_t g, int steps, uint8_t dir)
          | (((uint64_t)steps & JPS__STEPS_MASK) << JPS__STEPS_SHIFT)
          | ((uint64_t)dir << JPS__DIR_SHIFT);
 }
+
+struct jps__dir{
+    int8_t dx : 2;
+    int8_t dy : 2;
+    uint8_t dir_dx : 3;
+    uint8_t dir_dy : 3;
+    uint8_t dir : 3;
+	uint8_t diagonal : 1;
+};
+typedef struct jps__dir jps__dir;   
+static_assert(sizeof(jps__dir) <= sizeof(uint16_t), "jps__dir too big");
 
 struct jps_pathfinder
 {

@@ -10,6 +10,10 @@
 #include <stdbool.h>
 #include "grid_map.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 连续格坐标点（格中心 = cx+0.5），仅用于显示，不参与整数寻路。 */
 typedef struct jps_point_f
 {
@@ -33,5 +37,9 @@ bool jps__line_of_sight_unchecked(const jps_grid_map *m, int x0, int y0, int x1,
  */
 int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
                           jps_point_f *out_points, int capacity_points);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* JPS_SMOOTHER_H */

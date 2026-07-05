@@ -24,13 +24,13 @@
     <ClCompile Include="min_heap.c">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="pathfinder.c">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="smoother.c">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="system.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="pathfinder.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

@@ -60,11 +60,10 @@ if ! command -v xcrun >/dev/null 2>&1; then
 fi
 
 # ---- 编译选项（与 CMakeLists.txt 公共选项一致）----
-CFLAGS=(-std=c11 -O3 -funroll-loops -fPIC -fvisibility=hidden -ffp-contract=off -fno-fast-math)
+# 不含 -std（按语言分别给）：.c 走 C11，pathfinder.cpp 走 C++17（+ -fno-exceptions -fno-rtti）。
+CFLAGS=(-O3 -funroll-loops -fPIC -fvisibility=hidden -ffp-contract=off -fno-fast-math)
 # shellcheck disable=SC2206
 [ -n "${EXTRA_CFLAGS:-}" ] && CFLAGS+=($EXTRA_CFLAGS)
-
-SRCS=(*.c)   # grid_map / jump_point_cache / min_heap / pathfinder / smoother / system
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_ROOT"
@@ -88,9 +87,13 @@ build_slice() {
   for arch in "${archs[@]}"; do
     objdir="$BUILD_ROOT/obj/$sdk-$arch"
     mkdir -p "$objdir"
-    for src in "${SRCS[@]}"; do
-      "$clang" -arch "$arch" -isysroot "$sdkpath" "$verflag" "${CFLAGS[@]}" \
-               -I. -c "$src" -o "$objdir/${src%.c}.o"
+    for src in *.c; do
+      "$clang" -arch "$arch" -isysroot "$sdkpath" "$verflag" -std=c11 "${CFLAGS[@]}" \
+               -I. -c "$src" -o "$objdir/$src.o"
+    done
+    for src in *.cpp; do
+      "$clang" -arch "$arch" -isysroot "$sdkpath" "$verflag" -std=c++17 -fno-exceptions -fno-rtti "${CFLAGS[@]}" \
+               -I. -c "$src" -o "$objdir/$src.o"
     done
     archlib="$BUILD_ROOT/obj/$sdk-$arch.a"
     xcrun libtool -static -o "$archlib" "$objdir"/*.o

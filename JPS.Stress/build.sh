@@ -34,9 +34,20 @@ esac
 
 mkdir -p bin
 
-echo "==> CC=$CC  编译 stress（JPS_STATIC，含 $NATIVE/*.c）"
-"$CC" -std=c11 -O2 "${ARCH_FLAGS[@]}" -DJPS_STATIC \
-      -I"$NATIVE" stress.c "$NATIVE"/*.c -o bin/stress
+# stress.c 与 JPS.Native 的 .c 走 C11；pathfinder.cpp 走 C++17（+ -fno-exceptions -fno-rtti，无 libstdc++ 依赖）。
+echo "==> CC=$CC  编译 stress（JPS_STATIC，含 $NATIVE 的 .c 与 .cpp）"
+COMMON=(-O2 "${ARCH_FLAGS[@]}" -DJPS_STATIC -I"$NATIVE")
+OBJDIR="$(mktemp -d)"; trap 'rm -rf "$OBJDIR"' EXIT
+OBJS=()
+for src in stress.c "$NATIVE"/*.c; do
+  o="$OBJDIR/$(basename "$src").o"
+  "$CC" -std=c11 "${COMMON[@]}" -c "$src" -o "$o"; OBJS+=("$o")
+done
+for src in "$NATIVE"/*.cpp; do
+  o="$OBJDIR/$(basename "$src").o"
+  "$CC" -std=c++17 -fno-exceptions -fno-rtti "${COMMON[@]}" -c "$src" -o "$o"; OBJS+=("$o")
+done
+"$CC" "${COMMON[@]}" "${OBJS[@]}" -o bin/stress
 
 echo "    -> ./bin/stress"
 echo ""

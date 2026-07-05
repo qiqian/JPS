@@ -4,9 +4,10 @@ cmake_minimum_required(VERSION 3.22)   # aligned with the latest LTS NDK (r27)
 # (those ship cmake_minimum_required with older versions like 3.6 and trigger
 # warnings such as "Compatibility with CMake < 3.10 will be removed...").
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1)
-project(jps_native C)
+project(jps_native C CXX)   # pathfinder 是 .cpp（C++），其余仍是 .c
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 if(NOT ANDROID)
   message(WARNING "This CMakeLists is intended for Android NDK builds (ANDROID variable not set).")
@@ -14,9 +15,13 @@ endif()
 
 file(GLOB JPS_NATIVE_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/*.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
 add_library(JPS.Native SHARED ${JPS_NATIVE_SOURCES})
+
+# pathfinder.cpp 是 C 风格代码，不用异常/RTTI；关掉可去掉 C++ 运行时依赖、缩小 .so（只作用于 C++ 源）。
+target_compile_options(JPS.Native PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
 set_target_properties(JPS.Native PROPERTIES OUTPUT_NAME "JPS.Native")
 target_include_directories(JPS.Native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

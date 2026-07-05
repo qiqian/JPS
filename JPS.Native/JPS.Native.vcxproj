@@ -87,7 +87,7 @@
     <ClCompile Include="grid_map.c" />
     <ClCompile Include="jump_point_cache.c" />
     <ClCompile Include="min_heap.c" />
-    <ClCompile Include="pathfinder.c" />
+    <ClCompile Include="pathfinder.cpp" />
     <ClCompile Include="smoother.c" />
     <ClCompile Include="system.c" />
   </ItemGroup>
