@@ -36,7 +36,6 @@ _The project splits into three tiers with explicit roles: **A\*** is the accurac
 
 > 每条左侧为中文锚点，右侧 `·` 后为英文锚点。 _Left link → Chinese section, right link (after `·`) → English section._
 
-- [功能一览](#功能一览) · [Features](#features)
 - [一、JPS 算法核心原理](#一jps-算法核心原理) · [Core Principles of JPS](#i-core-principles-of-jps)
   - [1. 网格与移动规则](#1-网格与移动规则) · [Grid and Movement Rules](#1-grid-and-movement-rules)
   - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居) · [Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors)
@@ -59,18 +58,6 @@ _The project splits into three tiers with explicit roles: **A\*** is the accurac
   - [4. 运行 Playground](#4-运行-playground) · [Run Playground](#4-run-playground)
   - [5. 构建 Android 原生库](#5-构建-android-原生库ndk) · [Build the Android Native Library](#5-build-the-android-native-library-ndk)
   - [6. 在 Linux 上构建与测试](#6-在-linux-上构建与测试) · [Build and Test on Linux](#6-build-and-test-on-linux)
-
----
-
-## 功能一览
-
-| 类别 | 内容 |
-|---|---|
-| 编辑 | 阻挡画刷（点空地刷 2×2、点阻挡清 1 格）、设起点/终点、清空 |
-| 寻路 | **JPS**、**A\***（对照），整数代价（横 1000 / 斜 1414，八方向 octile 启发） |
-| 平滑 | 前向增量视线拉直（string pulling），红色折线叠加显示 |
-| 存档 | 地图（阻挡 + 起终点）导出/载入 JSON |
-| 可视化 | 已扩展 / 已入队未扩展 / 扫描跳过 / 路径 / 平滑路径；**每格 4 方向跳点缓存的 dirty/clean 状态点** |
 
 ---
 
@@ -750,16 +737,6 @@ dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000
 # English Translation
 
 > Full English translation of the body above. Use the right-hand links in the [table of contents](#目录--table-of-contents) to jump here. ([↑ back to top](#jps-pathfinding--playground-visualization))
-
-## Features
-
-| Category | Details |
-|---|---|
-| Editing | Obstacle brush (click empty → paint 2×2; click obstacle → erase 1 cell), set start/goal, clear |
-| Pathfinding | **JPS**, **A\*** (baseline); integer cost (1000 cardinal / 1414 diagonal, 8-direction octile heuristic) |
-| Smoothing | Forward-incremental line-of-sight string pulling, drawn as a red polyline overlay |
-| Save/Load | Export/import the map (obstacles + start/goal) as JSON |
-| Visualization | Expanded / frontier / scanned-skipped / path / smoothed path; **per-cell dirty/clean dots for the 4-direction jump cache** |
 
 ## I. Core Principles of JPS
 
