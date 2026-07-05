@@ -248,6 +248,12 @@ static void jps__next_epoch(jps_pathfinder *pf)
 
 static int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }
 
+/* 堆载荷用打包坐标 (y<<16)|x（边长 ≤ 32767 → x,y 各占 16 位，值 < 2^31 落在 int 正区间）。
+ * 出队后用移位取回 (x,y)，免去 current%w / current/w 对运行期除数的真除法（div ≈ 20–40 周期，
+ * 乘法还原 id 仅 ~3 周期）。堆只按 prio 排序、不比较载荷，故出队顺序与旧 id 编码逐位一致——
+ * 不改变展开顺序，C≡C# 强一致不受影响。 */
+static inline int jps__pack_xy(int x, int y) { return (y << 16) | x; }
+
 /* ---------------- 正交跳跃 ---------------- */
 
 static jps__jump_entry jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
@@ -464,13 +470,15 @@ static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
     pf->rebuild_nodes_capacity = n;
 }
 
-static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id, jps_path_result *r)
+static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, int gy, jps_path_result *r)
 {
     /* 沿父链收集 compact path（goal → start），再反向写出 start → goal。
-     * 对外只暴露 compact path：起点、跳点/拐点、终点；不展开跳跃段中间格。 */
+     * 对外只暴露 compact path：起点、跳点/拐点、终点；不展开跳跃段中间格。
+     * 直接沿 (x,y) 坐标回溯（父 = 当前 − dir×steps），nodes 存打包坐标——
+     * 全程无除法：查 g_dir 用一次乘法定位，写出用移位解包。 */
     int *nodes = pf->rebuild_nodes;
     int nodes_count = 0;
-    int current = goal_id;
+    int cx = gx, cy = gy;
     int i, write;
 
     /* 收集 */
@@ -481,19 +489,19 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
             jps__ensure_rebuild_nodes(pf, nodes_count + 1);
             nodes = pf->rebuild_nodes;
         }
-        nodes[nodes_count++] = current;
+        nodes[nodes_count++] = jps__pack_xy(cx, cy);
 
-        if (current == start_id)
+        if (cx == sx && cy == sy)
             break;
 
         {
-            uint64_t gd = pf->g_dir[current];             /* 一次 load 同取来向与步数 */
+            uint64_t gd = pf->g_dir[cy * pf->w + cx];     /* 一次乘法定位，同 load 取来向与步数 */
             int pdir = jps__gd_dir(gd);                   /* 非起点必有父，不会是 -1 */
             int dx = jps_dir_dx[pdir];
             int dy = jps_dir_dy[pdir];
             int steps = jps__gd_steps(gd);
-            int cx = current % pf->w, cy = current / pf->w;
-            current = (cy - dy * steps) * pf->w + (cx - dx * steps);
+            cx -= dx * steps;
+            cy -= dy * steps;
         }
     }
 
@@ -503,9 +511,9 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int start_id, int goal_id,
     write = 0;
     for (i = nodes_count - 1; i >= 0; i--)
     {
-        int id = nodes[i];
-        r->path[write].x = id % pf->w;
-        r->path[write].y = id / pf->w;
+        int packed = nodes[i];
+        r->path[write].x = packed & 0xFFFF;
+        r->path[write].y = packed >> 16;
         write++;
     }
     r->path_count = write;
@@ -519,9 +527,9 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
     jps_grid_map *map;
     jps_path_result *out;
     int open_mark, closed_mark;
-    int start_id, goal_id;
+    int start_id, goal_packed;
     int expanded_count = 0;
-    int current;
+    int current;   /* 出队的打包坐标 (y<<16)|x */
     int64_t prio;
 
     if (pf == NULL || system == NULL)
@@ -544,33 +552,35 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
     closed_mark = open_mark + 1;    /* 本纪元“已展开/closed”标记 */
 
     start_id = jps__id(pf, sx, sy);
-    goal_id = jps__id(pf, gx, gy);
+    goal_packed = jps__pack_xy(gx, gy);
 
     jps_min_heap_clear(&pf->open);
     pf->g_dir[start_id] = jps__pack_gdir(0, 0, JPS__NO_DIR);   /* g=0、steps=0，起点无来向 */
     pf->mark[start_id] = (uint16_t)open_mark;
-    jps_min_heap_enqueue(&pf->open, start_id, jps_octile_heuristic(sx, sy, gx, gy));
+    jps_min_heap_enqueue(&pf->open, jps__pack_xy(sx, sy), jps_octile_heuristic(sx, sy, gx, gy));
 
     while (jps_min_heap_try_dequeue(&pf->open, &current, &prio))
     {
         uint64_t cur_gd;
         int64_t cur_g;
-        int cx, cy, dir_count, i;
+        int cx, cy, id, dir_count, i;
 
-        if (pf->mark[current] == closed_mark)
+        /* 出队为打包坐标：移位取 (x,y)，一次乘法还原线性索引（免 current%w / current/w 真除法）。 */
+        cx = current & 0xFFFF;
+        cy = current >> 16;
+        id = cy * pf->w + cx;
+
+        if (pf->mark[id] == closed_mark)
             continue;
 
-        pf->mark[current] = (uint16_t)closed_mark;
-        cur_gd = pf->g_dir[current];   /* 一次 load 同取 g 与来向；已 closed，g 不再变 */
+        pf->mark[id] = (uint16_t)closed_mark;
+        cur_gd = pf->g_dir[id];   /* 一次 load 同取 g 与来向；已 closed，g 不再变 */
         cur_g = jps__gd_g(cur_gd);
         expanded_count++;
 
-        cx = current % pf->w;
-        cy = current / pf->w;
-
-        if (current == goal_id)
+        if (current == goal_packed)
         {
-            jps__reconstruct_path(pf, start_id, goal_id, out);
+            jps__reconstruct_path(pf, sx, sy, gx, gy, out);
             out->success = true;
             out->expanded_nodes = expanded_count;
             pf->smooth_map = map;         /* 记住地图，供平滑 LOS 使用 */
@@ -614,7 +624,7 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             pf->g_dir[nb_id] = jps__pack_gdir(tentative, jump.steps, (uint8_t)idx);
             pf->mark[nb_id] = (uint16_t)open_mark;
 
-            jps_min_heap_enqueue(&pf->open, nb_id,
+            jps_min_heap_enqueue(&pf->open, jps__pack_xy(jump.x, jump.y),
                                  tentative + jps_octile_heuristic(jump.x, jump.y, gx, gy));
         }
     }
