@@ -23,14 +23,14 @@
 #if defined(_MSC_VER)
 #  include <intrin.h>
 
-static int jps__lowest_set(uint64_t x)
+static inline int jps__lowest_set(uint64_t x)
 {
     unsigned long idx;
     _BitScanForward64(&idx, x); /* 返回最低置位索引 */
     return (int)idx;
 }
 
-static int jps__highest_set(uint64_t x)
+static inline int jps__highest_set(uint64_t x)
 {
     unsigned long idx;
     _BitScanReverse64(&idx, x); /* 返回最高置位索引 */
@@ -39,12 +39,12 @@ static int jps__highest_set(uint64_t x)
 
 #else /* GCC / Clang */
 
-static int jps__lowest_set(uint64_t x)
+static inline int jps__lowest_set(uint64_t x)
 {
     return (int)__builtin_ctzll(x); /* count trailing zeros */
 }
 
-static int jps__highest_set(uint64_t x)
+static inline int jps__highest_set(uint64_t x)
 {
     return 63 - (int)__builtin_clzll(x); /* 63 - count leading zeros */
 }
@@ -385,7 +385,7 @@ static void jps__backfill_dist_run(int16_t *dst, int s, int a, int b)
  * 这有意把逐字节 release-store 换成普通字节写；x86 TSO 天然保持 store-store 顺序，
  * ARM/GCC/Clang 由 release fence 提供 store-store 屏障，避免长 run 被 release-store 循环拖住。
  */
-static void jps__publish_gen_run(uint8_t *dst, int s, uint8_t line_gen)
+static inline void jps__publish_gen_run(uint8_t *dst, int s, uint8_t line_gen)
 {
 #if defined(__GNUC__) || defined(__clang__)
     __atomic_thread_fence(__ATOMIC_RELEASE);
