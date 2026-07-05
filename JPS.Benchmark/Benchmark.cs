@@ -24,7 +24,7 @@ namespace JPS.Benchmark
         //   Windows -> SetThreadAffinityMask, Linux -> sched_setaffinity, macOS/other -> no portable per-core pinning.
         // DllImports bind lazily on first call, so the library for an OS we don't run on is never loaded; the
         // OperatingSystem.IsXxx() guards ensure each native call only happens on its own platform. A 64-bit mask
-        // covers CPUs 0..63, which is enough for the fixed cpuList used here.
+        // covers CPUs 0..63; CPU indices beyond that (or nonexistent cores) simply get no pinning.
 #pragma warning disable SYSLIB1054
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetCurrentThread();
@@ -52,28 +52,100 @@ namespace JPS.Benchmark
             return false;   // macOS / other: no portable per-core pinning
         }
 
+        // Usage: combo [q] [subdir] [--cpus LIST]
+        //   q         rand pairs per map (first bare integer; default 30)
+        //   subdir    movingai/ subdirectory to limit the run (first bare non-integer)
+        //   --cpus/-c explicit logical CPUs to run on; the count decides the number of worker threads,
+        //             and each worker is pinned (affinity) to its CPU. Accepts indices and ranges,
+        //             e.g. --cpus 0,2,4,6  or  --cpus 3-9  or  --cpus 0-3,8,10-12.
+        //             When omitted, defaults to half the logical CPUs (every other one).
         static int Main(string[] args)
         {
-            var a = args;
-            if (a.Length > 0 && string.Equals(a[0], "combo", StringComparison.OrdinalIgnoreCase))
-                a = a[1..];
+            var rest = new List<string>(args);
+            if (rest.Count > 0 && string.Equals(rest[0], "combo", StringComparison.OrdinalIgnoreCase))
+                rest.RemoveAt(0);
 
-            int q = a.Length >= 1 && int.TryParse(a[0], out int v) ? v : 30;
-            string? sub = null;
-            int workers = Math.Max(1, Environment.ProcessorCount / 2 - 2);
-
-            if (a.Length >= 2)
+            // Extract the --cpus / -c option (supports "--cpus 0,2,4", "--cpus=0,2,4", "-c 0-7").
+            List<int>? cpus = null;
+            for (int i = 0; i < rest.Count; i++)
             {
-                if (int.TryParse(a[1], out int t) && t > 0)
-                    workers = t;
-                else
-                    sub = a[1];
+                string tok = rest[i];
+                string? val = null;
+                if (tok.StartsWith("--cpus=", StringComparison.OrdinalIgnoreCase)) val = tok["--cpus=".Length..];
+                else if (tok.StartsWith("-c=", StringComparison.OrdinalIgnoreCase)) val = tok["-c=".Length..];
+                else if (string.Equals(tok, "--cpus", StringComparison.OrdinalIgnoreCase) || string.Equals(tok, "-c", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 < rest.Count) { val = rest[i + 1]; rest.RemoveAt(i + 1); }
+                }
+                if (val == null)
+                    continue;
+                cpus = ParseCpuList(val);
+                if (cpus == null)
+                {
+                    Console.WriteLine($"Invalid --cpus value: '{val}'. Use e.g. --cpus 0,2,4,6 or --cpus 3-9.");
+                    return 2;
+                }
+                rest.RemoveAt(i);
+                i--;
             }
-            if (a.Length >= 3 && int.TryParse(a[2], out int t3) && t3 > 0)
-                workers = t3;
 
-            ComboBench(q, sub, workers);
+            // Remaining positionals: first integer = q; first non-integer = movingai/ subdir.
+            int q = 30;
+            bool qSet = false;
+            string? sub = null;
+            foreach (var tok in rest)
+            {
+                if (!qSet && int.TryParse(tok, out int v)) { q = v; qSet = true; }
+                else sub ??= tok;
+            }
+
+            cpus ??= DefaultCpuList();   // 未指定 → 默认用一半逻辑 CPU（每隔一个取，共 N/2 个）
+
+            int nproc = Environment.ProcessorCount;
+            if (cpus.Exists(c => c >= nproc))
+                Console.WriteLine($"Warning: some --cpus entries are >= logical CPU count ({nproc}); affinity for those is a no-op.");
+
+            ComboBench(q, sub, cpus);
             return 0;
+        }
+
+        // Default worker CPUs: every other logical CPU (0,2,4,...), i.e. half of them — spreads across
+        // physical cores on typical SMT-2 topology. Override explicitly with --cpus.
+        private static List<int> DefaultCpuList()
+        {
+            int n = Math.Max(1, Environment.ProcessorCount);
+            int half = Math.Max(1, n / 2);
+            var list = new List<int>(half);
+            for (int i = 0; i < half; i++)
+                list.Add(i * 2);
+            return list;
+        }
+
+        // Parse a CPU spec like "0,2,4,6" or "3-9" or "0-3,8,10-12" into an ordered, de-duplicated list.
+        // Returns null on any malformed token or if the result is empty.
+        private static List<int>? ParseCpuList(string spec)
+        {
+            var list = new List<int>();
+            var seen = new HashSet<int>();
+            foreach (var tok in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                int dash = tok.IndexOf('-');
+                if (dash > 0)
+                {
+                    if (!int.TryParse(tok[..dash], out int lo) || !int.TryParse(tok[(dash + 1)..], out int hi))
+                        return null;
+                    if (lo > hi) (lo, hi) = (hi, lo);
+                    for (int c = lo; c <= hi; c++)
+                        if (c >= 0 && seen.Add(c)) list.Add(c);
+                }
+                else
+                {
+                    if (!int.TryParse(tok, out int c) || c < 0)
+                        return null;
+                    if (seen.Add(c)) list.Add(c);
+                }
+            }
+            return list.Count > 0 ? list : null;
         }
 
         private static string BuildConfig() =>
@@ -381,7 +453,7 @@ namespace JPS.Benchmark
             }
         }
 
-        private static void ComboBench(int q, string? sub, int workers)
+        private static void ComboBench(int q, string? sub, List<int> cpus)
         {
             string root = FindDir("movingai");
             string dir = string.IsNullOrEmpty(sub) ? root : Path.Combine(root, sub);
@@ -398,7 +470,8 @@ namespace JPS.Benchmark
                 return;
             }
 
-            workers = Math.Max(1, Math.Min(workers, groups.Count));
+            // One worker per requested CPU, capped at the number of maps (no point spinning idle workers).
+            int workers = Math.Max(1, Math.Min(cpus.Count, groups.Count));
             string repoRoot = Directory.GetParent(root)?.FullName ?? root;
             string reportsDir = Path.Combine(repoRoot, "benchmark-results");
             Directory.CreateDirectory(reportsDir);
@@ -434,7 +507,7 @@ namespace JPS.Benchmark
             Console.WriteLine($"Build config: {BuildConfig()}");
             Console.WriteLine($"Native: {(nativeEnabled ? $"enabled ({nativeInfo})" : $"disabled ({nativeInfo})")}");
             Console.WriteLine($"Scope: {scope}; {scenFileCount} .scen / {groups.Count} maps; rand target {q}/map; scen dedup {dedup} from {totalEntries}");
-            Console.WriteLine($"Parallelism: {workers} map workers (default is half of logical cores)");
+            Console.WriteLine($"Parallelism: {workers} map workers pinned to CPUs [{string.Join(",", cpus.Take(workers))}] (default: half of logical CPUs, every other)");
             Console.WriteLine("Timing mode: parallel throughput by map group. Rows are emitted in map dispatch order as results arrive.");
             Console.WriteLine("cold = before each query flip a few cells in a small window then restore + Sync (invalidates the jump-point cache); hot = warm cache reuse.");
             Console.WriteLine();
@@ -518,7 +591,6 @@ namespace JPS.Benchmark
             }
 
             Task[] workerTasks = new Task[workers];
-            int[] cpuList = new int[] { 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
             var workerReady = new TaskCompletionSource<bool>[workers];
             for (int i = 0; i < workers; i++) workerReady[i] = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             for (int wi = 0; wi < workerTasks.Length; wi++)
@@ -527,11 +599,10 @@ namespace JPS.Benchmark
                 workerTasks[wi] = Task.Run(() =>
                 {
 
-                    // Pin this worker thread to a CPU from cpuList (worker index modulo list length).
+                    // Pin this worker thread to its assigned CPU (workers == number of requested CPUs, 1:1).
                     try
                     {
-                        int desiredCpu = cpuList[localWorkerIndex % cpuList.Length];
-                        TrySetCurrentThreadAffinity(desiredCpu);
+                        TrySetCurrentThreadAffinity(cpus[localWorkerIndex]);
                     }
                     catch { }
 
