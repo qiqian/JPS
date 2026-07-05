@@ -15,10 +15,6 @@
 
 static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
 
- /* 索引顺序与 C# JpsDirections.All 严格一致。 */
-static const int jps_dir_dx[JPS_DIR_COUNT] = { 1, -1, 0, 0, 1, -1, 1, -1 };
-static const int jps_dir_dy[JPS_DIR_COUNT] = { 0, 0, 1, -1, 1, 1, -1, -1 };
-
 /*
  * 一次“跳跃”跳到的目标格。跳跃函数返回 bool（是否跳到跳点/终点），
  * 命中时把 (x,y,steps) 写入调用方传入的这个结构；撞墙/无跳点返回 false，不写。
@@ -50,45 +46,91 @@ typedef struct
  * mark 是被高频单独访问的（堆过期检查/邻居 closed 检查只碰它），保持独立密集数组：
  * uint16 一条 cache line 装 32 个节点的 mark；与冷字段合并会把最热数组稀释 3–4 倍（实测回退）。
  *
- * g、steps、parent_dir 打包进同一个 uint64（g_dir），取代原先独立的 steps 数组：
+ * g、steps、parent dx/dy 打包进同一个 uint64（g_dir），取代原先独立的 steps 数组：
  *   位 [0,44)  = g 值：迷宫最优路径可途经 ~W×H 格，g 上限 ~1.5e12 < 2^41 ≪ 2^44，44 位足够；
  *   位 [44,60) = steps 到达该节点的跳跃步数（≤ max(W,H) ≤ 32767 < 2^16），父节点 = 当前 − dir×steps；
- *   位 [60,64) = parent_dir 到达方向（0..7）。
- *   · 展开读 g+dir、relax 写 g+steps+dir 本来就要摸这条 line，steps 塞进同字等于免费搭车——
+ *   位 [60,62) = parent dx 到达方向编码（dx+1，取值 0..2；3 为无父哨兵）。
+ *   位 [62,64) = parent dy 到达方向编码（dy+1，取值 0..2；3 为无父哨兵）。
+ *   · 展开读 g+方向、relax 写 g+steps+方向本来就要摸这条 line，steps 塞进同字等于免费搭车——
  *     独立 steps 数组整个消失，relax 少一次 store，逐节点搜索态 12→10 B/格；
- *   · 哨兵：无父存 0xF 于最高 4 位，(int64_t)g_dir>>60 算术右移读出即 -1，parent_dir<0 判据照旧；
+ *   · 哨兵：无父存 dx_code=dy_code=3；实际方向只用 0..2（dx/dy = code-1）；
  *   · g_dir 自然 8 对齐、8 节点/line，无跨线、无非对齐访问。
  */
 #define JPS__STEPS_SHIFT 44
 #define JPS__G_MASK      ((1ULL << JPS__STEPS_SHIFT) - 1)   /* g 的低 44 位 */
 #define JPS__STEPS_MASK  0xFFFFULL             /* steps 的 16 位 */
-#define JPS__DIR_SHIFT   60
+#define JPS__DX_SHIFT    60
+#define JPS__DY_SHIFT    62
 
-#define JPS__NO_DIR ((uint8_t)0xFu)   /* parent_dir 哨兵：无父（放最高 4 位，算术右移读出 -1） */
+#define JPS__NO_DCODE ((uint8_t)3u)   /* parent dx/dy 哨兵：无父（dx_code=dy_code=3） */
 
 static inline int64_t jps__gd_g(uint64_t gd) { return (int64_t)(gd & JPS__G_MASK); }
 
 static inline int jps__gd_steps(uint64_t gd) { return (int)((gd >> JPS__STEPS_SHIFT) & JPS__STEPS_MASK); }
 
-static inline int8_t jps__gd_dir(uint64_t gd) { return (int8_t)((int64_t)gd >> JPS__DIR_SHIFT); }
+static inline uint8_t jps__dir_code(int d) { return (uint8_t)(d + 1); }
 
-static inline uint64_t jps__pack_gdir(int64_t g, int steps, uint8_t dir)
+static inline int jps__dir_decode(uint64_t code) { return (int)code - 1; }
+
+static inline bool jps__gd_has_parent(uint64_t gd)
+{
+    return (((gd >> JPS__DX_SHIFT) & 3ULL) != JPS__NO_DCODE) &&
+           (((gd >> JPS__DY_SHIFT)) != JPS__NO_DCODE);
+}
+
+static inline int jps__gd_dx(uint64_t gd) { return jps__dir_decode((gd >> JPS__DX_SHIFT) & 3ULL); }
+
+static inline int jps__gd_dy(uint64_t gd) { return jps__dir_decode(gd >> JPS__DY_SHIFT); }
+
+static inline uint64_t jps__pack_gdir(int64_t g, int steps, int dx, int dy)
 {
     return ((uint64_t)g & JPS__G_MASK)
          | (((uint64_t)steps & JPS__STEPS_MASK) << JPS__STEPS_SHIFT)
-         | ((uint64_t)dir << JPS__DIR_SHIFT);
+         | ((uint64_t)jps__dir_code(dx) << JPS__DX_SHIFT)
+         | ((uint64_t)jps__dir_code(dy) << JPS__DY_SHIFT);
+}
+
+static inline uint64_t jps__pack_gdir_root(int64_t g, int steps)
+{
+    return ((uint64_t)g & JPS__G_MASK)
+         | (((uint64_t)steps & JPS__STEPS_MASK) << JPS__STEPS_SHIFT)
+         | ((uint64_t)JPS__NO_DCODE << JPS__DX_SHIFT)
+         | ((uint64_t)JPS__NO_DCODE << JPS__DY_SHIFT);
 }
 
 struct jps__dir{
     int8_t dx : 2;
     int8_t dy : 2;
-    uint8_t dir_dx : 3;
-    uint8_t dir_dy : 3;
+    uint8_t hdir : 3;
+    uint8_t vdir : 3;
     uint8_t dir : 3;
 	uint8_t diagonal : 1;
 };
 typedef struct jps__dir jps__dir;   
 static_assert(sizeof(jps__dir) <= sizeof(uint16_t), "jps__dir too big");
+
+/* 索引顺序与 C# JpsDirections.All 严格一致：E,W,S,N,SE,SW,NE,NW。 */
+static constexpr jps__dir jps__dirs[JPS_DIR_COUNT] = {
+    {  1,  0, 0, 7, 0, 0 },
+    { -1,  0, 1, 7, 1, 0 },
+    {  0,  1, 7, 2, 2, 0 },
+    {  0, -1, 7, 3, 3, 0 },
+    {  1,  1, 0, 2, 4, 1 },
+    { -1,  1, 1, 2, 5, 1 },
+    {  1, -1, 0, 3, 6, 1 },
+    { -1, -1, 1, 3, 7, 1 }
+};
+
+static constexpr uint8_t jps__dir_by_delta[3][3] = {
+    { 7, 1, 5 },
+    { 3, 0xFFu, 2 },
+    { 6, 0, 4 }
+};
+
+static inline constexpr jps__dir jps__dir_of(int dx, int dy)
+{
+    return jps__dirs[jps__dir_by_delta[dx + 1][dy + 1]];
+}
 
 struct jps_pathfinder
 {
@@ -109,7 +151,7 @@ struct jps_pathfinder
     uint16_t *mark;      /* 访问状态（独立密集数组，32 节点/cache line） */
     int epoch;           /* 查询纪元，1..32767 循环（见上） */
     jps_min_heap open;
-    int dir_buf[JPS_DIR_COUNT];
+    jps__dir dir_buf[JPS_DIR_COUNT];
 
     jps_jump_point_cache *cache;   /* 当前查询绑定的共享跳点缓存 */
     jps_path_result result;        /* 最近一次寻路结果（供 copy/count 访问器读取） */
@@ -307,12 +349,10 @@ static bool jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 /* ---------------- 对角：经典逐格扫描，复用正交 memo ---------------- */
 
 static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
-                               int x, int y, int dx, int dy, int gx, int gy,
+                               int x, int y, int dx, int dy, int horizontal_dir, int vertical_dir, int gx, int gy,
                                jps__jump_entry *out)
 {
     int cx = x, cy = y, steps = 0;
-    int horizontal_dir = jps_dir_index_of(dx, 0);
-    int vertical_dir = jps_dir_index_of(0, dy);
 
     /* 对角每步要探两条正交线的 memo，热路（缓存 clean）命中率极高。把两方向的
      * dist/gen 平面基址与行/列世代数组在循环外解出，循环内先内联快探（一次 acquire
@@ -369,58 +409,56 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 
 /* ---------------- 方向剪枝（写入 dir_buf，返回数量） ---------------- */
 
-static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x, int y, int8_t parent_dir)
+static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x, int y,
+                                bool has_parent, int pdx, int pdy)
 {
     int n = 0;
-    int pdx, pdy;
 
-    /* 起点没有父（parent_dir<0）：探索全部 8 个方向。 */
-    if (parent_dir < 0)
+    /* 起点没有父：探索全部 8 个方向。 */
+    if (!has_parent)
     {
         int i;
         for (i = 0; i < JPS_DIR_COUNT; i++)
         {
-            int dx = jps_dir_dx[i];
-            int dy = jps_dir_dy[i];
-            bool allowed = jps_is_diagonal_index(i)
+            jps__dir d = jps__dirs[i];
+            int dx = d.dx;
+            int dy = d.dy;
+            bool allowed = d.diagonal
                 ? jps_diagonal_allowed(m, x, y, dx, dy)
                 : jps_grid_map_is_walkable_g(m, x + dx, y + dy);   /* (x,y) 界内、±1 邻查 → 哨兵版免检 */
             if (allowed)
-                pf->dir_buf[n++] = i;
+                pf->dir_buf[n++] = d;
         }
         return n;
     }
-
-    pdx = jps_dir_dx[parent_dir];
-    pdy = jps_dir_dy[parent_dir];
 
 #ifdef JPS_ALLOW_CORNER_CUTTING
     /* ============ 允许斜穿角 ============ */
     if (jps_is_diagonal(pdx, pdy))
     {
-        pf->dir_buf[n++] = parent_dir;
-        pf->dir_buf[n++] = jps_dir_index_of(pdx, 0);
-        pf->dir_buf[n++] = jps_dir_index_of(0, pdy);
+        pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
+        pf->dir_buf[n++] = jps__dir_of(pdx, 0);
+        pf->dir_buf[n++] = jps__dir_of(0, pdy);
 
         if (!jps_grid_map_is_walkable_g(m, x - pdx, y))
-            pf->dir_buf[n++] = jps_dir_index_of(-pdx, pdy);
+            pf->dir_buf[n++] = jps__dir_of(-pdx, pdy);
         if (!jps_grid_map_is_walkable_g(m, x, y - pdy))
-            pf->dir_buf[n++] = jps_dir_index_of(pdx, -pdy);
+            pf->dir_buf[n++] = jps__dir_of(pdx, -pdy);
 
         return n;
     }
 
-    pf->dir_buf[n++] = parent_dir;
+    pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
 
     if (pdx != 0)
     {
-        if (!jps_grid_map_is_walkable_g(m, x, y + 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, 1);
-        if (!jps_grid_map_is_walkable_g(m, x, y - 1)) pf->dir_buf[n++] = jps_dir_index_of(pdx, -1);
+        if (!jps_grid_map_is_walkable_g(m, x, y + 1)) pf->dir_buf[n++] = jps__dir_of(pdx, 1);
+        if (!jps_grid_map_is_walkable_g(m, x, y - 1)) pf->dir_buf[n++] = jps__dir_of(pdx, -1);
     }
     else
     {
-        if (!jps_grid_map_is_walkable_g(m, x + 1, y)) pf->dir_buf[n++] = jps_dir_index_of(1, pdy);
-        if (!jps_grid_map_is_walkable_g(m, x - 1, y)) pf->dir_buf[n++] = jps_dir_index_of(-1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x + 1, y)) pf->dir_buf[n++] = jps__dir_of(1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x - 1, y)) pf->dir_buf[n++] = jps__dir_of(-1, pdy);
     }
 
     return n;
@@ -429,38 +467,38 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
     if (jps_is_diagonal(pdx, pdy))
     {
         /* 对角来向 → 只有 3 个自然邻居；禁止切角时对角不产生强迫邻居。 */
-        pf->dir_buf[n++] = parent_dir;
-        pf->dir_buf[n++] = jps_dir_index_of(pdx, 0);
-        pf->dir_buf[n++] = jps_dir_index_of(0, pdy);
+        pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
+        pf->dir_buf[n++] = jps__dir_of(pdx, 0);
+        pf->dir_buf[n++] = jps__dir_of(0, pdy);
         return n;
     }
 
-    pf->dir_buf[n++] = parent_dir;
+    pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
 
     if (pdx != 0)   /* 水平移动 */
     {
         if (jps_grid_map_is_walkable_g(m, x, y + 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y + 1))
         {
-            pf->dir_buf[n++] = jps_dir_index_of(0, 1);
-            pf->dir_buf[n++] = jps_dir_index_of(pdx, 1);
+            pf->dir_buf[n++] = jps__dir_of(0, 1);
+            pf->dir_buf[n++] = jps__dir_of(pdx, 1);
         }
         if (jps_grid_map_is_walkable_g(m, x, y - 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y - 1))
         {
-            pf->dir_buf[n++] = jps_dir_index_of(0, -1);
-            pf->dir_buf[n++] = jps_dir_index_of(pdx, -1);
+            pf->dir_buf[n++] = jps__dir_of(0, -1);
+            pf->dir_buf[n++] = jps__dir_of(pdx, -1);
         }
     }
     else            /* 垂直移动 */
     {
         if (jps_grid_map_is_walkable_g(m, x + 1, y) && !jps_grid_map_is_walkable_g(m, x + 1, y - pdy))
         {
-            pf->dir_buf[n++] = jps_dir_index_of(1, 0);
-            pf->dir_buf[n++] = jps_dir_index_of(1, pdy);
+            pf->dir_buf[n++] = jps__dir_of(1, 0);
+            pf->dir_buf[n++] = jps__dir_of(1, pdy);
         }
         if (jps_grid_map_is_walkable_g(m, x - 1, y) && !jps_grid_map_is_walkable_g(m, x - 1, y - pdy))
         {
-            pf->dir_buf[n++] = jps_dir_index_of(-1, 0);
-            pf->dir_buf[n++] = jps_dir_index_of(-1, pdy);
+            pf->dir_buf[n++] = jps__dir_of(-1, 0);
+            pf->dir_buf[n++] = jps__dir_of(-1, pdy);
         }
     }
 
@@ -509,9 +547,8 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, in
 
         {
             uint64_t gd = pf->g_dir[cy * pf->w + cx];     /* 一次乘法定位，同 load 取来向与步数 */
-            int pdir = jps__gd_dir(gd);                   /* 非起点必有父，不会是 -1 */
-            int dx = jps_dir_dx[pdir];
-            int dy = jps_dir_dy[pdir];
+            int dx = jps__gd_dx(gd);                      /* 非起点必有父，dx/dy code 不会是哨兵 */
+            int dy = jps__gd_dy(gd);
             int steps = jps__gd_steps(gd);
             cx -= dx * steps;
             cy -= dy * steps;
@@ -568,7 +605,7 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
     goal_packed = jps__pack_xy(gx, gy);
 
     jps_min_heap_clear(&pf->open);
-    pf->g_dir[start_id] = jps__pack_gdir(0, 0, JPS__NO_DIR);   /* g=0、steps=0，起点无来向 */
+    pf->g_dir[start_id] = jps__pack_gdir_root(0, 0);   /* g=0、steps=0，起点无来向 */
     pf->mark[start_id] = (uint16_t)open_mark;
     jps_min_heap_enqueue(&pf->open, jps__pack_xy(sx, sy), jps_octile_heuristic(sx, sy, gx, gy));
 
@@ -602,18 +639,19 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             return out->path_count;
         }
 
-        dir_count = jps__fill_directions(pf, map, cx, cy, jps__gd_dir(cur_gd));
+        dir_count = jps__fill_directions(pf, map, cx, cy,
+                                         jps__gd_has_parent(cur_gd),
+                                         jps__gd_dx(cur_gd), jps__gd_dy(cur_gd));
 
         for (i = 0; i < dir_count; i++)
         {
-            int idx = pf->dir_buf[i];
-            int dx = jps_dir_dx[idx];
-            int dy = jps_dir_dy[idx];
-            bool diagonal = jps_is_diagonal_index(idx);
+            const jps__dir& d = pf->dir_buf[i];
+            int dx = d.dx;
+            int dy = d.dy;
             jps__jump_entry jump;
-            bool has_jump = diagonal
-                ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, gx, gy, &jump)
-                : jps__cardinal_jump(pf, map, cx, cy, dx, dy, idx, gx, gy, &jump);
+            bool has_jump = d.diagonal
+                ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, d.hdir, d.vdir, gx, gy, &jump)
+                : jps__cardinal_jump(pf, map, cx, cy, dx, dy, d.dir, gx, gy, &jump);
 
             int nb_id, nb_mark;
             int64_t move_cost, tentative;
@@ -627,15 +665,15 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             if (nb_mark == closed_mark)
                 continue;
 
-            move_cost = (int64_t)jump.steps * (diagonal ? JPS_DIAGONAL_COST : JPS_CARDINAL_COST);
+            move_cost = (int64_t)jump.steps * (d.diagonal ? JPS_DIAGONAL_COST : JPS_CARDINAL_COST);
             tentative = cur_g + move_cost;
 
             first_seen = nb_mark < open_mark;
             if (!first_seen && tentative >= jps__gd_g(pf->g_dir[nb_id]))
                 continue;
 
-            /* g、steps、dir 同字：一条 8 字节 store 同时写入三者（原独立 steps 数组已并入）。 */
-            pf->g_dir[nb_id] = jps__pack_gdir(tentative, jump.steps, (uint8_t)idx);
+            /* g、steps、parent dx/dy 同字：一条 8 字节 store 同时写入三者（原独立 steps 数组已并入）。 */
+            pf->g_dir[nb_id] = jps__pack_gdir(tentative, jump.steps, dx, dy);
             pf->mark[nb_id] = (uint16_t)open_mark;
 
             jps_min_heap_enqueue(&pf->open, jps__pack_xy(jump.x, jump.y),
@@ -675,7 +713,7 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
 }
 
 /* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
- * 搜索已经结束，g_dir 不再需要保留 g/parent_dir，可作为 smoothed path 输出缓冲复用。 */
+ * 搜索已经结束，g_dir 不再需要保留 g/parent dx/dy，可作为 smoothed path 输出缓冲复用。 */
 static void jps__ensure_smoothed(jps_pathfinder *pf)
 {
     if (pf->smoothed_valid)
