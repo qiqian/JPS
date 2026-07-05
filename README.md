@@ -436,6 +436,7 @@ r = jps.FindPath(system, (2, 3), (60, 55));    // 继续寻路：未受影响的
 与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libjps.so`。
 
 ```c
+#include <stdlib.h>
 #include "jps.h"
 
 /* ── 地图加载 ── */
@@ -447,14 +448,18 @@ jps_system_sync(s);                              /* 建图/改图后同步一次
 
 /* ── 寻路 ── */
 jps_pathfinder *pf = jps_pathfinder_create();    /* 可跨查询复用；一个线程一个 */
-int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* >=0 = compact path 点数；负值见 JPS_ERR_ */
+int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* 返回 compact path 点数；负值见 JPS_ERR_ */
 if (n > 0) {
-    int xy[256 * 2];                             /* x0,y0,x1,y1,... 交错 */
-    jps_pathfinder_copy_path(pf, xy, 256);       /* compact path */
+    int *xy = malloc(sizeof(int) * n * 2);       /* 按返回的 n 分配：x0,y0,x1,y1,... 交错 */
+    jps_pathfinder_copy_path(pf, xy, n);         /* 容量就传 n */
 
-    int sn = jps_pathfinder_smoothed_path_count(pf);
-    float sxy[256 * 2];                          /* 平滑路径在 find_path 内已算好，这里只是拷贝 */
-    jps_pathfinder_copy_smoothed_path(pf, sxy, sn < 256 ? sn : 256);
+    int sn = jps_pathfinder_smoothed_path_count(pf);         /* 平滑路径点数（find_path 内已算好） */
+    float *sxy = malloc(sizeof(float) * sn * 2); /* 同理按 sn 分配 */
+    jps_pathfinder_copy_smoothed_path(pf, sxy, sn);          /* 只是拷贝缓存，无二次计算 */
+
+    /* ... 使用 xy / sxy ... */
+    free(sxy);
+    free(xy);
 }
 
 /* ── 动态障碍：稀疏增量一次批量提交 ── */
@@ -1077,6 +1082,7 @@ r = jps.FindPath(system, (2, 3), (60, 55));    // keep pathing: all unaffected c
 Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libjps.so`.
 
 ```c
+#include <stdlib.h>
 #include "jps.h"
 
 /* ── Map loading ── */
@@ -1088,14 +1094,18 @@ jps_system_sync(s);                              /* sync the cache once after bu
 
 /* ── Pathfinding ── */
 jps_pathfinder *pf = jps_pathfinder_create();    /* reusable across queries; one per thread */
-int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* >=0 = compact path point count; negatives are JPS_ERR_ */
+int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* returns the compact path point count; negatives are JPS_ERR_ */
 if (n > 0) {
-    int xy[256 * 2];                             /* interleaved x0,y0,x1,y1,... */
-    jps_pathfinder_copy_path(pf, xy, 256);       /* compact path */
+    int *xy = malloc(sizeof(int) * n * 2);       /* allocate from the returned n: interleaved x0,y0,x1,y1,... */
+    jps_pathfinder_copy_path(pf, xy, n);         /* pass n as the capacity */
 
-    int sn = jps_pathfinder_smoothed_path_count(pf);
-    float sxy[256 * 2];                          /* the smoothed path is computed inside find_path; this only copies */
-    jps_pathfinder_copy_smoothed_path(pf, sxy, sn < 256 ? sn : 256);
+    int sn = jps_pathfinder_smoothed_path_count(pf);         /* smoothed point count (computed inside find_path) */
+    float *sxy = malloc(sizeof(float) * sn * 2); /* likewise allocate from sn */
+    jps_pathfinder_copy_smoothed_path(pf, sxy, sn);          /* copies the cached result, no recompute */
+
+    /* ... use xy / sxy ... */
+    free(sxy);
+    free(xy);
 }
 
 /* ── Dynamic obstacles: submit sparse edits in one batch ── */
