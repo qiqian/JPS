@@ -83,7 +83,7 @@ for %%a in ("%ABIS:;=" "%") do (
   )
 )
 
-echo All ABIs built. Each libjps.so is under %BUILD_ROOT%\^<abi^>\lib\^<abi^>\
+echo All ABIs built. Each libJPS.Native.so is under %BUILD_ROOT%\^<abi^>\lib\^<abi^>\
 exit /b 0
 
 REM ============================================================

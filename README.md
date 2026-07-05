@@ -294,7 +294,7 @@ flowchart TD
 
 `JPS.Native` 不是另一套算法，而是**在 C# JPS 语义已经锁定后**做的跨平台原生性能实现：A\* 继续负责准确性兜底，C# JPS 负责基础算法参考，C native 必须与 C# compact path 一致。它的目标是把同一套 no-corner-cutting JPS 规则压到更低的固定开销、更高的缓存命中率和更少的边界分支，并可按目标平台编译到 Windows/macOS/Linux/iOS/Android。
 
-源码层面保持 C11 风格的窄 API 和不透明句柄，移动端集成时可以按平台产物接入：iOS 通常编成静态库或 framework，Android 编成 `.so`，Unity/托管侧通过对应平台的 native plugin / P\Invoke 入口调用。仓库附带的 `JPS.Native.vcxproj` 是 Windows x64 的便捷工程，也是当前 README benchmark 使用的构建方式；Android 版则由 `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh` 一键构建出 `libjps.so`（见[构建 Android 原生库](#5-构建-android-原生库ndk)）。两者都不限制 native 源码的目标平台。
+源码层面保持 C11 风格的窄 API 和不透明句柄，移动端集成时可以按平台产物接入：iOS 通常编成静态库或 framework，Android 编成 `.so`，Unity/托管侧通过对应平台的 native plugin / P\Invoke 入口调用。仓库附带的 `JPS.Native.vcxproj` 是 Windows x64 的便捷工程，也是当前 README benchmark 使用的构建方式；Android 版则由 `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh` 一键构建出 `libJPS.Native.so`（见[构建 Android 原生库](#5-构建-android-原生库ndk)）。两者都不限制 native 源码的目标平台。
 
 核心结构仍然对应 C#：
 
@@ -433,7 +433,7 @@ r = jps.FindPath(system, (2, 3), (60, 55));    // 继续寻路：未受影响的
 
 #### C API
 
-与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libjps.so`。
+与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libJPS.Native.so`。
 
 ```c
 #include <stdlib.h>
@@ -577,7 +577,7 @@ JPS.slnx                         # 解决方案
 │   ├── rules.h / directions.h   # no-corner-cutting 跳点/强迫邻居规则；方向与整数代价
 │   ├── jps_simd.h / jps_atomic.h # SSE2/NEON 128 位 SIMD 与原子/内存序的平台抽象
 │   ├── JPS.Native.vcxproj       # Windows x64 便捷工程，输出 JPS.Native.dll
-│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK 构建脚本，输出 libjps.so（见「构建 Android 原生库」）
+│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK 构建脚本，输出 libJPS.Native.so（见「构建 Android 原生库」）
 │
 ├── JPS.Playground/              # ④ WinForms 演示界面（引用 Core/Data）
 │   ├── Controls/
@@ -695,7 +695,7 @@ cd JPS.Native
 
 - **NDK 查找顺序**：`--ndk-path` 参数 → `ANDROID_NDK_HOME` 环境变量 → 仓库本地 `JPS.Native/ndk/<平台>/`；都没有时自动从 Google 下载 **NDK r27d** 解压到本地使用，零手工配置。
 - **默认目标**：只构建 `arm64-v8a`（min API 21，覆盖所有现代 64 位设备，Play Store 也要求 64 位）；需要 32 位 ARM 时加 `--abis "arm64-v8a;armeabi-v7a"`。
-- **产物**：`build-android-<平台>/<abi>/lib/<abi>/libjps.so`，可直接作为 Unity / Android 工程的 native plugin。
+- **产物**：`build-android-<平台>/<abi>/lib/<abi>/libJPS.Native.so`，可直接作为 Unity / Android 工程的 native plugin。
 - **跨平台一致性保证**（见 `CMakeLists.txt`）：`-ffp-contract=off -fno-fast-math` 禁止 FMA 融合与近似数学，使**平滑路径的浮点结果在 x86 / ARM 各 ABI 间逐位一致**（整数寻路本身与浮点无关）；`-fvisibility=hidden` 把 `.so` 的导出面收敛到公共 API（`jps_system_*` / `jps_pathfinder_*`），与 Windows DLL 的导出行为对齐。
 
 iOS / macOS / Linux 无需专用脚本：`JPS.Native` 是纯 C11、无外部依赖，把源码直接加入目标平台的构建（静态库 / framework / `.so`）即可。
@@ -944,7 +944,7 @@ In other words: multiple JPS finders **warm the shared cache for each other** �
 
 `JPS.Native` is not a different algorithm. It is the cross-platform native performance implementation built **after the C# JPS semantics are locked down**: A\* remains the accuracy ground truth, C# JPS remains the base algorithm reference, and C native must match the C# compact path. Its job is to run the same no-corner-cutting JPS rules with lower fixed overhead, better locality, and fewer bounds branches, and it can be compiled for Windows/macOS/Linux/iOS/Android.
 
-At the source level it exposes a narrow C11-style API with opaque handles. On mobile, it can be integrated as the platform-appropriate native artifact: typically a static library or framework on iOS, and a `.so` on Android, called from Unity/managed code through the platform's native plugin / P/Invoke entry points. The included `JPS.Native.vcxproj` is the convenient Windows x64 project used for the README benchmark; the Android build ships as `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh`, producing `libjps.so` in one command (see [Build the Android Native Library](#5-build-the-android-native-library-ndk)). Neither limits the target platforms of the native source.
+At the source level it exposes a narrow C11-style API with opaque handles. On mobile, it can be integrated as the platform-appropriate native artifact: typically a static library or framework on iOS, and a `.so` on Android, called from Unity/managed code through the platform's native plugin / P/Invoke entry points. The included `JPS.Native.vcxproj` is the convenient Windows x64 project used for the README benchmark; the Android build ships as `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh`, producing `libJPS.Native.so` in one command (see [Build the Android Native Library](#5-build-the-android-native-library-ndk)). Neither limits the target platforms of the native source.
 
 The structure mirrors C#:
 
@@ -1079,7 +1079,7 @@ r = jps.FindPath(system, (2, 3), (60, 55));    // keep pathing: all unaffected c
 
 #### C API
 
-Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libjps.so`.
+Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libJPS.Native.so`.
 
 ```c
 #include <stdlib.h>
@@ -1223,7 +1223,7 @@ JPS.slnx                         # solution
 │   ├── rules.h / directions.h   # no-corner-cutting jump-point / forced-neighbor rules; directions and integer costs
 │   ├── jps_simd.h / jps_atomic.h # platform abstraction for SSE2/NEON 128-bit SIMD and atomics/memory order
 │   ├── JPS.Native.vcxproj       # Windows x64 convenience project, outputs JPS.Native.dll
-│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK build scripts, output libjps.so (see "Build the Android Native Library")
+│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK build scripts, output libJPS.Native.so (see "Build the Android Native Library")
 │
 ├── JPS.Playground/              # ④ WinForms demo UI (references Core/Data)
 │   ├── Controls/
@@ -1339,7 +1339,7 @@ cd JPS.Native
 
 - **NDK lookup order:** the `--ndk-path` argument → the `ANDROID_NDK_HOME` environment variable → a repo-local copy under `JPS.Native/ndk/<platform>/`. If none is found, the script downloads **NDK r27d** from Google and extracts it locally — zero manual setup.
 - **Default target:** `arm64-v8a` only (min API 21, covering all modern 64-bit devices; the Play Store requires 64-bit). Add 32-bit ARM with `--abis "arm64-v8a;armeabi-v7a"`.
-- **Output:** `build-android-<platform>/<abi>/lib/<abi>/libjps.so`, ready to use as a native plugin in Unity / Android projects.
+- **Output:** `build-android-<platform>/<abi>/lib/<abi>/libJPS.Native.so`, ready to use as a native plugin in Unity / Android projects.
 - **Cross-platform consistency guarantees** (see `CMakeLists.txt`): `-ffp-contract=off -fno-fast-math` disables FMA fusion and approximate math so **the smoothed path's float results are bit-identical across x86 / ARM ABIs** (integer pathfinding itself involves no floats); `-fvisibility=hidden` trims the `.so` export surface to the public API (`jps_system_*` / `jps_pathfinder_*`), matching the Windows DLL's export behavior.
 
 iOS / macOS / Linux need no dedicated script: `JPS.Native` is pure C11 with no external dependencies — add the sources directly to the target platform's build (static library / framework / `.so`).
