@@ -20,18 +20,15 @@ static const int jps_dir_dx[JPS_DIR_COUNT] = { 1, -1, 0, 0, 1, -1, 1, -1 };
 static const int jps_dir_dy[JPS_DIR_COUNT] = { 0, 0, 1, -1, 1, 1, -1, -1 };
 
 /*
- * 一次“跳跃”的结果：从某格沿某方向跳到的目标格。
- * has_jump=false 表示该方向跳不到任何跳点/终点（撞墙）。
+ * 一次“跳跃”跳到的目标格。跳跃函数返回 bool（是否跳到跳点/终点），
+ * 命中时把 (x,y,steps) 写入调用方传入的这个结构；撞墙/无跳点返回 false，不写。
  */
 typedef struct
 {
-    bool has_jump;
     int x;
     int y;
     int steps;   /* 跨越的格数（用于按 步数×单格代价 累计 g 值） */
 } jps__jump_entry;
-
-static const jps__jump_entry JPS__JUMP_NONE = { false, 0, 0, 0 };
 
 
 /*
@@ -259,8 +256,9 @@ static inline int jps__pack_xy(int x, int y) { return (y << 16) | x; }
 
 /* ---------------- 正交跳跃 ---------------- */
 
-static jps__jump_entry jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
-                                          int x, int y, int dx, int dy, int dir, int gx, int gy)
+static bool jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
+                               int x, int y, int dx, int dy, int dir, int gx, int gy,
+                               jps__jump_entry *out)
 {
     /* 先内联快探 clean 命中（一次 acquire 字节读 + int16 读），miss 才走完整慢路——
      * 与 jps__diagonal_jump 的正交子探测同构，省掉命中时的函数调用与平面基址/世代解算。 */
@@ -282,23 +280,24 @@ static jps__jump_entry jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map
         int dist_to_goal = dx != 0 ? abs(gx - x) : abs(gy - y);
         if (dist_to_goal <= max_travel)
         {
-            jps__jump_entry e = { true, gx, gy, dist_to_goal };
-            return e;
+            out->x = gx; out->y = gy; out->steps = dist_to_goal;
+            return true;
         }
     }
 
     if (dist > 0)
     {
-        jps__jump_entry e = { true, x + dx * dist, y + dy * dist, dist };
-        return e;
+        out->x = x + dx * dist; out->y = y + dy * dist; out->steps = dist;
+        return true;
     }
-    return JPS__JUMP_NONE;
+    return false;
 }
 
 /* ---------------- 对角：经典逐格扫描，复用正交 memo ---------------- */
 
-static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
-                                          int x, int y, int dx, int dy, int gx, int gy)
+static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
+                               int x, int y, int dx, int dy, int gx, int gy,
+                               jps__jump_entry *out)
 {
     int cx = x, cy = y, steps = 0;
     int horizontal_dir = jps_dir_index_of(dx, 0);
@@ -320,7 +319,7 @@ static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map
 
         /* 默认禁止斜穿角：斜走一步需目标格 + 两侧正交格都可走 */
         if (!jps_diagonal_allowed(m, cx, cy, dx, dy))
-            return JPS__JUMP_NONE;
+            return false;
 
         cx += dx;
         cy += dy;
@@ -328,14 +327,14 @@ static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map
 
         if (cx == gx && cy == gy)
         {
-            jps__jump_entry e = { true, cx, cy, steps };
-            return e;
+            out->x = cx; out->y = cy; out->steps = steps;
+            return true;
         }
 #ifdef JPS_ALLOW_CORNER_CUTTING
         if (jps_has_diagonal_forced_neighbor(m, cx, cy, dx, dy))
         {
-            jps__jump_entry e = { true, cx, cy, steps };
-            return e;
+            out->x = cx; out->y = cy; out->steps = steps;
+            return true;
         }
 #endif
 
@@ -345,15 +344,15 @@ static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map
         /* 正交分量子检测：先内联快探 clean 命中，miss 才调完整版。短路顺序与 C# 一致。 */
         if (!jps_jump_probe(dist_h, gen_h, idx_h, c->row_gen[cy], &hd))
             hd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, dx, 0, horizontal_dir);
-        if (hd > 0) { jps__jump_entry e = { true, cx, cy, steps }; return e; }
+        if (hd > 0) { out->x = cx; out->y = cy; out->steps = steps; return true; }
         if (cy == gy && jps_sign(gx - cx) == dx && abs(gx - cx) <= -hd)
-        { jps__jump_entry e = { true, cx, cy, steps }; return e; }
+        { out->x = cx; out->y = cy; out->steps = steps; return true; }
 
         if (!jps_jump_probe(dist_v, gen_v, idx_v, c->col_gen[cx], &vd))
             vd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, 0, dy, vertical_dir);
-        if (vd > 0) { jps__jump_entry e = { true, cx, cy, steps }; return e; }
+        if (vd > 0) { out->x = cx; out->y = cy; out->steps = steps; return true; }
         if (cx == gx && jps_sign(gy - cy) == dy && abs(gy - cy) <= -vd)
-        { jps__jump_entry e = { true, cx, cy, steps }; return e; }
+        { out->x = cx; out->y = cy; out->steps = steps; return true; }
     }
 }
 
@@ -600,15 +599,16 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             int dx = jps_dir_dx[idx];
             int dy = jps_dir_dy[idx];
             bool diagonal = jps_is_diagonal_index(idx);
-            jps__jump_entry jump = diagonal
-                ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, gx, gy)
-                : jps__cardinal_jump(pf, map, cx, cy, dx, dy, idx, gx, gy);
+            jps__jump_entry jump;
+            bool has_jump = diagonal
+                ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, gx, gy, &jump)
+                : jps__cardinal_jump(pf, map, cx, cy, dx, dy, idx, gx, gy, &jump);
 
             int nb_id, nb_mark;
             int64_t move_cost, tentative;
             bool first_seen;
 
-            if (!jump.has_jump)
+            if (!has_jump)
                 continue;
 
             nb_id = jps__id(pf, jump.x, jump.y);

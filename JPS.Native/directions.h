@@ -65,7 +65,7 @@ static inline int64_t jps_octile_heuristic(int x1, int y1, int x2, int y2)
     int dy = y1 > y2 ? y1 - y2 : y2 - y1;
     int mn = dx < dy ? dx : dy;
     int mx = dx < dy ? dy : dx;
-    return (int64_t)(mx - mn) * JPS_CARDINAL_COST + (int64_t)mn * JPS_DIAGONAL_COST;
+    return (int64_t)mx * JPS_CARDINAL_COST + (int64_t)mn * (JPS_DIAGONAL_COST - JPS_CARDINAL_COST);
 }
 
 static inline int jps_move_cost(int dx, int dy)
