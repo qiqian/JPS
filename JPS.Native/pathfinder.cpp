@@ -151,7 +151,6 @@ struct jps_pathfinder
     uint16_t *mark;      /* 访问状态（独立密集数组，32 节点/cache line） */
     int epoch;           /* 查询纪元，1..32767 循环（见上） */
     jps_min_heap open;
-    jps__dir dir_buf[JPS_DIR_COUNT];
 
     jps_jump_point_cache *cache;   /* 当前查询绑定的共享跳点缓存 */
     jps_path_result result;        /* 最近一次寻路结果（供 copy/count 访问器读取） */
@@ -409,7 +408,7 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 
 /* ---------------- 方向剪枝（写入 dir_buf，返回数量） ---------------- */
 
-static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x, int y,
+static int jps__fill_directions(jps__dir* dir_buf, const jps_grid_map *m, int x, int y,
                                 bool has_parent, int pdx, int pdy)
 {
     int n = 0;
@@ -427,7 +426,7 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
                 ? jps_diagonal_allowed(m, x, y, dx, dy)
                 : jps_grid_map_is_walkable_g(m, x + dx, y + dy);   /* (x,y) 界内、±1 邻查 → 哨兵版免检 */
             if (allowed)
-                pf->dir_buf[n++] = d;
+                dir_buf[n++] = d;
         }
         return n;
     }
@@ -436,29 +435,29 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
     /* ============ 允许斜穿角 ============ */
     if (jps_is_diagonal(pdx, pdy))
     {
-        pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
-        pf->dir_buf[n++] = jps__dir_of(pdx, 0);
-        pf->dir_buf[n++] = jps__dir_of(0, pdy);
+        dir_buf[n++] = jps__dir_of(pdx, pdy);
+        dir_buf[n++] = jps__dir_of(pdx, 0);
+        dir_buf[n++] = jps__dir_of(0, pdy);
 
         if (!jps_grid_map_is_walkable_g(m, x - pdx, y))
-            pf->dir_buf[n++] = jps__dir_of(-pdx, pdy);
+            dir_buf[n++] = jps__dir_of(-pdx, pdy);
         if (!jps_grid_map_is_walkable_g(m, x, y - pdy))
-            pf->dir_buf[n++] = jps__dir_of(pdx, -pdy);
+            dir_buf[n++] = jps__dir_of(pdx, -pdy);
 
         return n;
     }
 
-    pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
+    dir_buf[n++] = jps__dir_of(pdx, pdy);
 
     if (pdx != 0)
     {
-        if (!jps_grid_map_is_walkable_g(m, x, y + 1)) pf->dir_buf[n++] = jps__dir_of(pdx, 1);
-        if (!jps_grid_map_is_walkable_g(m, x, y - 1)) pf->dir_buf[n++] = jps__dir_of(pdx, -1);
+        if (!jps_grid_map_is_walkable_g(m, x, y + 1)) dir_buf[n++] = jps__dir_of(pdx, 1);
+        if (!jps_grid_map_is_walkable_g(m, x, y - 1)) dir_buf[n++] = jps__dir_of(pdx, -1);
     }
     else
     {
-        if (!jps_grid_map_is_walkable_g(m, x + 1, y)) pf->dir_buf[n++] = jps__dir_of(1, pdy);
-        if (!jps_grid_map_is_walkable_g(m, x - 1, y)) pf->dir_buf[n++] = jps__dir_of(-1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x + 1, y)) dir_buf[n++] = jps__dir_of(1, pdy);
+        if (!jps_grid_map_is_walkable_g(m, x - 1, y)) dir_buf[n++] = jps__dir_of(-1, pdy);
     }
 
     return n;
@@ -467,38 +466,38 @@ static int jps__fill_directions(jps_pathfinder *pf, const jps_grid_map *m, int x
     if (jps_is_diagonal(pdx, pdy))
     {
         /* 对角来向 → 只有 3 个自然邻居；禁止切角时对角不产生强迫邻居。 */
-        pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
-        pf->dir_buf[n++] = jps__dir_of(pdx, 0);
-        pf->dir_buf[n++] = jps__dir_of(0, pdy);
+        dir_buf[n++] = jps__dir_of(pdx, pdy);
+        dir_buf[n++] = jps__dir_of(pdx, 0);
+        dir_buf[n++] = jps__dir_of(0, pdy);
         return n;
     }
 
-    pf->dir_buf[n++] = jps__dir_of(pdx, pdy);
+    dir_buf[n++] = jps__dir_of(pdx, pdy);
 
     if (pdx != 0)   /* 水平移动 */
     {
         if (jps_grid_map_is_walkable_g(m, x, y + 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y + 1))
         {
-            pf->dir_buf[n++] = jps__dir_of(0, 1);
-            pf->dir_buf[n++] = jps__dir_of(pdx, 1);
+            dir_buf[n++] = jps__dir_of(0, 1);
+            dir_buf[n++] = jps__dir_of(pdx, 1);
         }
         if (jps_grid_map_is_walkable_g(m, x, y - 1) && !jps_grid_map_is_walkable_g(m, x - pdx, y - 1))
         {
-            pf->dir_buf[n++] = jps__dir_of(0, -1);
-            pf->dir_buf[n++] = jps__dir_of(pdx, -1);
+            dir_buf[n++] = jps__dir_of(0, -1);
+            dir_buf[n++] = jps__dir_of(pdx, -1);
         }
     }
     else            /* 垂直移动 */
     {
         if (jps_grid_map_is_walkable_g(m, x + 1, y) && !jps_grid_map_is_walkable_g(m, x + 1, y - pdy))
         {
-            pf->dir_buf[n++] = jps__dir_of(1, 0);
-            pf->dir_buf[n++] = jps__dir_of(1, pdy);
+            dir_buf[n++] = jps__dir_of(1, 0);
+            dir_buf[n++] = jps__dir_of(1, pdy);
         }
         if (jps_grid_map_is_walkable_g(m, x - 1, y) && !jps_grid_map_is_walkable_g(m, x - 1, y - pdy))
         {
-            pf->dir_buf[n++] = jps__dir_of(-1, 0);
-            pf->dir_buf[n++] = jps__dir_of(-1, pdy);
+            dir_buf[n++] = jps__dir_of(-1, 0);
+            dir_buf[n++] = jps__dir_of(-1, pdy);
         }
     }
 
@@ -639,13 +638,14 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
             return out->path_count;
         }
 
-        dir_count = jps__fill_directions(pf, map, cx, cy,
+        jps__dir dir_buf[JPS_DIR_COUNT];
+        dir_count = jps__fill_directions(dir_buf, map, cx, cy,
                                          jps__gd_has_parent(cur_gd),
                                          jps__gd_dx(cur_gd), jps__gd_dy(cur_gd));
 
         for (i = 0; i < dir_count; i++)
         {
-            const jps__dir& d = pf->dir_buf[i];
+            const jps__dir& d = dir_buf[i];
             int dx = d.dx;
             int dy = d.dy;
             jps__jump_entry jump;
