@@ -255,9 +255,10 @@ static jps__jump_entry jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map
      * 与 jps__diagonal_jump 的正交子探测同构，省掉命中时的函数调用与平面基址/世代解算。 */
     const jps_jump_point_cache *c = pf->cache;
     uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];
+    int idx = dy == 0 ? y * c->w + x : x * c->h + y;
     int dist, max_travel;
     if (!jps_jump_probe(c->dist + (size_t)dir * c->size, c->gen + (size_t)dir * c->size,
-                        y * c->w + x, line_gen, &dist))
+                        idx, line_gen, &dist))
         dist = jps_jump_point_cache_cardinal_dist(pf->cache, m, x, y, dx, dy, dir);
     max_travel = dist > 0 ? dist : -dist;
 
@@ -304,7 +305,7 @@ static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map
 
     for (;;)
     {
-        int hd, vd, idx;
+        int hd, vd, idx_h, idx_v;
 
         /* 默认禁止斜穿角：斜走一步需目标格 + 两侧正交格都可走 */
         if (!jps_diagonal_allowed(m, cx, cy, dx, dy))
@@ -327,16 +328,17 @@ static jps__jump_entry jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map
         }
 #endif
 
-        idx = cy * c->w + cx;   /* 缓存各平面统一按 y*w+x 索引 */
+        idx_h = cy * c->w + cx;   /* E/W 平面：行主序 */
+        idx_v = cx * c->h + cy;   /* S/N 平面：列主序 */
 
         /* 正交分量子检测：先内联快探 clean 命中，miss 才调完整版。短路顺序与 C# 一致。 */
-        if (!jps_jump_probe(dist_h, gen_h, idx, c->row_gen[cy], &hd))
+        if (!jps_jump_probe(dist_h, gen_h, idx_h, c->row_gen[cy], &hd))
             hd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, dx, 0, horizontal_dir);
         if (hd > 0) { jps__jump_entry e = { true, cx, cy, steps }; return e; }
         if (cy == gy && jps_sign(gx - cx) == dx && abs(gx - cx) <= -hd)
         { jps__jump_entry e = { true, cx, cy, steps }; return e; }
 
-        if (!jps_jump_probe(dist_v, gen_v, idx, c->col_gen[cx], &vd))
+        if (!jps_jump_probe(dist_v, gen_v, idx_v, c->col_gen[cx], &vd))
             vd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, 0, dy, vertical_dir);
         if (vd > 0) { jps__jump_entry e = { true, cx, cy, steps }; return e; }
         if (cx == gx && jps_sign(gy - cy) == dy && abs(gy - cy) <= -vd)

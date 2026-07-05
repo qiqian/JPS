@@ -20,8 +20,8 @@ extern "C" {
  * Lazy cardinal jump-point cache（按方向 SoA：dist 与 gen 各拆成 4 个连续平面）。
  * 方向索引 0=E,1=W,2=S,3=N（即 jps_dir_index_of 的正交结果）。
  *
- * 布局：dist / gen 各长 4*size，方向主序——方向 dir 的第 idx 格 = dist[(size_t)dir*size + idx]、
- * gen[(size_t)dir*size + idx]。总字节数与旧 AoS(int16 dist[4]+uint8 gen[4]=12B/格)完全相同，
+ * 布局：dist / gen 各长 4*size，方向主序——E/W 平面 idx=y*w+x，S/N 平面 idx=x*h+y。
+ * 总字节数与旧 AoS(int16 dist[4]+uint8 gen[4]=12B/格)完全相同，
  * 但同一方向沿行(E/W)或沿列(S/N，转置后)相邻的格在平面内连续，故回写整段 run 时 dist 是一段连续 int16、
  * 可用 16 位车道 SIMD 一次生成并写 8 个（gen 是同值 line_gen 的连续段）。
  * dist >0 跳点距离，<=0 到墙距离；gen 等于当前行/列有效世代即 clean。
@@ -39,7 +39,8 @@ extern "C" {
  *   · 本结构的 row_version/col_version 镜像上者，Sync 时逐线比对，不等 → bump 该线的
  *     row_gen/col_gen（有效世代）；初始化为 -1 哨兵（≠ 地图侧初始 0），保证首次 Sync
  *     把每条线都 bump 到 ≥1；
- *   · cell 侧 gen 平面（uint8）：某格某方向 clean ⇔ gen[dir*size+idx] == 对应线的有效世代。
+ *   · cell 侧 gen 平面（uint8）：某格某方向 clean ⇔ gen[dir*size+idx] == 对应线的有效世代；
+ *     E/W 的 idx=y*w+x，S/N 的 idx=x*h+y。
  *
  * 关键不变量：**cell gen 的 0 是保留值（恒 dirty），line 有效世代只在 1..255 循环**。
  *   回绕（line gen 到 255 再失效）时把该线两个方向的 gen 平面 memset 为 0、line gen 复位为 1；
@@ -51,8 +52,8 @@ typedef struct jps_jump_point_cache
     int w;
     int h;
     int size;
-    int16_t *dist;        /* 4 个方向平面拼接：dist[dir*size + idx] */
-    uint8_t *gen;         /* 4 个方向平面拼接：gen[dir*size + idx]；0 = 恒 dirty（保留值） */
+    int16_t *dist;        /* 4 个方向平面拼接：E/W idx=y*w+x，S/N idx=x*h+y */
+    uint8_t *gen;         /* 4 个方向平面拼接：0 = 恒 dirty（保留值）；idx 同 dist */
     uint8_t *row_gen;     /* 每行 E/W 有效世代（dir 0/1），1..255 循环 */
     uint8_t *col_gen;     /* 每列 S/N 有效世代（dir 2/3），1..255 循环 */
     int *row_version;     /* 已同步的地图行版本（-1 哨兵 → 首次 Sync 全失效） */
@@ -76,7 +77,8 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
 /*
  * 热路内联快探：dir 平面上第 idx 格若 clean（gen==line_gen）则 *out 置 dist 并返回 true；
  * dirty 返回 false（调用方走完整慢路 cardinal_dist：扫描+回填）。
- * distp/genp 为该方向平面基址（c->dist/gen + dir*size）、line_gen 为该格所在行/列的有效世代，
+ * distp/genp 为该方向平面基址（c->dist/gen + dir*size）、idx 由调用方按方向布局传入：
+ * E/W 用 y*w+x，S/N 用 x*h+y；line_gen 为该格所在行/列的有效世代，
  * 均由调用方在热循环外解出——省去每次探测的函数调用与基址/世代重复解算。
  * 内存序与完整版一致：acquire 读 gen，命中再普通读 dist（见 jps_atomic.h 的发布协议）。
  */

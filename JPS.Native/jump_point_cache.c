@@ -257,20 +257,14 @@ static void jps__cache_invalidate_row(jps_jump_point_cache *c, int y)
     }
 }
 
-/* 列在 gen 平面内跨步 w，非连续，逐格清零 S/N 两平面。 */
+/* 列在 S/N gen 平面内连续（idx=x*h+y），两次 memset 即可。 */
 static void jps__cache_invalidate_col(jps_jump_point_cache *c, int x)
 {
     if (c->col_gen[x] >= 255)
     {
-        uint8_t *g2 = c->gen + (size_t)2 * c->size;   /* dir 2 = S */
-        uint8_t *g3 = c->gen + (size_t)3 * c->size;   /* dir 3 = N */
-        int y;
-        for (y = 0; y < c->h; y++)
-        {
-            size_t idx = (size_t)y * c->w + x;
-            g2[idx] = 0;
-            g3[idx] = 0;
-        }
+        size_t coloff = (size_t)x * c->h;
+        memset(c->gen + (size_t)2 * c->size + coloff, 0, (size_t)c->h);   /* dir 2 = S */
+        memset(c->gen + (size_t)3 * c->size + coloff, 0, (size_t)c->h);   /* dir 3 = N */
         c->col_gen[x] = 1;
     }
     else
@@ -388,7 +382,7 @@ static void jps__backfill_dist_run(int16_t *dst, int s, int a, int b)
 int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_map *m,
                                        int x, int y, int dx, int dy, int dir)
 {
-    int idx0 = y * c->w + x;
+    int idx0 = dy == 0 ? y * c->w + x : x * c->h + y;
     int16_t *distp = c->dist + (size_t)dir * c->size;             /* 该方向的 dist 平面 */
     uint8_t *genp = c->gen + (size_t)dir * c->size;               /* 该方向的 gen 平面 */
     uint8_t line_gen = dy == 0 ? c->row_gen[y] : c->col_gen[x];   /* E/W → 行世代；S/N → 列世代 */
@@ -406,7 +400,7 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
         jps__scan_line(m->col_blocked, m->col_stride, x, y, dy, &s, &jump_found);
 
     /* 回填整段 run（步 k=0..s-1 的可走格）。距离量级 ≤ max(W,H) ≤ INT16_MAX。
-     * 先写 dist（水平段可 SIMD），再逐格 release-store gen 发布——所有 dist 写在任何 gen 发布之前，
+     * 先写 dist（连续段可 SIMD），再逐格 release-store gen 发布——所有 dist 写在任何 gen 发布之前，
      * 故读者见某格 gen==line_gen 时其 dist 必已可见，acquire/release 语义与旧逐格版一致。 */
     if (dy == 0)
     {
@@ -431,15 +425,24 @@ int jps_jump_point_cache_cardinal_dist(jps_jump_point_cache *c, const jps_grid_m
     }
     else
     {
-        /* 垂直：沿列跨步 w，地址非连续 → 标量逐格回填。 */
-        int fy = y, k;
-        for (k = 0; k <= s - 1; k++)
+        /* 垂直：S/N 平面转置为列主序，整段 run 在平面内连续。换算同水平段：
+         * S(dy>0) 地址随步 k 升；N(dy<0) 地址随 k 降。 */
+        int block_start, a, b;
+        if (dy > 0)
         {
-            size_t ci = (size_t)fy * c->w + x;
-            distp[ci] = (int16_t)(jump_found ? (s - k) : -((s - 1) - k));   /* 先普通写 dist */
-            jps_gen_store_release(&genp[ci], line_gen);                      /* 再 release 发布该格 */
-            fy += dy;
+            block_start = idx0;
+            a = jump_found ? s : -(s - 1);
+            b = jump_found ? -1 : 1;
         }
+        else
+        {
+            block_start = idx0 - (s - 1);
+            a = jump_found ? 1 : 0;
+            b = jump_found ? 1 : -1;
+        }
+        jps__backfill_dist_run(distp + block_start, s, a, b);
+        for (t = 0; t < s; t++)
+            jps_gen_store_release(&genp[block_start + t], line_gen);
     }
 
     return jump_found ? s : -(s - 1);   /* idx0(k=0) 处的 dist；本线程刚写，直接返回 */
