@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.22)   # aligned with the latest LTS NDK (r27)
+
+# Suppress developer/compatibility warnings coming from bundled NDK CMake files
+# (those ship cmake_minimum_required with older versions like 3.6 and trigger
+# warnings such as "Compatibility with CMake < 3.10 will be removed...").
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1)
 project(jps_native C)
 
 set(CMAKE_C_STANDARD 11)
@@ -51,6 +56,25 @@ elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86")
   # precision — otherwise intermediate float results differ from x86_64 / ARM.
   target_compile_options(jps PRIVATE -msse2 -mfpmath=sse)
   target_compile_definitions(jps PRIVATE JPS_SIMD_SSE2=1)
+endif()
+
+# Enable LTO for Android clang builds so cross-translation-unit calls (eg. pathfinder.c -> jump_point_cache.c)
+# can be inlined. Only enable when building with Clang/LLVM under Android.
+if(ANDROID)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+	message(STATUS "Enabling LTO (flto) for Android Clang build")
+	target_compile_options(jps PRIVATE -flto)
+	# Linker flag via CMake API
+	if(POLICY CMP0091)
+	  # modern CMake supports target_link_options
+	  target_link_options(jps PRIVATE -flto)
+	else()
+	  # fallback: append to linker flags
+	  set_target_properties(jps PROPERTIES LINK_FLAGS "${LINK_FLAGS} -flto")
+	endif()
+	# Also enable CMake interprocedural optimization where supported
+	set_target_properties(jps PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+  endif()
 endif()
 
 # Ensure the shared library (.so) is copied to a predictable output directory after build
