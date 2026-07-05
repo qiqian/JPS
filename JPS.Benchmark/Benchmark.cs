@@ -209,6 +209,10 @@ namespace JPS.Benchmark
                                 return line[(c + 1)..].Trim();
                         }
                     }
+                    // ARM /proc/cpuinfo usually has no "model name" -> fall back to lscpu's "Model name".
+                    var lscpu = LscpuDict();
+                    if (lscpu.TryGetValue("Model name", out var mn) && mn.Length > 0)
+                        return mn;
                     return "unknown";
                 }
                 if (OperatingSystem.IsMacOS())
@@ -227,7 +231,215 @@ namespace JPS.Benchmark
         {
             writeLine($"Host OS:  {RuntimeInformation.OSDescription.Trim()} ({RuntimeInformation.OSArchitecture})");
             writeLine($"Host CPU: {GetCpuModel()}; {Environment.ProcessorCount} logical cores");
+            PrintCpuDetails(writeLine);   // arch / family / model / stepping / freq / cache, indented below Host CPU
             writeLine($"Runtime:  {RuntimeInformation.FrameworkDescription} ({RuntimeInformation.ProcessArchitecture})");
+        }
+
+        // Detailed CPU info (architecture, family/model/stepping, frequency, cache) for reproducibility.
+        // Best-effort and platform-specific; any failure just prints fewer (or no) detail lines.
+        private static void PrintCpuDetails(Action<string> writeLine)
+        {
+            try
+            {
+                List<string> lines =
+                    OperatingSystem.IsLinux()   ? LinuxCpuDetails()   :
+                    OperatingSystem.IsWindows() ? WindowsCpuDetails() :
+                    OperatingSystem.IsMacOS()   ? MacCpuDetails()     :
+                    new List<string>();
+                foreach (var l in lines)
+                    if (!string.IsNullOrWhiteSpace(l))
+                        writeLine("          " + l.Trim());   // 10-space indent aligns under "Host CPU: "
+            }
+            catch { /* diagnostics only; never fail the benchmark over host info */ }
+        }
+
+        // Parse `lscpu` (forced to the C locale for stable English field names) into a key -> value map.
+        private static Dictionary<string, string> LscpuDict()
+        {
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var psi = new ProcessStartInfo("lscpu", "")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                psi.Environment["LC_ALL"] = "C";
+                using Process? proc = Process.Start(psi);
+                if (proc == null)
+                    return d;
+                string outp = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                foreach (var raw in outp.Split('\n'))
+                {
+                    int c = raw.IndexOf(':');
+                    if (c <= 0)
+                        continue;
+                    string k = raw[..c].Trim();
+                    string v = raw[(c + 1)..].Trim();
+                    if (k.Length > 0 && v.Length > 0 && !d.ContainsKey(k))
+                        d[k] = v;
+                }
+            }
+            catch { /* diagnostics only */ }
+            return d;
+        }
+
+        // Linux: curate a few concise lines from lscpu (falls back to /proc/cpuinfo if lscpu is unavailable).
+        private static List<string> LinuxCpuDetails()
+        {
+            var d = LscpuDict();
+            var lines = new List<string>();
+            string Get(string k) => d.TryGetValue(k, out var v) ? v : "";
+
+            var id = new List<string>();
+            void AddId(string label, string key) { string v = Get(key); if (v != "") id.Add($"{label}={v}"); }
+            AddId("arch", "Architecture");
+            AddId("vendor", "Vendor ID");
+            AddId("family", "CPU family");
+            AddId("model", "Model");
+            AddId("stepping", "Stepping");
+            if (id.Count > 0) lines.Add(string.Join("  ", id));
+
+            var tf = new List<string>();
+            string sock = Get("Socket(s)"), core = Get("Core(s) per socket"), thr = Get("Thread(s) per core");
+            if (sock != "" || core != "" || thr != "")
+                tf.Add($"topology={(sock == "" ? "?" : sock)}sock x {(core == "" ? "?" : core)}core x {(thr == "" ? "?" : thr)}thread");
+            string maxf = Get("CPU max MHz"), minf = Get("CPU min MHz"), curf = Get("CPU MHz");
+            if (maxf != "" || minf != "")
+                tf.Add($"freq={(minf == "" ? "?" : minf)}..{(maxf == "" ? "?" : maxf)} MHz");
+            else if (curf != "")
+                tf.Add($"freq={curf} MHz");
+            if (tf.Count > 0) lines.Add(string.Join("  ", tf));
+
+            var cache = new List<string>();
+            void AddCache(string label, string key) { string v = Get(key); if (v != "") cache.Add($"{label}={v}"); }
+            AddCache("L1d", "L1d cache");
+            AddCache("L1i", "L1i cache");
+            AddCache("L2", "L2 cache");
+            AddCache("L3", "L3 cache");
+            if (cache.Count > 0) lines.Add("cache: " + string.Join("  ", cache));
+
+            if (lines.Count == 0)
+                lines = ProcCpuinfoDetails();   // lscpu missing -> minimal /proc/cpuinfo
+            return lines;
+        }
+
+        // Fallback for Linux without lscpu: pull family/model/stepping/MHz/cache from the first /proc/cpuinfo block.
+        private static List<string> ProcCpuinfoDetails()
+        {
+            var lines = new List<string>();
+            try
+            {
+                var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var raw in File.ReadLines("/proc/cpuinfo"))
+                {
+                    if (raw.Trim().Length == 0) break;   // first logical CPU block only
+                    int c = raw.IndexOf(':');
+                    if (c <= 0) continue;
+                    string k = raw[..c].Trim(); string v = raw[(c + 1)..].Trim();
+                    if (!d.ContainsKey(k)) d[k] = v;
+                }
+                string Get(string k) => d.TryGetValue(k, out var v) ? v : "";
+                var id = new List<string>();
+                void AddId(string label, string key) { string v = Get(key); if (v != "") id.Add($"{label}={v}"); }
+                AddId("vendor", "vendor_id"); AddId("family", "cpu family"); AddId("model", "model"); AddId("stepping", "stepping");
+                if (id.Count > 0) lines.Add(string.Join("  ", id));
+                var tf = new List<string>();
+                string mhz = Get("cpu MHz"), cache = Get("cache size");
+                if (mhz != "") tf.Add($"freq={mhz} MHz");
+                if (cache != "") tf.Add($"cache(size)={cache}");
+                if (tf.Count > 0) lines.Add(string.Join("  ", tf));
+            }
+            catch { }
+            return lines;
+        }
+
+        // Windows: query Win32_Processor via PowerShell CIM. The -Command script uses only single-quoted
+        // literals (no embedded double quotes, no double spaces) so it survives argv splitting intact.
+        private static List<string> WindowsCpuDetails()
+        {
+            var lines = new List<string>();
+            string script =
+                "$p=Get-CimInstance Win32_Processor|Select-Object -First 1;" +
+                "Write-Output ('desc=' + $p.Description);" +
+                "Write-Output ('vendor=' + $p.Manufacturer);" +
+                "Write-Output ('cores=' + $p.NumberOfCores);" +
+                "Write-Output ('threads=' + $p.NumberOfLogicalProcessors);" +
+                "Write-Output ('maxmhz=' + $p.MaxClockSpeed);" +
+                "Write-Output ('l2kb=' + $p.L2CacheSize);" +
+                "Write-Output ('l3kb=' + $p.L3CacheSize)";
+            string? outp = RunCapture("powershell", "-NoProfile -NonInteractive -Command " + script);
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (outp != null)
+                foreach (var raw in outp.Split('\n'))
+                {
+                    int e = raw.IndexOf('=');
+                    if (e <= 0) continue;
+                    string k = raw[..e].Trim(); string v = raw[(e + 1)..].Trim();
+                    if (v.Length > 0 && !d.ContainsKey(k)) d[k] = v;
+                }
+            string Get(string k) => d.TryGetValue(k, out var v) ? v : "";
+
+            string desc = Get("desc"), vendor = Get("vendor");
+            if (desc != "" || vendor != "")
+                lines.Add(desc + (vendor != "" ? $"  [{vendor}]" : ""));
+            string cores = Get("cores"), threads = Get("threads"), maxmhz = Get("maxmhz");
+            var tf = new List<string>();
+            if (cores != "" || threads != "")
+                tf.Add($"topology={(cores == "" ? "?" : cores)}core x {(threads == "" ? "?" : threads)}thread");
+            if (maxmhz != "") tf.Add($"maxfreq={maxmhz} MHz");
+            if (tf.Count > 0) lines.Add(string.Join("  ", tf));
+            string l2 = Get("l2kb"), l3 = Get("l3kb");
+            var cache = new List<string>();
+            if (l2 != "" && l2 != "0") cache.Add($"L2={l2} KB");
+            if (l3 != "" && l3 != "0") cache.Add($"L3={l3} KB");
+            if (cache.Count > 0) lines.Add("cache: " + string.Join("  ", cache));
+
+            if (lines.Count == 0)   // PowerShell unavailable -> registry identity (arch/family/model/stepping, no cache)
+            {
+                string? id = RegSz("Identifier"), ven = RegSz("VendorIdentifier");
+                if (id != null) lines.Add(id + (ven != null ? $"  [{ven}]" : ""));
+            }
+            return lines;
+        }
+
+        // Read a REG_SZ value from the CPU 0 registry key (via reg.exe, matching GetCpuModel's approach).
+        private static string? RegSz(string name)
+        {
+            string? outp = RunCapture("reg",
+                $@"query ""HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0"" /v {name}");
+            if (outp == null) return null;
+            int i = outp.IndexOf("REG_SZ", StringComparison.Ordinal);
+            if (i < 0) return null;
+            string v = outp[(i + "REG_SZ".Length)..].Trim();
+            return v.Length > 0 ? v : null;
+        }
+
+        // macOS: best-effort sysctl (Intel exposes family/model/stepping + freq + cache; Apple Silicon is sparser).
+        private static List<string> MacCpuDetails()
+        {
+            var lines = new List<string>();
+            string S(string key) => RunCapture("sysctl", "-n " + key)?.Trim() ?? "";
+            var id = new List<string>();
+            void AddId(string label, string key) { string v = S(key); if (v != "") id.Add($"{label}={v}"); }
+            AddId("vendor", "machdep.cpu.vendor"); AddId("family", "machdep.cpu.family");
+            AddId("model", "machdep.cpu.model"); AddId("stepping", "machdep.cpu.stepping");
+            if (id.Count > 0) lines.Add(string.Join("  ", id));
+            var tf = new List<string>();
+            string phys = S("hw.physicalcpu"), logi = S("hw.logicalcpu"), freq = S("hw.cpufrequency_max");
+            if (phys != "" || logi != "")
+                tf.Add($"topology={(phys == "" ? "?" : phys)}core x {(logi == "" ? "?" : logi)}thread");
+            if (long.TryParse(freq, out long hz) && hz > 0) tf.Add($"maxfreq={hz / 1_000_000} MHz");
+            if (tf.Count > 0) lines.Add(string.Join("  ", tf));
+            string KB(string b) => long.TryParse(b, out long n) && n > 0 ? $"{n / 1024}KB" : "";
+            var cache = new List<string>();
+            void AddCache(string label, string key) { string v = KB(S(key)); if (v != "") cache.Add($"{label}={v}"); }
+            AddCache("L1d", "hw.l1dcachesize"); AddCache("L1i", "hw.l1icachesize");
+            AddCache("L2", "hw.l2cachesize"); AddCache("L3", "hw.l3cachesize");
+            if (cache.Count > 0) lines.Add("cache: " + string.Join("  ", cache));
+            return lines;
         }
 
         private static string FindDir(string name)
