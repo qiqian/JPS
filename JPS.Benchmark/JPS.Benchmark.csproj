@@ -8,8 +8,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>JPS.Benchmark</RootNamespace>
     <AssemblyName>JPS.Benchmark</AssemblyName>
-    <!-- P/Invoke 进 JPS.Native（x64 原生 DLL），进程位数须为 x64。 -->
-    <PlatformTarget>x64</PlatformTarget>
+    <!-- P/Invoke 进 JPS.Native：Windows 上是 x64 原生 DLL，进程须 x64；非 Windows（如 arm64 Linux）
+         留空走 AnyCPU，由 .NET 主机架构决定，避免 x64 标记在 arm64 上抛 BadImageFormatException。 -->
+    <PlatformTarget Condition="$([MSBuild]::IsOSPlatform('Windows'))">x64</PlatformTarget>
   </PropertyGroup>
 
   <!-- 在 Windows 上构建时定义 WINDOWS 符号：Benchmark 里的线程亲和性 / 控制台 VT 模式等 Win32 API
@@ -21,7 +22,9 @@
   <ItemGroup>
     <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
     <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
-    <ProjectReference Include="..\JPS.Native\JPS.Native.vcxproj" />
+    <!-- 原生库仅 Windows 用 MSBuild 构建 vcxproj；非 Windows 由 build-linux.sh 用 cc 编出 .so，
+         托管侧只在运行期 P/Invoke，无编译期依赖，故此引用按平台条件化。 -->
+    <ProjectReference Include="..\JPS.Native\JPS.Native.vcxproj" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
   </ItemGroup>
 
 </Project>

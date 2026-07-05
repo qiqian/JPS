@@ -35,13 +35,20 @@ namespace JPS.Benchmark
             });
         }
 
+        // 平台对应的原生库文件名：Windows JPS.Native.dll / Linux libJPS.Native.so / macOS libJPS.Native.dylib。
+        private static string NativeFileName() =>
+            OperatingSystem.IsWindows() ? Dll + ".dll"
+            : OperatingSystem.IsMacOS() ? "lib" + Dll + ".dylib"
+            : "lib" + Dll + ".so";
+
         private static IEnumerable<string> Candidates()
         {
+            string native = NativeFileName();
             string? dir = AppContext.BaseDirectory;
             for (int i = 0; i < 12 && dir != null; i++)
             {
-                yield return Path.Combine(dir, Dll + ".dll");
-                yield return Path.Combine(dir, "x64", "Release", Dll + ".dll");
+                yield return Path.Combine(dir, native);                            // 与托管输出同目录（build-linux.sh 会复制到此）
+                yield return Path.Combine(dir, "x64", "Release", Dll + ".dll");     // 解决方案级 x64 输出（Windows）
                 yield return Path.Combine(dir, "x64", "Debug", Dll + ".dll");
                 dir = Directory.GetParent(dir)?.FullName;
             }
