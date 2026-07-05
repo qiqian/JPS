@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+![Demo](intro.png)
+
 一个**工程化、可直接复用的 Jump Point Search 寻路实现**，严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则。算法核心是 UI 无关的可移植库（`netstandard2.1` / C# 9），可整体拷入 **Unity 2022**。<br>
 _A **production-ready, reusable Jump Point Search implementation** that strictly follows the no-corner-cutting rules of Harabor & Grastien (SoCS'12). The core is a UI-agnostic, portable library (`netstandard2.1` / C# 9) that drops into **Unity 2022** wholesale._
 
