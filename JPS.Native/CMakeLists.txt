@@ -62,18 +62,9 @@ endif()
 # can be inlined. Only enable when building with Clang/LLVM under Android.
 if(ANDROID)
   if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-	message(STATUS "Enabling LTO (flto) for Android Clang build")
-	target_compile_options(jps PRIVATE -flto)
-	# Linker flag via CMake API
-	if(POLICY CMP0091)
-	  # modern CMake supports target_link_options
-	  target_link_options(jps PRIVATE -flto)
-	else()
-	  # fallback: append to linker flags
-	  set_target_properties(jps PROPERTIES LINK_FLAGS "${LINK_FLAGS} -flto")
-	endif()
-	# Also enable CMake interprocedural optimization where supported
-	set_target_properties(jps PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+	message(STATUS "Enabling ThinLTO for Android Clang build with lld")
+    target_compile_options(jps PRIVATE -flto=thin)
+    target_link_options(jps PRIVATE -flto=thin -fuse-ld=lld)
   endif()
 endif()
 
