@@ -56,6 +56,7 @@ _The project splits into three tiers with explicit roles: **A\*** is the accurac
   - [3. 运行测试](#3-运行测试) · [Run Tests](#3-run-tests)
   - [4. 运行 Playground](#4-运行-playground) · [Run Playground](#4-run-playground)
   - [5. 构建 Android 原生库](#5-构建-android-原生库ndk) · [Build the Android Native Library](#5-build-the-android-native-library-ndk)
+  - [6. 在 Linux 上构建与测试](#6-在-linux-上构建与测试) · [Build and Test on Linux](#6-build-and-test-on-linux)
 
 ---
 
@@ -698,7 +699,42 @@ cd JPS.Native
 - **产物**：`build-android-<平台>/<abi>/lib/<abi>/libJPS.Native.so`，可直接作为 Unity / Android 工程的 native plugin。
 - **跨平台一致性保证**（见 `CMakeLists.txt`）：`-ffp-contract=off -fno-fast-math` 禁止 FMA 融合与近似数学，使**平滑路径的浮点结果在 x86 / ARM 各 ABI 间逐位一致**（整数寻路本身与浮点无关）；`-fvisibility=hidden` 把 `.so` 的导出面收敛到公共 API（`jps_system_*` / `jps_pathfinder_*`），与 Windows DLL 的导出行为对齐。
 
-iOS / macOS / Linux 无需专用脚本：`JPS.Native` 是纯 C11、无外部依赖，把源码直接加入目标平台的构建（静态库 / framework / `.so`）即可。
+iOS / macOS 无需专用脚本：`JPS.Native` 是纯 C11、无外部依赖，把源码直接加入目标平台的构建（静态库 / framework / `.so`）即可。Linux 上跑 accuracy / benchmark 见下一节。
+
+### 6. 在 Linux 上构建与测试
+
+在 Linux（arm64 / x86_64）上构建原生库并跑 accuracy / benchmark：装好依赖后，用仓库根的 [`build-linux.sh`](build-linux.sh) 一键完成（编 `.so` + 构建两个托管工具 + 把 `.so` 复制到输出目录旁供 P/Invoke 解析）。
+
+**依赖**（build 与测试仅在 **Ubuntu 24.04** 上验证过；下述包名按 Ubuntu 24.04 的仓库）：
+
+```bash
+sudo apt update
+sudo apt install -y git build-essential cmake ninja-build clang lld dotnet-sdk-10.0
+```
+
+> `build-essential` / `clang` 提供 host 编译器（`build-linux.sh` 用 `cc` / `clang` 直接编 `.so`）；`cmake` / `ninja-build` / `lld` 供 [Android NDK 构建](#5-构建-android-原生库ndk)；`dotnet-sdk-10.0` 跑托管工具。
+
+**构建**：
+
+```bash
+bash build-linux.sh
+```
+
+脚本三步：① 用 `cc` / `clang` 把 `JPS.Native/*.c` 编成 `libJPS.Native.so`（沿用与 CMake 一致的 `-O3 -flto -fvisibility=hidden` 及浮点确定性选项 `-ffp-contract=off -fno-fast-math`，保证平滑路径与 C# 逐位一致；按 `uname -m` 自动选 NEON / SSE2）；② `dotnet build` 两个托管工具；③ 把 `.so` 复制到各托管输出目录旁。可用环境变量覆盖：`CONFIG=Debug`、`CC=gcc`、`LTO=0`、`EXTRA_CFLAGS="-mcpu=native"`。
+
+**运行**（从仓库根目录；参数与[第 3 节](#3-运行测试)一致）：
+
+```bash
+# 正确性：先跑子集确认 C≡C#，再全量
+dotnet JPS.Accuracy/bin/Release/net10.0/JPS.Accuracy.dll dao-map 100
+dotnet JPS.Accuracy/bin/Release/net10.0/JPS.Accuracy.dll
+
+# 基准：combo，每图 1000 组随机 + 官方 .scen
+dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000 bg512-map
+dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000
+```
+
+结果写入 `accuracy-results/` 与 `benchmark-results/`（相对仓库根，与运行时 cwd 无关）。
 
 ---
 
@@ -1342,7 +1378,42 @@ cd JPS.Native
 - **Output:** `build-android-<platform>/<abi>/lib/<abi>/libJPS.Native.so`, ready to use as a native plugin in Unity / Android projects.
 - **Cross-platform consistency guarantees** (see `CMakeLists.txt`): `-ffp-contract=off -fno-fast-math` disables FMA fusion and approximate math so **the smoothed path's float results are bit-identical across x86 / ARM ABIs** (integer pathfinding itself involves no floats); `-fvisibility=hidden` trims the `.so` export surface to the public API (`jps_system_*` / `jps_pathfinder_*`), matching the Windows DLL's export behavior.
 
-iOS / macOS / Linux need no dedicated script: `JPS.Native` is pure C11 with no external dependencies — add the sources directly to the target platform's build (static library / framework / `.so`).
+iOS / macOS need no dedicated script: `JPS.Native` is pure C11 with no external dependencies — add the sources directly to the target platform's build (static library / framework / `.so`). For running accuracy / benchmark on Linux, see the next section.
+
+### 6. Build and Test on Linux
+
+To build the native library and run accuracy / benchmark on Linux (arm64 / x86_64): install the prerequisites, then run [`build-linux.sh`](build-linux.sh) at the repo root — it builds the `.so`, builds both managed tools, and copies the `.so` next to their outputs so the P/Invoke resolver finds it.
+
+**Prerequisites** (build and tests were verified only on **Ubuntu 24.04**; the package names below are for the Ubuntu 24.04 repositories):
+
+```bash
+sudo apt update
+sudo apt install -y git build-essential cmake ninja-build clang lld dotnet-sdk-10.0
+```
+
+> `build-essential` / `clang` provide the host compiler (`build-linux.sh` builds the `.so` directly via `cc` / `clang`); `cmake` / `ninja-build` / `lld` are for the [Android NDK build](#5-build-the-android-native-library-ndk); `dotnet-sdk-10.0` runs the managed tools.
+
+**Build:**
+
+```bash
+bash build-linux.sh
+```
+
+The script does three things: ① compile `JPS.Native/*.c` into `libJPS.Native.so` with `cc` / `clang` (using the same `-O3 -flto -fvisibility=hidden` and float-determinism flags `-ffp-contract=off -fno-fast-math` as the CMake build, keeping the smoothed path bit-identical to C#; NEON / SSE2 auto-selected from `uname -m`); ② `dotnet build` both managed tools; ③ copy the `.so` next to each managed output. Override via env vars: `CONFIG=Debug`, `CC=gcc`, `LTO=0`, `EXTRA_CFLAGS="-mcpu=native"`.
+
+**Run** (from the repo root; same arguments as [section 3](#3-run-tests)):
+
+```bash
+# Correctness: run a subset first to confirm C≡C#, then the full set
+dotnet JPS.Accuracy/bin/Release/net10.0/JPS.Accuracy.dll dao-map 100
+dotnet JPS.Accuracy/bin/Release/net10.0/JPS.Accuracy.dll
+
+# Benchmark: combo, 1000 random pairs per map + official .scen
+dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000 bg512-map
+dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000
+```
+
+Results are written to `accuracy-results/` and `benchmark-results/` (relative to the repo root, independent of the runtime cwd).
 
 ## License
 
