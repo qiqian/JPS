@@ -33,6 +33,12 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#endif
+
 #include "jps.h"   /* 公共 API；本工程用 -DJPS_STATIC 与 JPS.Native 源码一起编译 */
 
 /* ---------------- 小工具 ---------------- */
@@ -50,6 +56,24 @@ static int rnd_range(int n) { return n <= 0 ? 0 : (int)(rnd_next() % (uint64_t)n
 static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
 static int isign(int v) { return (v > 0) - (v < 0); }
+
+static double now_secs(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (freq.QuadPart == 0)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart / (double)freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    return (double)clock() / CLOCKS_PER_SEC;
+#endif
+}
 
 /* 读整个文件到内存（\0 结尾）。失败返回 NULL。 */
 static char *read_file(const char *path)
@@ -130,10 +154,11 @@ static int parse_map(const char *path, int *out_w, int *out_h, uint8_t **out_cel
 
 /* ---------------- 测试对 ---------------- */
 
-typedef struct { int sx, sy, gx, gy; } pair_t;
+/* opt = scen 记录的官方最优长度（octile：直 1、斜 √2）；随机对无参考，置 -1。 */
+typedef struct { int sx, sy, gx, gy; double opt; } pair_t;
 
 typedef struct { pair_t *v; int n, cap; } pairs_t;
-static void pairs_push(pairs_t *p, int sx, int sy, int gx, int gy)
+static void pairs_push(pairs_t *p, int sx, int sy, int gx, int gy, double opt)
 {
     if (p->n == p->cap)
     {
@@ -141,6 +166,7 @@ static void pairs_push(pairs_t *p, int sx, int sy, int gx, int gy)
         p->v = (pair_t *)realloc(p->v, (size_t)p->cap * sizeof(pair_t));
     }
     p->v[p->n].sx = sx; p->v[p->n].sy = sy; p->v[p->n].gx = gx; p->v[p->n].gy = gy;
+    p->v[p->n].opt = opt;
     p->n++;
 }
 
@@ -164,7 +190,7 @@ static int load_scen(const char *path, int w, int h, const uint8_t *cells, pairs
         if (sx < 0 || sy < 0 || gx < 0 || gy < 0) continue;
         if (sx >= w || sy >= h || gx >= w || gy >= h) continue;
         if (cells[(size_t)sy * w + sx] || cells[(size_t)gy * w + gx]) continue;
-        pairs_push(out, sx, sy, gx, gy);
+        pairs_push(out, sx, sy, gx, gy, opt);   /* 带上 scen 的官方最优长度 */
         added++;
     }
     free(buf);
@@ -208,9 +234,55 @@ static int path_is_legal(jps_system *s, const int *xy, int n, int sx, int sy, in
     return 1;
 }
 
+/* compact path 的真实长度（octile：直线段每格 1、对角段每格 √2），并累计对角步数。 */
+static double path_length(const int *xy, int n, long *out_diag_steps)
+{
+    const double SQRT2 = 1.4142135623730951;
+    double len = 0.0;
+    long diag = 0;
+    for (int i = 0; i + 1 < n; i++)
+    {
+        int adx = abs(xy[(i + 1) * 2]     - xy[i * 2]);
+        int ady = abs(xy[(i + 1) * 2 + 1] - xy[i * 2 + 1]);
+        int mn = imin(adx, ady), mx = imax(adx, ady);
+        len += (double)mn * SQRT2 + (double)(mx - mn);   /* 对角段 mn 格 + 直线段 (mx-mn) 格 */
+        diag += mn;
+    }
+    if (out_diag_steps) *out_diag_steps = diag;
+    return len;
+}
+
 /* ---------------- 主流程 ---------------- */
 
-typedef struct { long total, found, no_path, err, illegal, nondet; } stats_t;
+typedef struct
+{
+    long total, found, no_path, err, illegal, nondet;
+    long len_checked, badlen;   /* scen 长度校验：已校验数 / 超容差数 */
+    double worst_len_dev;       /* 最大长度偏差（诊断用） */
+    long find_calls, clean_calls, cold_calls, restore_calls, hot_calls;
+    double find_secs, clean_secs, cold_secs, restore_secs, hot_secs;
+} stats_t;
+
+static int timed_find_path(jps_pathfinder *pf, jps_system *sys,
+                           int sx, int sy, int gx, int gy,
+                           double *bucket_secs, long *bucket_calls,
+                           stats_t *st)
+{
+    double t0 = now_secs();
+    int n = jps_pathfinder_find_path(pf, sys, sx, sy, gx, gy);
+    double secs = now_secs() - t0;
+
+    st->find_secs += secs;
+    st->find_calls++;
+    *bucket_secs += secs;
+    (*bucket_calls)++;
+    return n;
+}
+
+static double avg_us(double secs, long calls)
+{
+    return calls > 0 ? secs * 1000000.0 / (double)calls : 0.0;
+}
 
 /* 可复用的 compact-path 拷贝缓冲（按点数增长）。 */
 typedef struct { int *v; int cap_points; } ibuf_t;
@@ -285,7 +357,7 @@ int main(int argc, char **argv)
         int a = walk[rnd_range(walk_n)];
         int b = walk[rnd_range(walk_n)];
         if (a == b) { i--; continue; }
-        pairs_push(&pairs, a % w, a / w, b % w, b / w);
+        pairs_push(&pairs, a % w, a / w, b % w, b / w, -1.0);   /* 随机对无参考长度 */
     }
     int rand_added = pairs.n;
 
@@ -333,7 +405,7 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     stats_t st = {0};
-    clock_t t0 = clock();
+    double t0 = now_secs();
 
     for (int rep = 0; rep < reps; rep++)
     {
@@ -343,7 +415,8 @@ int main(int argc, char **argv)
             st.total++;
 
             /* ① 干净图参考寻路 */
-            int rn = jps_pathfinder_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy);
+            int rn = timed_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy,
+                                     &st.clean_secs, &st.clean_calls, &st);
             int ref_n = 0;
             if (rn == JPS_ERR_NO_PATH) st.no_path++;
             else if (rn < 0) { st.err++; }
@@ -354,6 +427,20 @@ int main(int argc, char **argv)
                 int *rb = ibuf_get(&ref, ref_n);
                 jps_pathfinder_copy_path(pf, rb, ref_n);
                 if (!path_is_legal(sys, rb, ref_n, p.sx, p.sy, p.gx, p.gy)) st.illegal++;
+
+                /* scen 对：把路径真实长度与官方最优长度比对。
+                 * 容差 = 每对角步 (√2−1.414) 的整数度量舍入上界 + 0.05（吸收官方参考的已知微小偏差）；
+                 * JPS 在整数度量下最优，故真实长度不会超出此界，超出即视为长度异常。 */
+                if (p.opt >= 0.0)
+                {
+                    long diag = 0;
+                    double len = path_length(rb, ref_n, &diag);
+                    double dev = len - p.opt; if (dev < 0) dev = -dev;
+                    double tol = 0.0002135623730951 * (double)diag + 0.05;
+                    st.len_checked++;
+                    if (dev > tol) { st.badlen++; if (dev > st.worst_len_dev) st.worst_len_dev = dev; }
+                }
+
                 /* 顺带跑一下平滑访问器（find 内部已算，这里只取，练一下公共接口） */
                 int sn = jps_pathfinder_smoothed_path_count(pf);
                 if (sn > 0) { int *wb = ibuf_get(&work, sn); jps_pathfinder_copy_smoothed_path(pf, (float *)wb, imin(sn, work.cap_points)); }
@@ -383,7 +470,8 @@ int main(int argc, char **argv)
             jps_system_set_blocked_batch(sys, xyv, ecount);
             jps_system_sync(sys);
 
-            int en = jps_pathfinder_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy);
+            int en = timed_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy,
+                                     &st.cold_secs, &st.cold_calls, &st);
             if (en >= 1)
             {
                 int *wb = ibuf_get(&work, en);
@@ -400,7 +488,8 @@ int main(int argc, char **argv)
             jps_system_set_blocked_batch(sys, xyv, ecount);
             jps_system_sync(sys);
 
-            int r2 = jps_pathfinder_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy);
+            int r2 = timed_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy,
+                                     &st.restore_secs, &st.restore_calls, &st);
             if (r2 >= 1)
             {
                 int *wb = ibuf_get(&work, r2);
@@ -416,23 +505,43 @@ int main(int argc, char **argv)
             else if (rn >= 1) st.nondet++;   /* 之前有路，还原后却没路 → 确定性坏了 */
             else if (r2 < 0 && r2 != JPS_ERR_NO_PATH) st.err++;
 
+            /* ④ 不改图、不 Sync，紧接着再寻同一 query = 纯热缓存（③ 之后整段已洗白，全 O(1) 命中） */
+            int hn = timed_find_path(pf, sys, p.sx, p.sy, p.gx, p.gy,
+                                     &st.hot_secs, &st.hot_calls, &st);
+            if (hn >= 1)
+            {
+                int *wb = ibuf_get(&work, hn);
+                jps_pathfinder_copy_path(pf, wb, hn);
+                if (!path_is_legal(sys, wb, hn, p.sx, p.sy, p.gx, p.gy)) st.illegal++;
+            }
+            else if (hn < 0 && hn != JPS_ERR_NO_PATH) st.err++;
+
             if (!quiet && (st.total % 2000 == 0))
             {
-                printf("\r  [%ld/%ld] found=%ld nopath=%ld illegal=%ld nondet=%ld err=%ld",
-                       st.total, (long)pairs.n * reps, st.found, st.no_path, st.illegal, st.nondet, st.err);
+                printf("\r  [%ld/%ld] found=%ld nopath=%ld illegal=%ld nondet=%ld badlen=%ld err=%ld",
+                       st.total, (long)pairs.n * reps, st.found, st.no_path, st.illegal, st.nondet, st.badlen, st.err);
                 fflush(stdout);
             }
         }
     }
 
-    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    double secs = now_secs() - t0;
     if (!quiet) printf("\r");
     printf("done: pairs=%ld  found=%ld  no_path=%ld  illegal=%ld  nondet=%ld  err=%ld  (%.2fs, %.0f finds/s)\n",
            st.total, st.found, st.no_path, st.illegal, st.nondet, st.err,
-           secs, secs > 0 ? (st.total * 3.0) / secs : 0.0);
+           secs, secs > 0 ? (double)st.find_calls / secs : 0.0);
+    printf("find time: calls=%ld  avg=%.2f us  clean=%.2f us  cold=%.2f us  restore=%.2f us  hot=%.2f us  total=%.2fs\n",
+           st.find_calls, avg_us(st.find_secs, st.find_calls),
+           avg_us(st.clean_secs, st.clean_calls),
+           avg_us(st.cold_secs, st.cold_calls),
+           avg_us(st.restore_secs, st.restore_calls),
+           avg_us(st.hot_secs, st.hot_calls),
+           st.find_secs);
+    printf("scen length: checked=%ld  bad=%ld  worst_dev=%.4f\n",
+           st.len_checked, st.badlen, st.worst_len_dev);
 
-    int bad = (st.illegal != 0) || (st.nondet != 0) || (st.err != 0);
-    printf(bad ? "RESULT: FAIL ✗ (illegal/nondet/err 非零)\n" : "RESULT: PASS ✓\n");
+    int bad = (st.illegal != 0) || (st.nondet != 0) || (st.err != 0) || (st.badlen != 0);
+    printf(bad ? "RESULT: FAIL (illegal/nondet/err/badlen 非零)\n" : "RESULT: PASS\n");
 
     jps_pathfinder_destroy(pf);
     jps_system_destroy(sys);

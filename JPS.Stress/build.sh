@@ -32,13 +32,15 @@ case "$(uname -m)" in
   i686|i386)          ARCH_FLAGS=(-msse2 -mfpmath=sse) ;;
 esac
 
+mkdir -p bin
+
 echo "==> CC=$CC  编译 stress（JPS_STATIC，含 $NATIVE/*.c）"
 "$CC" -std=c11 -O2 "${ARCH_FLAGS[@]}" -DJPS_STATIC \
-      -I"$NATIVE" stress.c "$NATIVE"/*.c -o stress
+      -I"$NATIVE" stress.c "$NATIVE"/*.c -o bin/stress
 
-echo "    -> ./stress"
+echo "    -> ./bin/stress"
 echo ""
 echo "示例："
-echo "  ./stress ../movingai/bg512-map/AR0011SR.map --rand 2000"
-echo "  ./stress ../movingai/dao-map/orz900d.map --rand 500 --reps 3"
-echo "  ./stress <map> --no-scen --rand 100000     # 只跑随机对、量大"
+echo "  ./bin/stress ../movingai/bg512-map/AR0011SR.map --rand 2000"
+echo "  ./bin/stress ../movingai/dao-map/orz900d.map --rand 500 --reps 3"
+echo "  ./bin/stress <map> --no-scen --rand 100000     # 只跑随机对、量大"
