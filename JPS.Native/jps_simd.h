@@ -53,19 +53,29 @@ static inline int jps_v_is_zero(jps_v128 v)
     return _mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128())) == 0xFFFF;
 #endif
 }
-/* 整 128 位左移 1，最低位补 cin：lo'=lo<<1|cin, hi'=hi<<1|(lo>>63)。 */
+/*
+ * 整 128 位左移 1，最低位补 cin：lo'=lo<<1|cin, hi'=hi<<1|(lo>>63)。
+ * 字间进位（lo bit63 → hi bit0）纯向量完成：srli 各道取 bit63，再 slli_si128 8B 把低字结果挪进高字——
+ * 免去旧版 xmm→GPR 抽取 + GPR→xmm 回灌的跨域往返（scan 内环每单元调两次，最热）。
+ * 外部 cin 是标量入参，仍需一次 movq 灌入 lane0 bit0（无法避免）。
+ */
 static inline jps_v128 jps_v_shl1(jps_v128 v, uint64_t cin)
 {
-    jps_v128 sh = _mm_slli_epi64(v, 1);                       /* 各 64 道独立左移 1 */
-    uint64_t carry = jps_v_lane(v, 0) >> 63;                  /* 低字 bit63 → 高字 bit0 */
-    return jps_v_or(sh, jps_v_set2(cin & 1ULL, carry));
+    jps_v128 sh = _mm_slli_epi64(v, 1);                        /* 各 64 道独立左移 1 */
+    jps_v128 cross = _mm_slli_si128(_mm_srli_epi64(v, 63), 8); /* {0, lo>>63}：字间进位入高字 bit0 */
+    jps_v128 cinv = _mm_cvtsi64_si128((long long)(cin & 1ULL));/* {cin, 0} */
+    return jps_v_or(jps_v_or(sh, cross), cinv);
 }
-/* 整 128 位右移 1，最高位补 cin_top：hi'=hi>>1|(cin<<63), lo'=lo>>1|(hi&1<<63)。 */
+/*
+ * 整 128 位右移 1，最高位补 cin_top：hi'=hi>>1|(cin<<63), lo'=lo>>1|((hi&1)<<63)。
+ * 字间进位（hi bit0 → lo bit63）纯向量完成：slli 各道把 bit0 移到 bit63，再 srli_si128 8B 把高字结果挪进低字。
+ */
 static inline jps_v128 jps_v_shr1(jps_v128 v, uint64_t cin_top)
 {
     jps_v128 sh = _mm_srli_epi64(v, 1);
-    uint64_t carry = jps_v_lane(v, 1) & 1ULL;                 /* 高字 bit0 → 低字 bit63 */
-    return jps_v_or(sh, jps_v_set2(carry << 63, (cin_top & 1ULL) << 63));
+    jps_v128 cross = _mm_srli_si128(_mm_slli_epi64(v, 63), 8); /* {(hi&1)<<63, 0}：字间进位入低字 bit63 */
+    jps_v128 cinv = _mm_slli_si128(_mm_cvtsi64_si128((long long)((cin_top & 1ULL) << 63)), 8); /* {0, cin<<63} */
+    return jps_v_or(jps_v_or(sh, cross), cinv);
 }
 
 /* ---- 16 位车道运算（供跳点缓存 dist 平面的 SIMD 回写：一次生成/写 8 个 int16 距离） ---- */
@@ -111,17 +121,20 @@ static inline int jps_v_is_zero(jps_v128 v)
 {
     return (vgetq_lane_u64(v, 0) | vgetq_lane_u64(v, 1)) == 0ULL;
 }
+/* 与 SSE2 同构：字间进位纯向量完成（vshr/vshl 各道取边界位，vext 跨字挪一格），免 GPR 往返；外部 cin 单次插入。 */
 static inline jps_v128 jps_v_shl1(jps_v128 v, uint64_t cin)
 {
     jps_v128 sh = vshlq_n_u64(v, 1);
-    uint64_t carry = jps_v_lane(v, 0) >> 63;
-    return jps_v_or(sh, jps_v_set2(cin & 1ULL, carry));
+    jps_v128 cross = vextq_u64(vdupq_n_u64(0), vshrq_n_u64(v, 63), 1);   /* {0, lo>>63} */
+    jps_v128 cinv = vsetq_lane_u64(cin & 1ULL, vdupq_n_u64(0), 0);       /* {cin, 0} */
+    return jps_v_or(jps_v_or(sh, cross), cinv);
 }
 static inline jps_v128 jps_v_shr1(jps_v128 v, uint64_t cin_top)
 {
     jps_v128 sh = vshrq_n_u64(v, 1);
-    uint64_t carry = jps_v_lane(v, 1) & 1ULL;
-    return jps_v_or(sh, jps_v_set2(carry << 63, (cin_top & 1ULL) << 63));
+    jps_v128 cross = vextq_u64(vshlq_n_u64(v, 63), vdupq_n_u64(0), 1);   /* {(hi&1)<<63, 0} */
+    jps_v128 cinv = vsetq_lane_u64((cin_top & 1ULL) << 63, vdupq_n_u64(0), 1); /* {0, cin<<63} */
+    return jps_v_or(jps_v_or(sh, cross), cinv);
 }
 
 /* ---- 16 位车道运算（供跳点缓存 dist 平面的 SIMD 回写） ---- */
