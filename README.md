@@ -2,8 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-一个**工程化、可直接复用的 Jump Point Search 寻路实现**。算法核心是 UI 无关、可整体拷入 **Unity 2022** 的可移植库（`netstandard2.1` / C# 9），严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则。当前工程分工很明确：**A\*** 是准确性基准，**C# JPS** 是基础 JPS 算法/可移植参考实现，**C JPS (`JPS.Native`)** 是极致优化的跨平台 native 版本（桌面 / iOS / Android，可按平台构建为动态库或静态库）；三者在全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集上做百万级逐条验证与基准测试。仓库同时附带一个 Windows Forms **Playground**，把"跳点表更新过程"实时可视化，方便理解算法内部机理。<br>
-_A **production-ready, reusable Jump Point Search implementation**. The core is a UI-agnostic, portable library (`netstandard2.1` / C# 9) that drops into **Unity 2022** wholesale and strictly follows the no-corner-cutting rules of Harabor & Grastien (SoCS'12). The current project roles are explicit: **A\*** is the accuracy baseline, **C# JPS** is the portable reference implementation of the base JPS algorithm, and **C JPS (`JPS.Native`)** is the aggressively optimized cross-platform native build (desktop / iOS / Android, built as a dynamic or static library depending on platform); all three are validated and benchmarked at million-case scale across all 7 [MovingAI](https://movingai.com/benchmarks/) map sets. The repo also ships a Windows Forms **Playground** that visualizes the jump-table update process in real time._
+一个**工程化、可直接复用的 Jump Point Search 寻路实现**，严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则。算法核心是 UI 无关的可移植库（`netstandard2.1` / C# 9），可整体拷入 **Unity 2022**。<br>
+_A **production-ready, reusable Jump Point Search implementation** that strictly follows the no-corner-cutting rules of Harabor & Grastien (SoCS'12). The core is a UI-agnostic, portable library (`netstandard2.1` / C# 9) that drops into **Unity 2022** wholesale._
+
+工程分三层，各司其职：**A\*** 是准确性基准；**C# JPS** 是基础 JPS 算法的可移植参考实现；**C JPS（`JPS.Native`）** 是极致优化的跨平台 native 版本（桌面 / iOS / Android，可按平台构建为动态库或静态库）。三者在全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集上做百万级逐条验证与基准测试。仓库同时附带一个 Windows Forms **Playground**，把"跳点表更新过程"实时可视化，方便理解算法内部机理。<br>
+_The project splits into three tiers with explicit roles: **A\*** is the accuracy baseline; **C# JPS** is the portable reference implementation of the base JPS algorithm; **C JPS (`JPS.Native`)** is the aggressively optimized cross-platform native build (desktop / iOS / Android, built as a dynamic or static library per platform). All three are validated and benchmarked at million-case scale across all 7 [MovingAI](https://movingai.com/benchmarks/) map sets. The repo also ships a Windows Forms **Playground** that visualizes the jump-table update process in real time._
 
 **核心技术亮点 · Core Highlights**
 
@@ -15,8 +18,8 @@ _A **production-ready, reusable Jump Point Search implementation**. The core is 
   _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
 - **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用、近零 GC；**142.3 万条**官方 `.scen` 场景验证中，JPS 与 A\* 的整数代价 **处处相等（subopt=0）**、路径非法 **0**、漏解 **0**。与官方最优长度比对时，**142.3034 万条精确吻合**，3 条属于整数 `1414≈√2` 度量内的舍入容差，另 1 条仅与官方参考长度有 0.0315 格偏差。<br>
   _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse, near-zero GC. Across **1.423M** official `.scen` cases, JPS integer cost equals A\* **everywhere (subopt=0)**, with **0** illegal paths and **0** missed solutions. Against the official optimal lengths, **1.423034M** cases match exactly, 3 are normal integer-`1414≈√2` tolerance artifacts, and 1 differs only from the official reference length by 0.0315 cell._
-- **A\* / C# JPS / C JPS 三层分工**：**A\*** 只负责给准确性兜底；`JPS.Core` 是 C# 基础算法与可移植参考实现；`JPS.Native` 是跨平台 C 原生极致优化版本（C11 API / SSE2 或 NEON 128 位 SIMD 位图扫描 / 按方向 SoA 缓存 + SIMD 回写 / 行·列级惰性失效 / guard band 免边界分支 / 打包节点状态）。C 版与 C# 版在 **142.3 万条**官方场景中 compact path 强一致（`mism=0`），冷缓存随机改图+还原后仍一致。性能（AMD Ryzen 7 5800X3D，6 map workers）：C 原生 hot 比 A\* 快 **47.1–57.4×**，cold 比 A\* 快 **29.1–31.9×**；相对 C# JPS，C hot 快 **1.42–1.57×**，cold 快 **1.99–2.58×**。<br>
-  _**A\* / C# JPS / C JPS split:** **A\*** is the accuracy ground truth; `JPS.Core` is the C# base algorithm and portable reference; `JPS.Native` is the aggressively optimized cross-platform C build (C11 API / SSE2 or NEON 128-bit SIMD bitmap scan / per-direction SoA cache + SIMD write-back / row·column-level lazy invalidation / guard band for branch-free bounds / packed node state). The C build returns the same compact path as C# over **1.423M** official cases (`mism=0`), and stays identical after cold-cache random edit+restore checks. Performance (AMD Ryzen 7 5800X3D, 6 map workers): C native is **47.1–57.4×** faster than A\* on hot cache and **29.1–31.9×** on cold cache; compared with C# JPS, C is **1.42–1.57×** faster hot and **1.99–2.58×** faster cold._
+- **A\* / C# JPS / C JPS 三层分工**：**A\*** 只负责给准确性兜底；`JPS.Core` 是 C# 基础算法与可移植参考实现；`JPS.Native` 是跨平台 C 原生极致优化版本（C11 API / SSE2 或 NEON 128 位 SIMD 位图扫描 / 按方向 SoA 缓存 + SIMD 回写 / 行·列级惰性失效 / guard band 免边界分支 / 打包节点状态）。C 版与 C# 版在 **142.3 万条**官方场景中 compact path 与平滑路径**逐点强一致**（`mism=0`），冷缓存随机改图+还原后仍一致。性能（AMD Ryzen 7 5800X3D，6 map workers）：C 原生 hot 比 A\* 快 **44.1–51.8×**，cold 比 A\* 快 **28.1–30.8×**；相对 C# JPS，C hot 快 **1.40–1.51×**，cold 快 **2.02–2.51×**。<br>
+  _**A\* / C# JPS / C JPS split:** **A\*** is the accuracy ground truth; `JPS.Core` is the C# base algorithm and portable reference; `JPS.Native` is the aggressively optimized cross-platform C build (C11 API / SSE2 or NEON 128-bit SIMD bitmap scan / per-direction SoA cache + SIMD write-back / row·column-level lazy invalidation / guard band for branch-free bounds / packed node state). The C build returns the same compact path **and smoothed path, point for point,** as C# over **1.423M** official cases (`mism=0`), and stays identical after cold-cache random edit+restore checks. Performance (AMD Ryzen 7 5800X3D, 6 map workers): C native is **44.1–51.8×** faster than A\* on hot cache and **28.1–30.8×** on cold cache; compared with C# JPS, C is **1.40–1.51×** faster hot and **2.02–2.51×** faster cold._
 - **工程化分层、可移植、有测试背书**：拆分为 `JPS.Core`（纯算法）/ `JPS.Data`（地图 I/O）/ `JPS.Native`（跨平台 C native）/ `JPS.Playground`（界面）/ `JPS.Benchmark`（性能基准）/ `JPS.Accuracy`（正确性）六个工程；C# 核心锁定 `netstandard2.1` / C# 9、不依赖 WinForms，可整体拷入 Unity 2022；native 核心可按目标平台编译为 Windows/macOS/Linux/iOS/Android 插件。<br>
   _**Layered engineering, portable, test-backed:** split into `JPS.Core` (pure algorithm) / `JPS.Data` (map I/O) / `JPS.Native` (cross-platform C native) / `JPS.Playground` (UI) / `JPS.Benchmark` (perf) / `JPS.Accuracy` (correctness); the C# core targets `netstandard2.1` / C# 9 with no WinForms dependency and drops into Unity 2022 wholesale; the native core can be compiled as a Windows/macOS/Linux/iOS/Android plugin for the target platform._
 
@@ -48,9 +51,11 @@ _A **production-ready, reusable Jump Point Search implementation**. The core is 
   - [1. 内存开销对比](#1-内存开销对比) · [Memory Footprint](#1-memory-footprint)
   - [2. 性能表现（最新实测）](#2-性能表现最新实测) · [Performance](#2-performance-latest-measured)
 - [四、使用说明](#四使用说明) · [Usage Guide](#iv-usage-guide)
-  - [1. 项目结构](#1-项目结构) · [Project Structure](#1-project-structure)
-  - [2. 运行测试](#2-运行测试) · [Run Tests](#2-run-tests)
-  - [3. 运行 Playground](#3-运行-playground) · [Run Playground](#3-run-playground)
+  - [1. API 用法](#1-api-用法) · [API Usage](#1-api-usage)
+  - [2. 项目结构](#2-项目结构) · [Project Structure](#2-project-structure)
+  - [3. 运行测试](#3-运行测试) · [Run Tests](#3-run-tests)
+  - [4. 运行 Playground](#4-运行-playground) · [Run Playground](#4-run-playground)
+  - [5. 构建 Android 原生库](#5-构建-android-原生库ndk) · [Build the Android Native Library](#5-build-the-android-native-library-ndk)
 
 ---
 
@@ -277,72 +282,19 @@ flowchart TD
 - 某个区域只要被**任意一个**线程第一个走到，就被它一次性扫描洗白；此后**所有线程**再经过该区域全是 O(1) 命中。
 - 于是整段并行寻路里，每条线段的 O(L) 扫描代价**全局只付一次**，而不是"每线程各付一次"。线程越多、查询越密集、路径越重叠，复用率越高，**平均每次寻路反而越快**。
 
-换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第三章工程与性能要点](#三工程与性能要点)：C hot overall 仍比 C# hot 快 1.44×，且比 A\* 快 48.3×。）
+换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第三章工程与性能要点](#三工程与性能要点)：C hot overall 仍比 C# hot 快 1.41×，且比 A\* 快 45.1×。）
 
 > ⚠️ 前提：并行寻路**之前**必须由**单线程**调用一次 `JpsSystem.Sync()`（确定缓存版本），且并行期间**不得修改地图**。要改地图就先 join 掉所有寻路线程，改完再 Sync、再并行。
 
-#### 使用指南
+> 具体用法（模式开关、C# / C 的并行调用范式）见[使用说明 · API 用法](#1-api-用法)的「多线程并行寻路」小节。
 
-| 模式 | 如何启用 | 适用 |
-|---|---|---|
-| **无锁多线程**（默认） | 工程已在 `JPS.Core` 定义 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路；x86/x64 上额外开销可忽略 |
-| **单线程极速** | 移除该符号 | `Volatile` 全部消失（退回普通读写），榨干单线程（尤其 ARM） |
-
-多线程支持**默认开启**——`JPS.Core/JPS.Core.csproj` 的 `<PropertyGroup>` 已包含：
-
-```xml
-<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
-```
-
-如需单线程极速（x86 上几乎无差别，ARM 上略有收益），删掉这行即可。
-
-并行调用范式：
-
-```csharp
-var system = new JpsSystem(map);
-system.Sync();                       // ① 并行前，单线程同步一次
-
-Parallel.For(0, threads, _ =>
-{
-    var jps = new JpsPathfinder();   // ② 每个线程一个私有 pathfinder
-    foreach (var (s, g) in queries)  //    共享同一个 system（只读 / 惰性补写缓存）
-        jps.FindPath(system, s, g);
-});                                  // ③ 并行期间不修改 map
-```
-
-C native 侧也是同一范式：一个共享 `jps_system` + 每个线程一个私有 `jps_pathfinder`。
-
-```c
-jps_system *system = jps_system_create(width, height);
-jps_system_set_blocked_buffer(system, blocked, width * height);  // 行主序，0=可走，非0=阻挡
-jps_system_sync(system);                                         // ① 并行前，单线程同步一次
-
-/* 在线程池 / pthread / Unity native worker 中执行；并行期间不要修改 system 的地图 */
-void worker(const query *queries, int count, int *path_xy, int capacity_points)
-{
-    jps_pathfinder *pf = jps_pathfinder_create();                // ② 每个线程一个私有 pathfinder
-
-    for (int i = 0; i < count; ++i) {
-        const query q = queries[i];                              // ③ 共享同一个 system（只读 / 惰性补写缓存）
-        int n = jps_pathfinder_find_path(pf, system, q.sx, q.sy, q.gx, q.gy);
-        if (n > 0)
-            jps_pathfinder_copy_path(pf, path_xy, capacity_points);  // 取 compact path；path_xy 也应为线程私有
-    }
-
-    jps_pathfinder_destroy(pf);
-}
-
-/* join 全部 worker 后，才可以 set_blocked_batch / set_blocked_buffer + jps_system_sync */
-jps_system_destroy(system);
-```
-
-> **正确性验证**：[`JPS.Accuracy`](#2-运行测试) 默认在已开启 `JPS_CONCURRENT_CACHE` 时，按每张图加载后用 `CPU/2` 线程共享同一 `JpsSystem` 跑全部 `.scen`；最新结果覆盖 **142.3 万条**官方真实查询，JPS vs A\* 失败 0、C vs C# 路径不一致 0、冷缓存随机改图+还原不一致 0，相当于持续复核共享缓存的多线程安全。
+> **正确性验证**：[`JPS.Accuracy`](#3-运行测试) 默认在已开启 `JPS_CONCURRENT_CACHE` 时，按每张图加载后用 `CPU/2` 线程共享同一 `JpsSystem` 跑全部 `.scen`；最新结果覆盖 **142.3 万条**官方真实查询：JPS vs A\* 失败 0；C vs C# 的 compact path 与平滑路径逐点不一致 0；冷缓存随机改图+还原抽测 9.47 万例不一致 0——相当于持续复核共享缓存的多线程安全。
 
 ### 5. C Native 极致优化层
 
 `JPS.Native` 不是另一套算法，而是**在 C# JPS 语义已经锁定后**做的跨平台原生性能实现：A\* 继续负责准确性兜底，C# JPS 负责基础算法参考，C native 必须与 C# compact path 一致。它的目标是把同一套 no-corner-cutting JPS 规则压到更低的固定开销、更高的缓存命中率和更少的边界分支，并可按目标平台编译到 Windows/macOS/Linux/iOS/Android。
 
-源码层面保持 C11 风格的窄 API 和不透明句柄，移动端集成时可以按平台产物接入：iOS 通常编成静态库或 framework，Android 编成 `.so`，Unity/托管侧通过对应平台的 native plugin / P\Invoke 入口调用。仓库附带的 `JPS.Native.vcxproj` 是 Windows x64 的便捷工程，也是当前 README benchmark 使用的构建方式；它不限制 native 源码的目标平台。
+源码层面保持 C11 风格的窄 API 和不透明句柄，移动端集成时可以按平台产物接入：iOS 通常编成静态库或 framework，Android 编成 `.so`，Unity/托管侧通过对应平台的 native plugin / P\Invoke 入口调用。仓库附带的 `JPS.Native.vcxproj` 是 Windows x64 的便捷工程，也是当前 README benchmark 使用的构建方式；Android 版则由 `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh` 一键构建出 `libjps.so`（见[构建 Android 原生库](#5-构建-android-原生库ndk)）。两者都不限制 native 源码的目标平台。
 
 核心结构仍然对应 C#：
 
@@ -401,7 +353,7 @@ jps_system_destroy(system);
 
 ### 2. 性能表现（最新实测）
 
-当前性能口径与准确性口径分开：**A\*** 主要用来证明最优性，不再作为性能目标；**C# JPS** 是基础 JPS 算法的可移植参考；**C JPS** 是 native 优化目标。最新结果来自 `benchmark-results/combo-all-q1000-t6-20260704-104152.txt`，这是 Windows x64 / MSVC native 构建下的实测：**AMD Ryzen 7 5800X3D**（16 逻辑核，6 个 map worker）、.NET 10、`corner-cutting=off`、`concurrent-cache=on`、全部 7 个 MovingAI 地图集 **562 张图**。同一套 `JPS.Native` 源码也可面向 iOS/Android 构建，移动端绝对耗时需以目标设备重测。
+当前性能口径与准确性口径分开：**A\*** 主要用来证明最优性，不再作为性能目标；**C# JPS** 是基础 JPS 算法的可移植参考；**C JPS** 是 native 优化目标。最新结果来自 `benchmark-results/combo-all-q1000-t6-20260705-034636.txt`，这是 Windows x64 / MSVC native 构建下的实测：**AMD Ryzen 7 5800X3D**（16 逻辑核，6 个 map worker）、.NET 10、`corner-cutting=off`、`concurrent-cache=on`、全部 7 个 MovingAI 地图集 **562 张图**。同一套 `JPS.Native` 源码也可面向 iOS/Android 构建，移动端绝对耗时需以目标设备重测。
 
 两种测试口径：**rand** 每图 1000 组随机可解起终点，共 **56.2 万组**；**scen** 为官方 `.scen` 去重后的 **141.5 万组**，通常更长、更接近真实 benchmark。
 
@@ -409,26 +361,26 @@ jps_system_destroy(system);
 
 | 范围 | pairs | A\*/JPS 节点比 | C# cold | C cold | C# hot | C hot | A\*/C cold | A\*/C hot | C#/C cold | C#/C hot |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| rand | 562,000 | 55.6× | 73.62 us | 28.54 us | 22.71 us | 14.47 us | 29.1× | 57.4× | 2.58× | 1.57× |
-| scen | 1,414,808 | 40.6× | 127.35 us | 63.98 us | 61.58 us | 43.30 us | 31.9× | 47.1× | 1.99× | 1.42× |
-| overall | 1,976,808 | 42.1× | 112.08 us | 53.90 us | 50.53 us | 35.10 us | 31.5× | 48.3× | 2.08× | 1.44× |
+| rand | 562,000 | 55.6× | 85.35 us | 33.98 us | 27.77 us | 18.42 us | 28.1× | 51.8× | 2.51× | 1.51× |
+| scen | 1,414,808 | 40.6× | 151.71 us | 75.20 us | 73.49 us | 52.55 us | 30.8× | 44.1× | 2.02× | 1.40× |
+| overall | 1,976,808 | 42.1× | 132.84 us | 63.48 us | 60.49 us | 42.84 us | 30.4× | 45.1× | 2.09× | 1.41× |
 
 总耗时摘要：
 
 | 口径 | A\* | C# cold / hot | C cold / hot |
 |---|---:|---:|---:|
-| rand | 466.7 s | 41.4 s / 12.8 s | 16.0 s / 8.1 s |
-| scen | 2884.8 s | 180.2 s / 87.1 s | 90.5 s / 61.3 s |
+| rand | 536.4 s | 48.0 s / 15.6 s | 19.1 s / 10.4 s |
+| scen | 3279.9 s | 214.6 s / 104.0 s | 106.4 s / 74.3 s |
 
 解读要点：
 
 - **JPS 的算法收益很稳定**：overall 下 A\* 平均展开 `16,383` 个节点，JPS 平均展开 `389` 个节点，节点量约 **42.1×**。这是机器无关的核心收益。
-- **C native 的定位成立**：C 相对 C# 在 cold 路径快 **2.08×**，hot 路径快 **1.44×**；cold 更赚，说明 guard band、row/col dirty sync、SIMD 位图扫描、SoA 回写和持久缓冲复用主要吃到了动态改图/缓存重扫场景。
-- **A\* 适合作准确性基准，不适合作性能目标**：C hot overall 比 A\* 快 **48.3×**，C cold 也快 **31.5×**。A\* 的朴素性让它很适合兜底验证，但在大图上会被展开节点数拖垮。
+- **C native 的定位成立**：C 相对 C# 在 cold 路径快 **2.09×**，hot 路径快 **1.41×**；cold 更赚，说明 guard band、row/col dirty sync、SIMD 位图扫描、SoA 回写和持久缓冲复用主要吃到了动态改图/缓存重扫场景。
+- **A\* 适合作准确性基准，不适合作性能目标**：C hot overall 比 A\* 快 **45.1×**，C cold 也快 **30.4×**。A\* 的朴素性让它很适合兜底验证，但在大图上会被展开节点数拖垮。
 - **地图形态决定上限**：开阔大图如 `bg512-map`、`wc3maps512-map` 的 A\*/C hot 可超过 **100×**；小图、短路径或随机散点中固定开销占比更高，倍率会收窄。
 - **严格顺序输出的 benchmark 是并发吞吐测试**：当前按地图分组多线程执行，结果持续回传主线程，并按分发顺序输出；因此最终表格稳定可比，同时每 50 行重打表头。若排在前面的地图很慢，后面已完成的结果会等待轮到自己再打印。
 
-正确性基准来自 `accuracy-results/scen-all-20260704-052224.txt`：有效非平凡用例 **1,423,038**；JPS vs A\* 失败 `0`、路径非法 `0`、C vs C# 路径不一致 `0`、冷缓存随机改图+还原不一致 `0`。仅 `1` 条与官方 reference length 有小偏差（0.0315 格），但 A\* / C# JPS / C JPS 内部一致，因此不影响 native 性能结论。
+正确性基准来自 `accuracy-results/scen-all-20260704-224247.txt`：有效非平凡用例 **1,423,038**；JPS vs A\* 失败 `0`、路径非法 `0`、C vs C# 的 compact path 与平滑路径逐点不一致 `0`、冷缓存随机改图+还原抽测 94,706 例不一致 `0`。仅 `1` 条与官方 reference length 有小偏差（0.0315 格），但 A\* / C# JPS / C JPS 内部一致，因此不影响 native 性能结论。
 
 复现：
 
@@ -441,7 +393,141 @@ dotnet run -c Release --project JPS.Accuracy
 
 ## 四、使用说明
 
-### 1. 项目结构
+### 1. API 用法
+
+核心只有两个对象：**`JpsSystem`**（地图 + 共享跳点缓存，可长期持有）与 **`JpsPathfinder`**（搜索状态，线程私有、跨查询复用）。典型生命周期：**建图 → `Sync` → 多次寻路 → 改障碍 → `Sync` → 继续寻路**。C# 与 C 的 API 一一对应。
+
+#### C# API
+
+```csharp
+using JPS.Models;        // GridMap
+using JPS.Pathfinding;   // JpsSystem / JpsPathfinder / PathResult
+using JPS.Data;          // MovingAiMap（可选，MovingAI .map 解析）
+
+// ── 地图加载 ──
+var map = new GridMap(64, 64);
+map.SetBlocked(10, 10, true);                  // 逐格设置阻挡
+// 或直接加载 MovingAI 基准地图：
+// GridMap map = MovingAiMap.Parse(File.ReadAllText("movingai/bg512-map/AR0011SR.map"));
+
+var system = new JpsSystem(map);               // 地图 + 惰性跳点缓存
+system.Sync();                                 // 建图/改图后同步一次缓存
+
+// ── 寻路 ──
+var jps = new JpsPathfinder();                 // 可跨查询复用；一个线程一个
+PathResult r = jps.FindPath(system, (2, 3), (60, 55));
+if (r.Success)
+{
+    var compact  = r.Path;           // 整数格坐标：起点 + 跳点/拐点 + 终点
+    var smoothed = r.SmoothedPath;   // 平滑路径连续坐标（格中心 = cx+0.5）
+    int expanded = r.ExpandedNodes;  // 本次展开的节点数
+}
+
+// ── 动态障碍：改哪里失效哪里，永不重建全表 ──
+map.SetBlocked(30, 30, true);                  // 任意增删障碍
+map.SetBlocked(10, 10, false);
+system.Sync();                                 // 再同步一次（O(W+H) 推进世代，非重建）
+
+r = jps.FindPath(system, (2, 3), (60, 55));    // 继续寻路：未受影响的缓存全部复用
+```
+
+#### C API
+
+与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libjps.so`。
+
+```c
+#include "jps.h"
+
+/* ── 地图加载 ── */
+jps_system *s = jps_system_create(64, 64);
+uint8_t cells[64 * 64] = {0};                    /* 行主序，0=可走，非 0=阻挡 */
+cells[10 * 64 + 10] = 1;
+jps_system_set_blocked_buffer(s, cells, 64 * 64);/* 整图一次性载入（逐格改用 jps_system_set_blocked） */
+jps_system_sync(s);                              /* 建图/改图后同步一次缓存 */
+
+/* ── 寻路 ── */
+jps_pathfinder *pf = jps_pathfinder_create();    /* 可跨查询复用；一个线程一个 */
+int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* >=0 = compact path 点数；负值见 JPS_ERR_ */
+if (n > 0) {
+    int xy[256 * 2];                             /* x0,y0,x1,y1,... 交错 */
+    jps_pathfinder_copy_path(pf, xy, 256);       /* compact path */
+
+    int sn = jps_pathfinder_smoothed_path_count(pf);
+    float sxy[256 * 2];                          /* 平滑路径在 find_path 内已算好，这里只是拷贝 */
+    jps_pathfinder_copy_smoothed_path(pf, sxy, sn < 256 ? sn : 256);
+}
+
+/* ── 动态障碍：稀疏增量一次批量提交 ── */
+int edits[] = { 30, 30, 1,   10, 10, 0 };        /* (x, y, blocked) 三元组 */
+jps_system_set_blocked_batch(s, edits, 2);
+jps_system_sync(s);
+
+n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* 继续寻路 */
+
+jps_pathfinder_destroy(pf);
+jps_system_destroy(s);
+```
+
+#### 多线程并行寻路
+
+设计原理见[第二章 · 无锁多线程](#4-无锁多线程共享惰性缓存的并行寻路)。两种模式：
+
+| 模式 | 如何启用 | 适用 |
+|---|---|---|
+| **无锁多线程**（默认） | 工程已在 `JPS.Core` 定义 `JPS_CONCURRENT_CACHE` | 多线程共享同一 `JpsSystem` 并行寻路；x86/x64 上额外开销可忽略 |
+| **单线程极速** | 移除该符号 | `Volatile` 全部消失（退回普通读写），榨干单线程（尤其 ARM） |
+
+多线程支持**默认开启**——`JPS.Core/JPS.Core.csproj` 的 `<PropertyGroup>` 已包含：
+
+```xml
+<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
+```
+
+如需单线程极速（x86 上几乎无差别，ARM 上略有收益），删掉这行即可。
+
+并行调用范式：
+
+```csharp
+var system = new JpsSystem(map);
+system.Sync();                       // ① 并行前，单线程同步一次
+
+Parallel.For(0, threads, _ =>
+{
+    var jps = new JpsPathfinder();   // ② 每个线程一个私有 pathfinder
+    foreach (var (s, g) in queries)  //    共享同一个 system（只读 / 惰性补写缓存）
+        jps.FindPath(system, s, g);
+});                                  // ③ 并行期间不修改 map
+```
+
+C native 侧也是同一范式：一个共享 `jps_system` + 每个线程一个私有 `jps_pathfinder`。
+
+```c
+jps_system *system = jps_system_create(width, height);
+jps_system_set_blocked_buffer(system, blocked, width * height);  // 行主序，0=可走，非0=阻挡
+jps_system_sync(system);                                         // ① 并行前，单线程同步一次
+
+/* 在线程池 / pthread / Unity native worker 中执行；并行期间不要修改 system 的地图 */
+void worker(const query *queries, int count, int *path_xy, int capacity_points)
+{
+    jps_pathfinder *pf = jps_pathfinder_create();                // ② 每个线程一个私有 pathfinder
+
+    for (int i = 0; i < count; ++i) {
+        const query q = queries[i];                              // ③ 共享同一个 system（只读 / 惰性补写缓存）
+        int n = jps_pathfinder_find_path(pf, system, q.sx, q.sy, q.gx, q.gy);
+        if (n > 0)
+            jps_pathfinder_copy_path(pf, path_xy, capacity_points);  // 取 compact path；path_xy 也应为线程私有
+    }
+
+    jps_pathfinder_destroy(pf);
+}
+
+/* join 全部 worker 后，才可以 set_blocked_batch / set_blocked_buffer + jps_system_sync */
+jps_system_destroy(system);
+```
+
+> ⚠️ 并行的三条规则（对应注释 ①②③）：并行前由**单线程** `Sync` 一次；每个线程用**自己的** pathfinder；并行期间**不改地图**——要改就先 join 全部寻路线程，改完再 `Sync`、再并行。
+
+### 2. 项目结构
 
 解决方案 `JPS.slnx` 拆成**六个职责清晰的工程**：
 
@@ -476,13 +562,17 @@ JPS.slnx                         # 解决方案
 │   └── MovingAiMap.cs           # MovingAI .map 基准地图解析器（octile → GridMap）
 │
 ├── JPS.Native/                  # ③ C 原生高性能实现（C11；Windows/macOS/Linux/iOS/Android）
+│   ├── jps.h / jps_export.h     # 公共 C API（不透明句柄）与跨平台导出宏
 │   ├── system.c/.h              # native JPS 系统：grid map + jump cache + pathfinder 生命周期
 │   ├── grid_map.c/.h            # guard-banded 位图、行/列加速结构、blocked buffer 同步
 │   ├── jump_point_cache.c/.h    # 按方向 SoA 跳点缓存、SIMD 扫描/回写、dirty 行列同步
 │   ├── pathfinder.c/.h          # native JPS 搜索、持久化搜索缓冲、路径重建
+│   ├── smoother.c/.h            # 平滑路径的 C 移植（supercover 视线 + 前向增量拉直，与 C# 逐点一致）
 │   ├── min_heap.c/.h            # hole-sift 二叉最小堆
-│   ├── rules.h                  # no-corner-cutting 跳点 / 强迫邻居规则
-│   └── JPS.Native.vcxproj       # Windows x64 便捷工程，输出 JPS.Native.dll；移动端按平台另行构建静态库/.so
+│   ├── rules.h / directions.h   # no-corner-cutting 跳点/强迫邻居规则；方向与整数代价
+│   ├── jps_simd.h / jps_atomic.h # SSE2/NEON 128 位 SIMD 与原子/内存序的平台抽象
+│   ├── JPS.Native.vcxproj       # Windows x64 便捷工程，输出 JPS.Native.dll
+│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK 构建脚本，输出 libjps.so（见「构建 Android 原生库」）
 │
 ├── JPS.Playground/              # ④ WinForms 演示界面（引用 Core/Data）
 │   ├── Controls/
@@ -500,11 +590,11 @@ JPS.slnx                         # 解决方案
     └── Accuracy.cs              # `[子目录] [每scen最多用例数]`：用 A* + 官方最优解校验 JPS/C native；每图 CPU/2 线程共享 JpsSystem 并行（兼测多线程安全）
 ```
 
-> **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity。**JPS.Native** 是跨平台 C native 核心，Windows 可用随仓库的 MSVC x64 工程，iOS/Android 可按平台编成 native plugin（iOS 静态库/framework，Android `.so`）。Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
+> **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity。**JPS.Native** 是跨平台 C native 核心，Windows 可用随仓库的 MSVC x64 工程，iOS/Android 可按平台编成 native plugin（iOS 静态库/framework，Android `.so`——Android 有现成的一键 NDK 脚本，见[构建 Android 原生库](#5-构建-android-原生库ndk)）。Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
 >
 > **并发**：[无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)**默认开启**（`JPS.Core` 已定义 `JPS_CONCURRENT_CACHE`），多个 `JpsPathfinder` 可共享同一 `JpsSystem` 并行寻路；移除该符号则退回单线程极速模式。
 
-### 2. 运行测试
+### 3. 运行测试
 
 运行完整正确性测试：
 
@@ -518,16 +608,19 @@ dotnet run -c Release --project JPS.Accuracy
 dotnet run -c Release --project JPS.Benchmark -- combo 1000
 ```
 
-常用缩小范围命令（`combo [q] [子目录|workers] [workers]`：第二参为数字时作 worker 线程数、否则作 `movingai/` 子目录；`workers` 默认约为逻辑核数的一半）：
+缩小范围的常用形式（`combo [q] [子目录|workers] [workers]`：第二参为数字时作 worker 线程数、否则作 `movingai/` 子目录；`workers` 默认约为逻辑核数的一半；Accuracy 参数为 `[子目录] [每 .scen 最多用例数]`）：
 
 ```powershell
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 
-dotnet run -c Release --project JPS.Accuracy
+dotnet run -c Release --project JPS.Benchmark -- combo 200 bg512-map   # 只测 bg512-map，每图 200 组随机
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 8          # 全量，8 个 map worker
+dotnet run -c Release --project JPS.Accuracy -- bg512-map 100          # 只验 bg512-map，每个 .scen 至多 100 条
 ```
+
+> 两者都会通过 P/Invoke 加载 `x64\Release\JPS.Native.dll` 以便同批对比 C 与 C#——请先用 `JPS.Native.vcxproj`（x64 / Release）构建 native 库。
 
 测试结果会写入 `accuracy-results/` 与 `benchmark-results/`，benchmark 主线程会按分发顺序持续输出结果，并每 50 行重打一遍表头。
 
-### 3. 运行 Playground
+### 4. 运行 Playground
 
 需要 .NET（Windows，WinForms）。
 
@@ -585,6 +678,22 @@ dotnet run --project JPS.Playground
 - 每只怪物缓存自己的路径，仅在以下情形才重新寻路：到达目标、下一步被阻挡/被预约、目标失效、或触发随机重寻概率。
 - 并行的怪物寻路共享同一份跳点缓存，并从可复用对象池租借 `JpsPathfinder` 实例；若某一帧需要的并发寻路器多于现有数量，池会自动扩容。
 - 怪物路径按各自颜色绘制。状态栏只统计**实际提交了寻路请求的帧**的平均寻路墙钟耗时，外加最近一次的请求数与累计失败数。
+
+### 5. 构建 Android 原生库（NDK）
+
+`JPS.Native` 的 Android 版用 CMake + Android NDK 构建，仓库提供一键脚本：
+
+```powershell
+cd JPS.Native
+.\ndkbuild.bat        # Windows；Linux/macOS 用 ./ndkbuild.sh
+```
+
+- **NDK 查找顺序**：`--ndk-path` 参数 → `ANDROID_NDK_HOME` 环境变量 → 仓库本地 `JPS.Native/ndk/<平台>/`；都没有时自动从 Google 下载 **NDK r27d** 解压到本地使用，零手工配置。
+- **默认目标**：只构建 `arm64-v8a`（min API 21，覆盖所有现代 64 位设备，Play Store 也要求 64 位）；需要 32 位 ARM 时加 `--abis "arm64-v8a;armeabi-v7a"`。
+- **产物**：`build-android-<平台>/<abi>/lib/<abi>/libjps.so`，可直接作为 Unity / Android 工程的 native plugin。
+- **跨平台一致性保证**（见 `CMakeLists.txt`）：`-ffp-contract=off -fno-fast-math` 禁止 FMA 融合与近似数学，使**平滑路径的浮点结果在 x86 / ARM 各 ABI 间逐位一致**（整数寻路本身与浮点无关）；`-fvisibility=hidden` 把 `.so` 的导出面收敛到公共 API（`jps_system_*` / `jps_pathfinder_*`），与 Windows DLL 的导出行为对齐。
+
+iOS / macOS / Linux 无需专用脚本：`JPS.Native` 是纯 C11、无外部依赖，把源码直接加入目标平台的构建（静态库 / framework / `.so`）即可。
 
 ---
 
@@ -818,72 +927,19 @@ Field references use a static `ref` method on the struct (`Dir4Byte.Slot`) plus 
 - A region scanned first by **any** thread is whitened once; afterward **all threads** hit it in O(1).
 - So across the whole parallel run, each strip's O(L) scan is **paid globally once**, not "once per thread". The more threads, the denser the queries, the more the paths overlap — the higher the reuse, and the **lower the average time per search**.
 
-In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter III](#iii-engineering-and-performance): C hot overall is still 1.44× faster than C# hot and 48.3× faster than A\*.)
+In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter III](#iii-engineering-and-performance): C hot overall is still 1.41× faster than C# hot and 45.1× faster than A\*.)
 
 > ⚠️ Prerequisite: **before** parallel pathfinding, a **single thread** must call `JpsSystem.Sync()` once (to fix the cache version), and the map **must not change** during parallel runs. To edit the map, join all pathfinding threads first, then Sync, then go parallel again.
 
-#### Usage
+> For concrete usage (mode switches, C# / C parallel calling patterns) see the "Multithreaded parallel pathfinding" part of [Usage Guide · API Usage](#1-api-usage).
 
-| Mode | How to enable | Use case |
-|---|---|---|
-| **Lock-free multithreading** (default) | `JPS.Core` already defines `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel; negligible cost on x86/x64 |
-| **Single-thread max speed** | remove the symbol | `Volatile` calls vanish (plain read/write), squeeze single-thread (esp. ARM) |
-
-Multithreading is **on by default** — the `<PropertyGroup>` of `JPS.Core/JPS.Core.csproj` already contains:
-
-```xml
-<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
-```
-
-Remove that line for single-thread max speed (virtually identical on x86, a small win on ARM).
-
-Parallel calling pattern:
-
-```csharp
-var system = new JpsSystem(map);
-system.Sync();                       // ① sync once on a single thread before going parallel
-
-Parallel.For(0, threads, _ =>
-{
-    var jps = new JpsPathfinder();   // ② one private pathfinder per thread
-    foreach (var (s, g) in queries)  //    sharing the same system (read / lazy-fill cache)
-        jps.FindPath(system, s, g);
-});                                  // ③ do not modify the map during parallel runs
-```
-
-The C native side uses the same pattern: one shared `jps_system` plus one private `jps_pathfinder` per worker thread.
-
-```c
-jps_system *system = jps_system_create(width, height);
-jps_system_set_blocked_buffer(system, blocked, width * height);  // row-major, 0=walkable, nonzero=blocked
-jps_system_sync(system);                                         // ① sync once on a single thread
-
-/* Run inside your thread pool / pthread / Unity native worker; do not edit the map while workers run. */
-void worker(const query *queries, int count, int *path_xy, int capacity_points)
-{
-    jps_pathfinder *pf = jps_pathfinder_create();                // ② one private pathfinder per thread
-
-    for (int i = 0; i < count; ++i) {
-        const query q = queries[i];                              // ③ sharing the same system (read / lazy-fill cache)
-        int n = jps_pathfinder_find_path(pf, system, q.sx, q.sy, q.gx, q.gy);
-        if (n > 0)
-            jps_pathfinder_copy_path(pf, path_xy, capacity_points);  // copies compact path; path_xy should also be thread-private
-    }
-
-    jps_pathfinder_destroy(pf);
-}
-
-/* Join all workers before calling set_blocked_batch / set_blocked_buffer + jps_system_sync again. */
-jps_system_destroy(system);
-```
-
-> **Correctness check:** with `JPS_CONCURRENT_CACHE` on, [`JPS.Accuracy`](#2-run-tests) runs each map's full `.scen` set across `CPU/2` threads sharing one `JpsSystem` by default. The latest result covers **1.423M** official real-world queries with 0 JPS-vs-A\* failures, 0 C-vs-C# path mismatches, and 0 cold-cache edit+restore mismatches, continuously re-checking shared-cache thread safety.
+> **Correctness check:** with `JPS_CONCURRENT_CACHE` on, [`JPS.Accuracy`](#3-run-tests) runs each map's full `.scen` set across `CPU/2` threads sharing one `JpsSystem` by default. The latest result covers **1.423M** official real-world queries with 0 JPS-vs-A\* failures, 0 C-vs-C# mismatches on either the compact or the smoothed path, and 0 mismatches across 94.7k sampled cold-cache edit+restore checks, continuously re-checking shared-cache thread safety.
 
 ### 5. C Native Optimization Layer
 
 `JPS.Native` is not a different algorithm. It is the cross-platform native performance implementation built **after the C# JPS semantics are locked down**: A\* remains the accuracy ground truth, C# JPS remains the base algorithm reference, and C native must match the C# compact path. Its job is to run the same no-corner-cutting JPS rules with lower fixed overhead, better locality, and fewer bounds branches, and it can be compiled for Windows/macOS/Linux/iOS/Android.
 
-At the source level it exposes a narrow C11-style API with opaque handles. On mobile, it can be integrated as the platform-appropriate native artifact: typically a static library or framework on iOS, and a `.so` on Android, called from Unity/managed code through the platform's native plugin / P/Invoke entry points. The included `JPS.Native.vcxproj` is the convenient Windows x64 project used for the README benchmark; it is not a platform limit of the native source.
+At the source level it exposes a narrow C11-style API with opaque handles. On mobile, it can be integrated as the platform-appropriate native artifact: typically a static library or framework on iOS, and a `.so` on Android, called from Unity/managed code through the platform's native plugin / P/Invoke entry points. The included `JPS.Native.vcxproj` is the convenient Windows x64 project used for the README benchmark; the Android build ships as `CMakeLists.txt` + `ndkbuild.bat` / `ndkbuild.sh`, producing `libjps.so` in one command (see [Build the Android Native Library](#5-build-the-android-native-library-ndk)). Neither limits the target platforms of the native source.
 
 The structure mirrors C#:
 
@@ -940,7 +996,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 ### 2. Performance (latest measured)
 
-Performance and correctness now have separate roles: **A\*** primarily proves optimality and is no longer the performance target; **C# JPS** is the portable reference for the base JPS algorithm; **C JPS** is the native optimization target. The latest run is `benchmark-results/combo-all-q1000-t6-20260704-104152.txt`, measured with the Windows x64 / MSVC native build on **AMD Ryzen 7 5800X3D** (16 logical cores, 6 map workers), .NET 10, `corner-cutting=off`, `concurrent-cache=on`, across all 7 MovingAI map sets (**562 maps**). The same `JPS.Native` source can also be built for iOS/Android; absolute mobile timings should be measured on the target device.
+Performance and correctness now have separate roles: **A\*** primarily proves optimality and is no longer the performance target; **C# JPS** is the portable reference for the base JPS algorithm; **C JPS** is the native optimization target. The latest run is `benchmark-results/combo-all-q1000-t6-20260705-034636.txt`, measured with the Windows x64 / MSVC native build on **AMD Ryzen 7 5800X3D** (16 logical cores, 6 map workers), .NET 10, `corner-cutting=off`, `concurrent-cache=on`, across all 7 MovingAI map sets (**562 maps**). The same `JPS.Native` source can also be built for iOS/Android; absolute mobile timings should be measured on the target device.
 
 Two regimes are measured: **rand** uses 1000 random solvable start/goal pairs per map (**562k pairs**); **scen** uses the deduplicated official `.scen` workload (**1.415M pairs**), which is usually longer and closer to real benchmark queries.
 
@@ -948,26 +1004,26 @@ Weighted average time per query:
 
 | Scope | pairs | A\*/JPS nodes | C# cold | C cold | C# hot | C hot | A\*/C cold | A\*/C hot | C#/C cold | C#/C hot |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| rand | 562,000 | 55.6× | 73.62 us | 28.54 us | 22.71 us | 14.47 us | 29.1× | 57.4× | 2.58× | 1.57× |
-| scen | 1,414,808 | 40.6× | 127.35 us | 63.98 us | 61.58 us | 43.30 us | 31.9× | 47.1× | 1.99× | 1.42× |
-| overall | 1,976,808 | 42.1× | 112.08 us | 53.90 us | 50.53 us | 35.10 us | 31.5× | 48.3× | 2.08× | 1.44× |
+| rand | 562,000 | 55.6× | 85.35 us | 33.98 us | 27.77 us | 18.42 us | 28.1× | 51.8× | 2.51× | 1.51× |
+| scen | 1,414,808 | 40.6× | 151.71 us | 75.20 us | 73.49 us | 52.55 us | 30.8× | 44.1× | 2.02× | 1.40× |
+| overall | 1,976,808 | 42.1× | 132.84 us | 63.48 us | 60.49 us | 42.84 us | 30.4× | 45.1× | 2.09× | 1.41× |
 
 Total wall time:
 
 | Regime | A\* | C# cold / hot | C cold / hot |
 |---|---:|---:|---:|
-| rand | 466.7 s | 41.4 s / 12.8 s | 16.0 s / 8.1 s |
-| scen | 2884.8 s | 180.2 s / 87.1 s | 90.5 s / 61.3 s |
+| rand | 536.4 s | 48.0 s / 15.6 s | 19.1 s / 10.4 s |
+| scen | 3279.9 s | 214.6 s / 104.0 s | 106.4 s / 74.3 s |
 
 Interpretation:
 
 - **The algorithmic win is stable:** overall, A\* expands `16,383` nodes per query on average, while JPS expands `389`, a **42.1×** node-count reduction. This is the hardware-independent core win.
-- **The C native role is justified:** C is **2.08×** faster than C# on the cold path and **1.44×** faster hot. The cold path benefits more, showing that guard bands, row/column dirty sync, SIMD bitmap scan, SoA write-back, and retained buffers mainly pay off when edits invalidate cache and force rescans.
-- **A\* is a good accuracy baseline, not the performance target:** C hot is **48.3×** faster than A\* overall, and C cold is still **31.5×** faster. A\*'s simplicity makes it ideal for validation, but expanded-node count dominates on large maps.
+- **The C native role is justified:** C is **2.09×** faster than C# on the cold path and **1.41×** faster hot. The cold path benefits more, showing that guard bands, row/column dirty sync, SIMD bitmap scan, SoA write-back, and retained buffers mainly pay off when edits invalidate cache and force rescans.
+- **A\* is a good accuracy baseline, not the performance target:** C hot is **45.1×** faster than A\* overall, and C cold is still **30.4×** faster. A\*'s simplicity makes it ideal for validation, but expanded-node count dominates on large maps.
 - **Map shape sets the ceiling:** open large maps such as `bg512-map` and `wc3maps512-map` can exceed **100×** A\*/C hot speedup; small maps, short paths, or random scatter have higher fixed-overhead share, so the ratio narrows.
 - **The ordered benchmark is a concurrent throughput test:** work is grouped by map, results stream back to the main thread, and rows are printed in dispatch order with the header repeated every 50 rows. If an early map is slow, later completed rows wait until their turn before printing.
 
-The accuracy baseline is `accuracy-results/scen-all-20260704-052224.txt`: **1,423,038** valid non-trivial cases; JPS vs A\* failures `0`, illegal paths `0`, C vs C# path mismatches `0`, cold-cache edit+restore mismatches `0`. Only `1` case differs from the official reference length by a tiny amount (0.0315 cell), while A\* / C# JPS / C JPS agree internally, so it does not affect the native performance conclusion.
+The accuracy baseline is `accuracy-results/scen-all-20260704-224247.txt`: **1,423,038** valid non-trivial cases; JPS vs A\* failures `0`, illegal paths `0`, C vs C# mismatches on compact or smoothed paths `0`, cold-cache edit+restore mismatches `0` across 94,706 sampled cases. Only `1` case differs from the official reference length by a tiny amount (0.0315 cell), while A\* / C# JPS / C JPS agree internally, so it does not affect the native performance conclusion.
 
 Reproduce:
 
@@ -978,7 +1034,141 @@ dotnet run -c Release --project JPS.Accuracy
 
 ## IV. Usage Guide
 
-### 1. Project Structure
+### 1. API Usage
+
+There are only two core objects: **`JpsSystem`** (map + shared jump cache, held long-term) and **`JpsPathfinder`** (search state, thread-private, reused across queries). The typical lifecycle is: **build map → `Sync` → path repeatedly → edit obstacles → `Sync` → keep pathing**. The C# and C APIs correspond one-to-one.
+
+#### C# API
+
+```csharp
+using JPS.Models;        // GridMap
+using JPS.Pathfinding;   // JpsSystem / JpsPathfinder / PathResult
+using JPS.Data;          // MovingAiMap (optional, MovingAI .map parser)
+
+// ── Map loading ──
+var map = new GridMap(64, 64);
+map.SetBlocked(10, 10, true);                  // set obstacles cell by cell
+// or load a MovingAI benchmark map directly:
+// GridMap map = MovingAiMap.Parse(File.ReadAllText("movingai/bg512-map/AR0011SR.map"));
+
+var system = new JpsSystem(map);               // map + lazy jump-point cache
+system.Sync();                                 // sync the cache once after building/editing the map
+
+// ── Pathfinding ──
+var jps = new JpsPathfinder();                 // reusable across queries; one per thread
+PathResult r = jps.FindPath(system, (2, 3), (60, 55));
+if (r.Success)
+{
+    var compact  = r.Path;           // integer cell coords: start + jump/turn points + goal
+    var smoothed = r.SmoothedPath;   // smoothed path in continuous coords (cell center = cx+0.5)
+    int expanded = r.ExpandedNodes;  // nodes expanded by this query
+}
+
+// ── Dynamic obstacles: invalidate only what changed, never rebuild ──
+map.SetBlocked(30, 30, true);                  // add/remove any obstacle
+map.SetBlocked(10, 10, false);
+system.Sync();                                 // sync again (O(W+H) generation bump, not a rebuild)
+
+r = jps.FindPath(system, (2, 3), (60, 55));    // keep pathing: all unaffected cache entries are reused
+```
+
+#### C API
+
+Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libjps.so`.
+
+```c
+#include "jps.h"
+
+/* ── Map loading ── */
+jps_system *s = jps_system_create(64, 64);
+uint8_t cells[64 * 64] = {0};                    /* row-major, 0=walkable, nonzero=blocked */
+cells[10 * 64 + 10] = 1;
+jps_system_set_blocked_buffer(s, cells, 64 * 64);/* load the whole map at once (per-cell: jps_system_set_blocked) */
+jps_system_sync(s);                              /* sync the cache once after building/editing the map */
+
+/* ── Pathfinding ── */
+jps_pathfinder *pf = jps_pathfinder_create();    /* reusable across queries; one per thread */
+int n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* >=0 = compact path point count; negatives are JPS_ERR_ */
+if (n > 0) {
+    int xy[256 * 2];                             /* interleaved x0,y0,x1,y1,... */
+    jps_pathfinder_copy_path(pf, xy, 256);       /* compact path */
+
+    int sn = jps_pathfinder_smoothed_path_count(pf);
+    float sxy[256 * 2];                          /* the smoothed path is computed inside find_path; this only copies */
+    jps_pathfinder_copy_smoothed_path(pf, sxy, sn < 256 ? sn : 256);
+}
+
+/* ── Dynamic obstacles: submit sparse edits in one batch ── */
+int edits[] = { 30, 30, 1,   10, 10, 0 };        /* (x, y, blocked) triplets */
+jps_system_set_blocked_batch(s, edits, 2);
+jps_system_sync(s);
+
+n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* keep pathing */
+
+jps_pathfinder_destroy(pf);
+jps_system_destroy(s);
+```
+
+#### Multithreaded parallel pathfinding
+
+For the design rationale see [chapter II · Lock-Free Multithreading](#4-lock-free-multithreading). Two modes:
+
+| Mode | How to enable | Use case |
+|---|---|---|
+| **Lock-free multithreading** (default) | `JPS.Core` already defines `JPS_CONCURRENT_CACHE` | multiple threads sharing one `JpsSystem` in parallel; negligible cost on x86/x64 |
+| **Single-thread max speed** | remove the symbol | `Volatile` calls vanish (plain read/write), squeeze single-thread (esp. ARM) |
+
+Multithreading is **on by default** — the `<PropertyGroup>` of `JPS.Core/JPS.Core.csproj` already contains:
+
+```xml
+<DefineConstants>$(DefineConstants);JPS_CONCURRENT_CACHE</DefineConstants>
+```
+
+Remove that line for single-thread max speed (virtually identical on x86, a small win on ARM).
+
+Parallel calling pattern:
+
+```csharp
+var system = new JpsSystem(map);
+system.Sync();                       // ① sync once on a single thread before going parallel
+
+Parallel.For(0, threads, _ =>
+{
+    var jps = new JpsPathfinder();   // ② one private pathfinder per thread
+    foreach (var (s, g) in queries)  //    sharing the same system (read / lazy-fill cache)
+        jps.FindPath(system, s, g);
+});                                  // ③ do not modify the map during parallel runs
+```
+
+The C native side uses the same pattern: one shared `jps_system` plus one private `jps_pathfinder` per worker thread.
+
+```c
+jps_system *system = jps_system_create(width, height);
+jps_system_set_blocked_buffer(system, blocked, width * height);  // row-major, 0=walkable, nonzero=blocked
+jps_system_sync(system);                                         // ① sync once on a single thread
+
+/* Run inside your thread pool / pthread / Unity native worker; do not edit the map while workers run. */
+void worker(const query *queries, int count, int *path_xy, int capacity_points)
+{
+    jps_pathfinder *pf = jps_pathfinder_create();                // ② one private pathfinder per thread
+
+    for (int i = 0; i < count; ++i) {
+        const query q = queries[i];                              // ③ sharing the same system (read / lazy-fill cache)
+        int n = jps_pathfinder_find_path(pf, system, q.sx, q.sy, q.gx, q.gy);
+        if (n > 0)
+            jps_pathfinder_copy_path(pf, path_xy, capacity_points);  // copies compact path; path_xy should also be thread-private
+    }
+
+    jps_pathfinder_destroy(pf);
+}
+
+/* Join all workers before calling set_blocked_batch / set_blocked_buffer + jps_system_sync again. */
+jps_system_destroy(system);
+```
+
+> ⚠️ The three parallel rules (matching comments ①②③): `Sync` once on a **single thread** before going parallel; each thread uses **its own** pathfinder; **never edit the map** during parallel runs — to edit, join all pathfinding threads first, then `Sync`, then go parallel again.
+
+### 2. Project Structure
 
 The `JPS.slnx` solution splits into **six clearly-scoped projects**:
 
@@ -1013,13 +1203,17 @@ JPS.slnx                         # solution
 │   └── MovingAiMap.cs           # MovingAI .map benchmark parser (octile → GridMap)
 │
 ├── JPS.Native/                  # ③ high-performance C native implementation (C11; Windows/macOS/Linux/iOS/Android)
+│   ├── jps.h / jps_export.h     # public C API (opaque handles) and cross-platform export macros
 │   ├── system.c/.h              # native JPS system: grid map + jump cache + pathfinder lifetime
 │   ├── grid_map.c/.h            # guard-banded bitmap, row/column acceleration structures, blocked-buffer sync
 │   ├── jump_point_cache.c/.h    # per-direction SoA jump cache, SIMD scan/write-back, dirty row/column sync
 │   ├── pathfinder.c/.h          # native JPS search, retained search buffers, path reconstruction
+│   ├── smoother.c/.h            # C port of path smoothing (supercover LOS + forward-incremental pulling, point-identical to C#)
 │   ├── min_heap.c/.h            # hole-sift binary min-heap
-│   ├── rules.h                  # no-corner-cutting jump-point / forced-neighbor rules
-│   └── JPS.Native.vcxproj       # Windows x64 convenience project, outputs JPS.Native.dll; mobile builds use platform static library/.so artifacts
+│   ├── rules.h / directions.h   # no-corner-cutting jump-point / forced-neighbor rules; directions and integer costs
+│   ├── jps_simd.h / jps_atomic.h # platform abstraction for SSE2/NEON 128-bit SIMD and atomics/memory order
+│   ├── JPS.Native.vcxproj       # Windows x64 convenience project, outputs JPS.Native.dll
+│   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK build scripts, output libjps.so (see "Build the Android Native Library")
 │
 ├── JPS.Playground/              # ④ WinForms demo UI (references Core/Data)
 │   ├── Controls/
@@ -1037,11 +1231,11 @@ JPS.slnx                         # solution
     └── Accuracy.cs              # `[subdir] [maxPerScen]`: validate JPS/C native with A* + official optima; per map, CPU/2 threads share one JpsSystem in parallel (also a thread-safety test)
 ```
 
-> **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale. **JPS.Native** is a cross-platform C native core: Windows can use the bundled MSVC x64 project, while iOS/Android can build it as native plugins (iOS static library/framework, Android `.so`). Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
+> **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale. **JPS.Native** is a cross-platform C native core: Windows can use the bundled MSVC x64 project, while iOS/Android can build it as native plugins (iOS static library/framework, Android `.so` — Android has ready-made one-command NDK scripts, see [Build the Android Native Library](#5-build-the-android-native-library-ndk)). Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
 >
 > **Concurrency:** [lock-free multithreading](#4-lock-free-multithreading) is **on by default** (`JPS.Core` defines `JPS_CONCURRENT_CACHE`), so multiple `JpsPathfinder`s can share one `JpsSystem` in parallel; remove the symbol to fall back to single-thread max-speed mode.
 
-### 2. Run Tests
+### 3. Run Tests
 
 Run the full correctness test:
 
@@ -1055,16 +1249,19 @@ Run the full performance benchmark (random sampling + official `.scen` combined,
 dotnet run -c Release --project JPS.Benchmark -- combo 1000
 ```
 
-Common narrowing commands (`combo [q] [subdir|workers] [workers]`: a numeric 2nd arg is the worker-thread count, otherwise a `movingai/` subdirectory; `workers` defaults to roughly half the logical cores):
+Common narrowed forms (`combo [q] [subdir|workers] [workers]`: a numeric 2nd arg is the worker-thread count, otherwise a `movingai/` subdirectory; `workers` defaults to roughly half the logical cores; Accuracy takes `[subdir] [max cases per .scen]`):
 
 ```powershell
-dotnet run -c Release --project JPS.Benchmark -- combo 1000 
-dotnet run -c Release --project JPS.Accuracy
+dotnet run -c Release --project JPS.Benchmark -- combo 200 bg512-map   # bg512-map only, 200 random pairs per map
+dotnet run -c Release --project JPS.Benchmark -- combo 1000 8          # full run with 8 map workers
+dotnet run -c Release --project JPS.Accuracy -- bg512-map 100          # bg512-map only, at most 100 cases per .scen
 ```
+
+> Both load `x64\Release\JPS.Native.dll` via P/Invoke to compare C against C# on the same cases — build the native library first with `JPS.Native.vcxproj` (x64 / Release).
 
 Results are written to `accuracy-results/` and `benchmark-results/`; the benchmark's main thread streams rows in dispatch order and reprints the header every 50 rows.
 
-### 3. Run Playground
+### 4. Run Playground
 
 Requires .NET (Windows, WinForms).
 
@@ -1120,6 +1317,22 @@ These dots make the "lazy jump table" process obvious: after a single-cell obsta
 - Each monster keeps its cached path and only re-paths when it reaches the target, the next step becomes blocked/reserved, the target becomes invalid, or the random re-path chance fires.
 - Parallel monster pathfinding shares the same jump cache and rents `JpsPathfinder` instances from a reusable pool; the pool grows if one frame needs more concurrent finders than are currently available.
 - Monster paths are drawn in per-monster colors. The status bar reports average pathfinding wall time only across frames that actually submitted path requests, plus the latest request count and accumulated failure count.
+
+### 5. Build the Android Native Library (NDK)
+
+The Android build of `JPS.Native` uses CMake + the Android NDK; the repo ships one-command scripts:
+
+```powershell
+cd JPS.Native
+.\ndkbuild.bat        # Windows; use ./ndkbuild.sh on Linux/macOS
+```
+
+- **NDK lookup order:** the `--ndk-path` argument → the `ANDROID_NDK_HOME` environment variable → a repo-local copy under `JPS.Native/ndk/<platform>/`. If none is found, the script downloads **NDK r27d** from Google and extracts it locally — zero manual setup.
+- **Default target:** `arm64-v8a` only (min API 21, covering all modern 64-bit devices; the Play Store requires 64-bit). Add 32-bit ARM with `--abis "arm64-v8a;armeabi-v7a"`.
+- **Output:** `build-android-<platform>/<abi>/lib/<abi>/libjps.so`, ready to use as a native plugin in Unity / Android projects.
+- **Cross-platform consistency guarantees** (see `CMakeLists.txt`): `-ffp-contract=off -fno-fast-math` disables FMA fusion and approximate math so **the smoothed path's float results are bit-identical across x86 / ARM ABIs** (integer pathfinding itself involves no floats); `-fvisibility=hidden` trims the `.so` export surface to the public API (`jps_system_*` / `jps_pathfinder_*`), matching the Windows DLL's export behavior.
+
+iOS / macOS / Linux need no dedicated script: `JPS.Native` is pure C11 with no external dependencies — add the sources directly to the target platform's build (static library / framework / `.so`).
 
 ## License
 
