@@ -1,4 +1,4 @@
-/*
+﻿/*
  * jps.h
  * JPS Pathfinding — 唯一对外发布的公共头（供 C / C++ / C# P/Invoke 调用）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.

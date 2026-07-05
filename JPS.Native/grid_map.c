@@ -245,7 +245,7 @@ void jps_grid_map_set_blocked(jps_grid_map *m, int x, int y, bool blocked)
 void jps_grid_map_set_blocked_buffer(jps_grid_map *m, const uint8_t *cells, int count)
 {
     int row_data_words, col_data_words;
-    int x, y, word, bit;
+    int y, word, bit;
     bool changed = false;
 
     if (m == NULL || cells == NULL || count != m->width * m->height)
