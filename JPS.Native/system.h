@@ -8,7 +8,6 @@
 #define JPS_SYSTEM_H
 
 #include <stdint.h>
-#include "jps_export.h"
 #include "grid_map.h"
 #include "jump_point_cache.h"
 
@@ -37,50 +36,12 @@ typedef struct jps_system
     jps_jump_point_cache *cache;   /* 拥有，destroy 时释放 */
 } jps_system;
 
-/*
- * 创建一张 width×height 的空地图（全部可走）及其跳点缓存。
- * 尺寸必须为正且边长 ≤ 32767；非法尺寸或内存不足返回 NULL。
- */
-JPS_API jps_system *JPS_CALL jps_system_create(int width, int height);
-
-/* 销毁 system，释放其地图与缓存。传 NULL 安全无操作。 */
-JPS_API void JPS_CALL jps_system_destroy(jps_system *s);
-
-JPS_API int JPS_CALL jps_system_width(const jps_system *s);
-JPS_API int JPS_CALL jps_system_height(const jps_system *s);
-
-/* 当前 system 保留的 native 内存字节数估算：system 本体 + 地图 + 共享跳点缓存。NULL 返回 0。 */
-JPS_API uint64_t JPS_CALL jps_system_memory_bytes(const jps_system *s);
-
-/* ---- 阻挡编辑（改动后需 jps_system_sync 才会令缓存失效生效） ---- */
-
-/* 设置/清除单格阻挡（blocked 非 0 = 阻挡）。越界忽略。 */
-JPS_API void JPS_CALL jps_system_set_blocked(jps_system *s, int x, int y, int blocked);
-
-/* 查询单格是否阻挡：1=阻挡，0=可走（越界视为阻挡，返回 1）。 */
-JPS_API int JPS_CALL jps_system_is_blocked(const jps_system *s, int x, int y);
-
-/* 清空全部阻挡（整图复位为可走）。 */
-JPS_API void JPS_CALL jps_system_clear_all(jps_system *s);
-
-/*
- * 批量载入阻挡：cells 为行主序（长度 = width*height）的字节数组，0=可走、非 0=阻挡。
- * count 须等于 width*height，否则忽略。适合一次性刷整张阻挡图。
- */
-JPS_API void JPS_CALL jps_system_set_blocked_buffer(jps_system *s, const uint8_t *cells, int count);
-
-/*
- * 批量应用稀疏阻挡增量：xyv 为 (x, y, blocked) 三元组连续排布，长度 = edit_count*3。
- * 一次调用应用全部改动（每格等价 jps_system_set_blocked），越界项忽略。
- * 相比逐格 set_blocked，跨 ABI 只需一次调用——适合动态地图每帧只改一小簇格子的场景。
- */
-JPS_API void JPS_CALL jps_system_set_blocked_batch(jps_system *s, const int *xyv, int edit_count);
-
-/*
- * 把缓存同步到当前地图：按地图版本号同步受影响的行/列。
- * 寻路前调用；尤其在改动阻挡之后、find_path 之前必须调用一次。
- */
-JPS_API void JPS_CALL jps_system_sync(jps_system *s);
+ /* 整数格坐标（内部搜索与路径重建用；亦供 smoother）。非公共 ABI。 */
+typedef struct jps_point
+{
+    int x;
+    int y;
+} jps_point;
 
 #ifdef __cplusplus
 }

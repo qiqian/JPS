@@ -9,7 +9,6 @@
 
 #include <stdbool.h>
 #include "grid_map.h"
-#include "pathfinder.h"
 
 /* 连续格坐标点（格中心 = cx+0.5），仅用于显示，不参与整数寻路。 */
 typedef struct jps_point_f
@@ -17,6 +16,7 @@ typedef struct jps_point_f
     float x;
     float y;
 } jps_point_f;
+typedef struct jps_point jps_point;
 
 /*
  * 超覆盖(supercover)直线视线检测：整数增量遍历线段经过的每一格，全部可走才算通视。

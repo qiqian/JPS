@@ -5,7 +5,9 @@
  */
 
 #include <stdlib.h>
+#include "jps.h"                 /* jps_system 前向声明 + 公共函数原型 */
 #include "system.h"
+
 
 static uint64_t jps__grid_map_memory_bytes(const jps_grid_map *m)
 {

@@ -92,16 +92,13 @@
     <ClCompile Include="system.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="build_info.h" />
     <ClInclude Include="directions.h" />
     <ClInclude Include="grid_map.h" />
     <ClInclude Include="jps.h" />
     <ClInclude Include="jps_atomic.h" />
-    <ClInclude Include="jps_export.h" />
     <ClInclude Include="jps_simd.h" />
     <ClInclude Include="jump_point_cache.h" />
     <ClInclude Include="min_heap.h" />
-    <ClInclude Include="pathfinder.h" />
     <ClInclude Include="rules.h" />
     <ClInclude Include="smoother.h" />
     <ClInclude Include="system.h" />

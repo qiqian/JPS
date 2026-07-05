@@ -6,11 +6,12 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "pathfinder.h"
+#include "jps.h"
 #include "smoother.h"
 #include "min_heap.h"
 #include "directions.h"
 #include "rules.h"
+#include "system.h"
 
 _Static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
 
@@ -31,6 +32,7 @@ typedef struct
 } jps__jump_entry;
 
 static const jps__jump_entry JPS__JUMP_NONE = { false, 0, 0, 0 };
+
 
 /*
  * 寻路结果（纯内部状态，不进公共头）：path 是 compact path 动态数组，
@@ -114,6 +116,7 @@ struct jps_pathfinder
     int smoothed_capacity;
     bool smoothed_valid;              /* 本次寻路结果的平滑是否已算 */
 };
+typedef struct jps_pathfinder jps_pathfinder;
 
 static void jps__ensure_smoothed(jps_pathfinder *pf);
 

@@ -35,9 +35,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="build_info.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="directions.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -45,9 +42,6 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="jps.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="jps_export.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="jps_atomic.h">
@@ -60,9 +54,6 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="min_heap.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="pathfinder.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="rules.h">

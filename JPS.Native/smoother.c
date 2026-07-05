@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include "smoother.h"
 #include "directions.h"
+#include "system.h"
 
 static bool jps__bit_range_walkable(const uint64_t *line, int a, int b)
 {
