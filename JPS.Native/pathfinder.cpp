@@ -38,7 +38,6 @@ typedef struct
     jps_point *path;
     int path_count;
     int path_capacity;
-    int expanded_nodes;
 } jps_path_result;
 
 /*
@@ -159,15 +158,11 @@ struct jps_pathfinder
     int rebuild_nodes_capacity;
 
     /* 平滑路径缓存：find_path 成功后复用 g_dir 内存窗口，copy_smoothed_path 直接拷。 */
-    const jps_grid_map *smooth_map;   /* 寻路所用地图，供平滑 LOS 使用 */
     jps_point_f *smoothed;            /* g_dir 的别名，不拥有内存；搜索结束后才可覆盖 */
     int smoothed_count;
     int smoothed_capacity;
-    bool smoothed_valid;              /* 本次寻路结果的平滑是否已算 */
 };
 typedef struct jps_pathfinder jps_pathfinder;
-
-static void jps__ensure_smoothed(jps_pathfinder *pf);
 
 /* ---------------- PathResult（内部） ---------------- */
 
@@ -177,7 +172,6 @@ static void jps__result_init(jps_path_result *r)
     r->path = NULL;
     r->path_count = 0;
     r->path_capacity = 0;
-    r->expanded_nodes = 0;
 }
 
 static void jps__result_free(jps_path_result *r)
@@ -192,7 +186,6 @@ static void jps__result_reset(jps_path_result *r)
 {
     r->success = false;
     r->path_count = 0;
-    r->expanded_nodes = 0;
 }
 
 static void jps__ensure_path_capacity(jps_path_result *r, int count)
@@ -224,11 +217,9 @@ jps_pathfinder *jps_pathfinder_create(void)
     jps__result_init(&pf->result);
     pf->rebuild_nodes = NULL;
     pf->rebuild_nodes_capacity = 0;
-    pf->smooth_map = NULL;
     pf->smoothed = NULL;
     pf->smoothed_count = 0;
     pf->smoothed_capacity = 0;
-    pf->smoothed_valid = false;
     return pf;
 }
 
@@ -280,7 +271,6 @@ static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
     pf->smoothed = NULL;
     pf->smoothed_count = 0;
     pf->smoothed_capacity = 0;
-    pf->smoothed_valid = false;
     pf->g_dir = (uint64_t *)malloc((size_t)pf->size * sizeof(uint64_t));
     /* mark 必须清零（calloc），使纪元标记方案（mark < 2·epoch 即未访问）对新缓冲成立；
      * g_dir 仅在本纪元 mark 命中后才被读取，无需清零。 */
@@ -348,7 +338,8 @@ static bool jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 /* ---------------- 对角：经典逐格扫描，复用正交 memo ---------------- */
 
 static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
-                               int x, int y, int dx, int dy, int horizontal_dir, int vertical_dir, int gx, int gy,
+                               const int x, const int y, const int dx, const int dy, 
+                               const int horizontal_dir, const int vertical_dir, const int gx, const int gy,
                                jps__jump_entry *out)
 {
     int cx = x, cy = y, steps = 0;
@@ -363,9 +354,16 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
     const int16_t *dist_v = c->dist + (size_t)vertical_dir * c->size;
     const uint8_t *gen_v  = c->gen  + (size_t)vertical_dir * c->size;
 
+    /* 下标随每步 cx+=dx / cy+=dy 线性变化，增量恒定：把乘法换成循环内加法递推。
+     * 初值取 (x,y) 处，进入循环体自增 dx/dy 后正好对应 (cx,cy)。 */
+    int idx_h = y * c->w + x;      /* E/W 平面：行主序 */
+    int idx_v = x * c->h + y;      /* S/N 平面：列主序 */
+    const int didx_h = dy * c->w + dx;
+    const int didx_v = dx * c->h + dy;
+
     for (;;)
     {
-        int hd, vd, idx_h, idx_v;
+        int hd, vd;
 
         /* 默认禁止斜穿角：斜走一步需目标格 + 两侧正交格都可走 */
         if (!jps_diagonal_allowed(m, cx, cy, dx, dy))
@@ -373,6 +371,8 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 
         cx += dx;
         cy += dy;
+        idx_h += didx_h;
+        idx_v += didx_v;
         steps++;
 
         if (cx == gx && cy == gy)
@@ -387,9 +387,6 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
             return true;
         }
 #endif
-
-        idx_h = cy * c->w + cx;   /* E/W 平面：行主序 */
-        idx_v = cx * c->h + cy;   /* S/N 平面：列主序 */
 
         /* 正交分量子检测：先内联快探 clean 命中，miss 才调完整版。短路顺序与 C# 一致。 */
         if (!jps_jump_probe(dist_h, gen_h, idx_h, c->row_gen[cy], &hd))
@@ -568,6 +565,16 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, in
     r->path_count = write;
 }
 
+/* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
+ * 搜索已经结束，g_dir 不再需要保留 g/parent dx/dy，可作为 smoothed path 输出缓冲复用。 */
+static void jps__ensure_smoothed(jps_pathfinder* pf, const jps_grid_map* map)
+{
+    pf->smoothed = (jps_point_f*)(void*)pf->g_dir;
+    pf->smoothed_capacity = pf->size;
+    pf->smoothed_count = jps__smooth_path_into(map, pf->result.path, pf->result.path_count,
+        pf->smoothed, pf->smoothed_capacity);
+}
+
 /* ---------------- 入口 ---------------- */
 
 int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
@@ -617,7 +624,7 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
         /* 出队为打包坐标：移位取 (x,y)，一次乘法还原线性索引（免 current%w / current/w 真除法）。 */
         cx = current & 0xFFFF;
         cy = current >> 16;
-        id = cy * pf->w + cx;
+        id = jps__id(pf, cx, cy);
 
         if (pf->mark[id] == closed_mark)
             continue;
@@ -625,16 +632,12 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
         pf->mark[id] = (uint16_t)closed_mark;
         cur_gd = pf->g_dir[id];   /* 一次 load 同取 g 与来向；已 closed，g 不再变 */
         cur_g = jps__gd_g(cur_gd);
-        expanded_count++;
 
         if (current == goal_packed)
         {
             jps__reconstruct_path(pf, sx, sy, gx, gy, out);
             out->success = true;
-            out->expanded_nodes = expanded_count;
-            pf->smooth_map = map;         /* 记住地图，供平滑 LOS 使用 */
-            pf->smoothed_valid = false;
-            jps__ensure_smoothed(pf);     /* benchmark 计时包含平滑；copy/count 只读缓存 */
+            jps__ensure_smoothed(pf, map);     /* benchmark 计时包含平滑；copy/count 只读缓存 */
             return out->path_count;
         }
 
@@ -682,7 +685,6 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
     }
 
     out->success = false;
-    out->expanded_nodes = expanded_count;
     return JPS_ERR_NO_PATH;
 }
 
@@ -712,25 +714,10 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
     return n;
 }
 
-/* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
- * 搜索已经结束，g_dir 不再需要保留 g/parent dx/dy，可作为 smoothed path 输出缓冲复用。 */
-static void jps__ensure_smoothed(jps_pathfinder *pf)
-{
-    if (pf->smoothed_valid)
-        return;
-
-    pf->smoothed = (jps_point_f *)(void *)pf->g_dir;
-    pf->smoothed_capacity = pf->size;
-    pf->smoothed_count = jps__smooth_path_into(pf->smooth_map, pf->result.path, pf->result.path_count,
-                                               pf->smoothed, pf->smoothed_capacity);
-    pf->smoothed_valid = true;
-}
-
 int jps_pathfinder_smoothed_path_count(jps_pathfinder *pf)
 {
     if (pf == NULL || !pf->result.success)
         return 0;
-    jps__ensure_smoothed(pf);   /* find_path 已算；保留兜底，已算则直接返回 */
     return pf->smoothed_count;
 }
 
@@ -740,8 +727,6 @@ int jps_pathfinder_copy_smoothed_path(jps_pathfinder *pf, float *out_xy, int cap
 
     if (pf == NULL || out_xy == NULL || !pf->result.success)
         return 0;
-
-    jps__ensure_smoothed(pf);   /* 平滑已在此算好并缓存——无二次计算、无需 system */
 
     n = pf->smoothed_count;
     if (n > pf->smoothed_capacity)
