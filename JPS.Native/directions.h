@@ -52,9 +52,25 @@ static inline bool jps_diagonal_allowed(const jps_grid_map *m, int x, int y, int
 #ifdef JPS_ALLOW_CORNER_CUTTING
     return jps_grid_map_is_walkable_g(m, x + dx, y + dy);
 #else
-    return jps_grid_map_is_walkable_g(m, x + dx, y + dy) &&
-           jps_grid_map_is_walkable_g(m, x + dx, y) &&
-           jps_grid_map_is_walkable_g(m, x, y + dy);
+    /* 三格须全可走：对角目标 (x+dx,y+dy)、水平邻 (x+dx,y)、垂直邻 (x,y+dy)。
+     * (x,y+dy) 与 (x+dx,y+dy) 同在行 y+dy、列差 1 → ~98% 落同一 64 位字：合并成一次 load 测两位；
+     * 仅当 x 处字边界(x&63==0 且 dx<0，或 ==63 且 dx>0)跨字时退化为分别取位。第三格在行 y，单独取位。
+     * 直接索引 m->blocked（与 jps__grid_map_get_bit 同式），越界经哨兵带兜底。 */
+    int nx = x + dx, ny = y + dy;
+    ptrdiff_t base_ny = (ptrdiff_t)ny * m->stride;
+    int wx = x >> 6, wnx = nx >> 6;
+    if (wx == wnx)
+    {
+        uint64_t two = (1ULL << (x & 63)) | (1ULL << (nx & 63));
+        if ((m->blocked[base_ny + wx] & two) != 0ULL)
+            return false;
+    }
+    else
+    {
+        if ((m->blocked[base_ny + wx]  & (1ULL << (x  & 63))) != 0ULL) return false;
+        if ((m->blocked[base_ny + wnx] & (1ULL << (nx & 63))) != 0ULL) return false;
+    }
+    return !jps__grid_map_get_bit(m, nx, y);
 #endif
 }
 

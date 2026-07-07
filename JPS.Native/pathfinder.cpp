@@ -73,8 +73,10 @@ static inline int jps__dir_decode(uint64_t code) { return (int)code - 1; }
 
 static inline bool jps__gd_has_parent(uint64_t gd)
 {
-    return (((gd >> JPS__DX_SHIFT) & 3ULL) != JPS__NO_DCODE) &&
-           (((gd >> JPS__DY_SHIFT)) != JPS__NO_DCODE);
+    /* 根哨兵把 dx/dy code 同置 3 → 高 4 位(bits 60..63)=0xF；非根两 code 均 ∈0..2，高 4 位必 ≠0xF
+     * （code==3 只由 root 打包产生，且必成对出现，故不存在"仅一个为 3"的中间态）。
+     * 于是一次比较即可判有无父，等价原 dx_code!=3 && dy_code!=3。 */
+    return (gd >> JPS__DX_SHIFT) != 0xFULL;
 }
 
 static inline int jps__gd_dx(uint64_t gd) { return jps__dir_decode((gd >> JPS__DX_SHIFT) & 3ULL); }
@@ -337,8 +339,13 @@ static bool jps__cardinal_jump(jps_pathfinder *pf, const jps_grid_map *m,
 
 /* ---------------- 对角：经典逐格扫描，复用正交 memo ---------------- */
 
-static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
-                               const int x, const int y, const int dx, const int dy, 
+/*
+ * CheckGoal=false 的实例把三处 goal 检查（直接命中 + 两条正交射线拦截）整段 if constexpr 掉，
+ * 供 goal 不在本对角扫掠楔形内时使用——每步省 ~3 次比较。楔形内用 CheckGoal=true 实例，与原逻辑逐位等价。
+ */
+template <bool CheckGoal>
+static bool jps__diagonal_jump_impl(jps_pathfinder *pf, const jps_grid_map *m,
+                               const int x, const int y, const int dx, const int dy,
                                const int horizontal_dir, const int vertical_dir, const int gx, const int gy,
                                jps__jump_entry *out)
 {
@@ -375,10 +382,13 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
         idx_v += didx_v;
         steps++;
 
-        if (cx == gx && cy == gy)
+        if constexpr (CheckGoal)
         {
-            out->x = cx; out->y = cy; out->steps = steps;
-            return true;
+            if (cx == gx && cy == gy)
+            {
+                out->x = cx; out->y = cy; out->steps = steps;
+                return true;
+            }
         }
 #ifdef JPS_ALLOW_CORNER_CUTTING
         if (jps_has_diagonal_forced_neighbor(m, cx, cy, dx, dy))
@@ -392,15 +402,36 @@ static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
         if (!jps_jump_probe(dist_h, gen_h, idx_h, c->row_gen[cy], &hd))
             hd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, dx, 0, horizontal_dir);
         if (hd > 0) { out->x = cx; out->y = cy; out->steps = steps; return true; }
-        if (cy == gy && jps_sign(gx - cx) == dx && abs(gx - cx) <= -hd)
-        { out->x = cx; out->y = cy; out->steps = steps; return true; }
+        if constexpr (CheckGoal)
+        {
+            if (cy == gy && jps_sign(gx - cx) == dx && abs(gx - cx) <= -hd)
+            { out->x = cx; out->y = cy; out->steps = steps; return true; }
+        }
 
         if (!jps_jump_probe(dist_v, gen_v, idx_v, c->col_gen[cx], &vd))
             vd = jps_jump_point_cache_cardinal_dist(pf->cache, m, cx, cy, 0, dy, vertical_dir);
         if (vd > 0) { out->x = cx; out->y = cy; out->steps = steps; return true; }
-        if (cx == gx && jps_sign(gy - cy) == dy && abs(gy - cy) <= -vd)
-        { out->x = cx; out->y = cy; out->steps = steps; return true; }
+        if constexpr (CheckGoal)
+        {
+            if (cx == gx && jps_sign(gy - cy) == dy && abs(gy - cy) <= -vd)
+            { out->x = cx; out->y = cy; out->steps = steps; return true; }
+        }
     }
+}
+
+/*
+ * 对角跳跃分派：目标在本对角扫掠楔形内（gx 在 dx 侧 且 gy 在 dy 侧）才可能触发 goal 检查——
+ * 只有此时 cx 能达 gx、cy 能达 gy。否则三处 goal 检查恒不触发，走无检查实例。
+ * 判定每次跳跃只算一次（非每步），开销可忽略。
+ */
+static bool jps__diagonal_jump(jps_pathfinder *pf, const jps_grid_map *m,
+                               const int x, const int y, const int dx, const int dy,
+                               const int horizontal_dir, const int vertical_dir, const int gx, const int gy,
+                               jps__jump_entry *out)
+{
+    if (jps_sign(gx - x) == dx && jps_sign(gy - y) == dy)
+        return jps__diagonal_jump_impl<true>(pf, m, x, y, dx, dy, horizontal_dir, vertical_dir, gx, gy, out);
+    return jps__diagonal_jump_impl<false>(pf, m, x, y, dx, dy, horizontal_dir, vertical_dir, gx, gy, out);
 }
 
 /* ---------------- 方向剪枝（写入 dir_buf，返回数量） ---------------- */
