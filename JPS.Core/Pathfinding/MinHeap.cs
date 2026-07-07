@@ -9,9 +9,10 @@ using System;
 namespace JPS.Pathfinding
 {
     /// <summary>
-    /// 二叉最小堆：元素为 int（节点 id），优先级为 long（f 值）。
+    /// 四叉（4-ary）最小堆：元素为 int（节点 id），优先级为 long（f 值）。
     /// 用来替代 .NET 6+ 的 <c>PriorityQueue&lt;TElement,TPriority&gt;</c>，以兼容 Unity 2022 / netstandard2.1。
-    /// 行为与性能与之等价（同为二叉堆，O(log n) 入队/出队）。
+    /// 四叉树高 ≈ log4(n)（比二叉减半），四个孩子在数组内连续、cache 局部性更好。
+    /// 与 C 版 min_heap.c 严格一致（同 d=4、同 sift 逻辑），保证 C≡C# 出队顺序逐位相同。
     /// </summary>
     public sealed class MinHeap
     {
@@ -36,9 +37,10 @@ namespace JPS.Pathfinding
                 Grow();
 
             int i = _count++;
+            // hole sift-up（4-ary）：parent(i) = (i-1)/4，层数比二叉减半。
             while (i > 0)
             {
-                int parent = (i - 1) >> 1;
+                int parent = (i - 1) >> 2;
                 if (_prio[parent] <= priority)
                     break;
 
@@ -72,19 +74,28 @@ namespace JPS.Pathfinding
 
         private void SiftDown(int i, int element, long priority)
         {
+            // 四叉 sift-down：四个孩子 4i+1..4i+4 在数组内连续，每层顺序扫出最小孩子。
+            // 层数减半，代价是每层最多 3 次孩子间比较。挑选顺序与 C 版 min_heap.c 逐位一致。
             while (true)
             {
-                int l = (i << 1) + 1;
-                int r = l + 1;
-                int child;
-
-                if (l >= _count)
+                int baseChild = (i << 2) + 1;   // 第一个孩子 = 4i+1
+                if (baseChild >= _count)
                     break;
 
-                child = l;
-                if (r < _count && _prio[r] < _prio[l])
-                    child = r;
-                if (_prio[child] >= priority)
+                int child = baseChild;
+                long best = _prio[baseChild];
+                int limit = baseChild + 4;
+                if (limit > _count)
+                    limit = _count;
+                for (int c = baseChild + 1; c < limit; c++)
+                {
+                    if (_prio[c] < best)
+                    {
+                        best = _prio[c];
+                        child = c;
+                    }
+                }
+                if (best >= priority)
                     break;
 
                 _elem[i] = _elem[child];

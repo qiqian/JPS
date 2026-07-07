@@ -49,10 +49,11 @@ void jps_min_heap_enqueue(jps_min_heap *h, int element, int64_t priority)
 
     i = h->count++;
 
-    /* hole sift-up：只搬父节点，最后写入新元素，避免每层 swap 两个数组。 */
+    /* hole sift-up（4-ary）：只搬父节点，最后写入新元素，避免每层 swap 两个数组。
+     * 四叉：parent(i) = (i-1)/4，树高 ≈ log4(n)，比二叉减半 → sift-up 层数减半。 */
     while (i > 0)
     {
-        int parent = (i - 1) >> 1;
+        int parent = (i - 1) >> 2;
         if (h->prio[parent] <= priority)
             break;
         h->elem[i] = h->elem[parent];
@@ -65,18 +66,31 @@ void jps_min_heap_enqueue(jps_min_heap *h, int element, int64_t priority)
 
 static inline void jps__heap_sift_down(jps_min_heap *h, int i, int element, int64_t priority)
 {
+    /* 四叉 sift-down：四个孩子 4i+1..4i+4 在数组内连续（一条 cache line 基本全装），
+     * 每层顺序扫出最小孩子。层数减半，代价是每层最多 3 次孩子间比较。 */
     while (1)
     {
-        int l = (i << 1) + 1;
-        int r = l + 1;
-        int child;
+        int base = (i << 2) + 1;   /* 第一个孩子 = 4i+1 */
+        int limit, child, c;
+        int64_t best;
 
-        if (l >= h->count)
+        if (base >= h->count)
             break;
-        child = l;
-        if (r < h->count && h->prio[r] < h->prio[l])
-            child = r;
-        if (h->prio[child] >= priority)
+
+        child = base;
+        best = h->prio[base];
+        limit = base + 4;
+        if (limit > h->count)
+            limit = h->count;
+        for (c = base + 1; c < limit; c++)
+        {
+            if (h->prio[c] < best)
+            {
+                best = h->prio[c];
+                child = c;
+            }
+        }
+        if (best >= priority)
             break;
 
         h->elem[i] = h->elem[child];
