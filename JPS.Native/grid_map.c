@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "grid_map.h"
+#include "jps_simd.h"   /* jps_v_pack_nonzero16：set_blocked_buffer 批量建位图 */
 
 /* int16 距离上限：边长不能超过 INT16_MAX。 */
 #define JPS_MAX_DIM 32767
@@ -262,15 +263,28 @@ void jps_grid_map_set_blocked_buffer(jps_grid_map *m, const uint8_t *cells, int 
         {
             int base = word << 6;
             int bit_count = m->width - base;
-            uint64_t bits = 0;
+            uint64_t bits;
             uint64_t mask;
             uint64_t old_bits;
             if (bit_count > 64)
                 bit_count = 64;
             mask = bit_count == 64 ? ~0ULL : ((1ULL << bit_count) - 1);
-            for (bit = 0; bit < bit_count; bit++)
-                if (src[base + bit] != 0)
-                    bits |= 1ULL << bit;
+            if (bit_count == 64)
+            {
+                /* 满字：64 字节 → 4×16 字节 SIMD 打包。bit_count==64 保证 src[base..base+63] 全在界内，不越读。 */
+                bits =  (uint64_t)jps_v_pack_nonzero16(src + base)
+                     | ((uint64_t)jps_v_pack_nonzero16(src + base + 16) << 16)
+                     | ((uint64_t)jps_v_pack_nonzero16(src + base + 32) << 32)
+                     | ((uint64_t)jps_v_pack_nonzero16(src + base + 48) << 48);
+            }
+            else
+            {
+                /* 行尾不足 64 位的残字：标量补齐（只读 src[base..base+bit_count-1]，界内）。 */
+                bits = 0;
+                for (bit = 0; bit < bit_count; bit++)
+                    if (src[base + bit] != 0)
+                        bits |= 1ULL << bit;
+            }
             old_bits = row[word];
             if ((old_bits & mask) != bits)
             {

@@ -89,6 +89,15 @@ static inline jps_v128 jps_v_add_i16(jps_v128 a, jps_v128 b) { return _mm_add_ep
 /* 非对齐存 8×int16（回填起点列任意，不能要求 16 字节对齐）。 */
 static inline void jps_v_storeu_i16(int16_t *p, jps_v128 v) { _mm_storeu_si128((__m128i *)p, v); }
 
+/* 把 p 处 16 字节各自"非 0 → 1 位"打包进返回值低 16 位（bit i = (p[i]!=0)）。供 set_blocked_buffer 批量建位图。
+ * cmpeq 0 得"可走(==0)"掩码，movemask 抽每字节最高位，取反截 16 位 → 阻挡(非 0)位。非对齐加载。 */
+static inline uint32_t jps_v_pack_nonzero16(const uint8_t *p)
+{
+    __m128i v = _mm_loadu_si128((const __m128i *)p);
+    unsigned m = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_setzero_si128()));
+    return (~m) & 0xFFFFu;
+}
+
 #elif defined(__aarch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
 
 #  define JPS_HAVE_SIMD 1
@@ -150,6 +159,20 @@ static inline jps_v128 jps_v_add_i16(jps_v128 a, jps_v128 b)
     return vreinterpretq_u64_s16(vaddq_s16(vreinterpretq_s16_u64(a), vreinterpretq_s16_u64(b)));
 }
 static inline void jps_v_storeu_i16(int16_t *p, jps_v128 v) { vst1q_s16(p, vreinterpretq_s16_u64(v)); }
+
+/* 与 SSE2 同义（bit i = p[i]!=0，打包进低 16 位）。NEON 无 movemask：vtst 归一到 0x00/0xFF，
+ * 与位权向量相与后三次半区 pairwise 加得每半区 8 位。vtstq_u8/vpadd_u8 在 ARMv7-NEON 与 AArch64 均可用，
+ * 故 v7a 与 arm64 共用同一份（不依赖 AArch64 专有的 vaddv）。位权和 ∈0..255 无溢出。 */
+static inline uint32_t jps_v_pack_nonzero16(const uint8_t *p)
+{
+    static const uint8_t kbit[16] = { 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128 };
+    uint8x16_t v = vld1q_u8(p);
+    uint8x16_t bits = vandq_u8(vtstq_u8(v, v), vld1q_u8(kbit));   /* 非 0 → 该位位权，否则 0 */
+    uint8x8_t t = vpadd_u8(vget_low_u8(bits), vget_high_u8(bits));
+    t = vpadd_u8(t, t);
+    t = vpadd_u8(t, t);                                           /* t[0]=低半区位或，t[1]=高半区位或 */
+    return (uint32_t)vget_lane_u8(t, 0) | ((uint32_t)vget_lane_u8(t, 1) << 8);
+}
 
 #else
 #  error "JPS.Native requires a 128-bit SIMD backend (SSE2 or NEON)."
