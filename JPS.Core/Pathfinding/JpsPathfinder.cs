@@ -73,11 +73,28 @@ namespace JPS.Pathfinding
     {
         // ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ----
         private int _w, _h, _size;
-        private long[] _g = new long[0];           // 各节点已知最短代价 g
-        private sbyte[] _parentDir = new sbyte[0]; // 到达该节点的方向索引（剪枝用 + 回溯反推父节点）
-        private short[] _parentSteps = new short[0]; // 到达该节点的跳跃步数；父节点 = 当前 − dir×steps（省去绝对父 id）
-        private int[] _mark = new int[0];          // 访问状态：== 2·gen → open(已生成)，== 2·gen+1 → closed(已展开)
+        // g / steps / 来向索引打包进同一个 ulong（与 native pathfinder.cpp 的 g_dir 同构），
+        // 取代原先独立的 _g / _parentSteps / _parentDir 三个数组：一次索引访问同取三者，
+        // relax 一次 store 写全，逐节点搜索态 15→10 B/格。布局：
+        //   位[0,44)  = g 值（迷宫最优路径 g ≤ ~1.5e12 < 2^44）
+        //   位[44,60) = steps 到达该节点的跳跃步数（≤ max(W,H) ≤ 32767）；父节点 = 当前 − dir×steps
+        //   位[60,64) = 来向索引+1（0 = 无父/起点哨兵；1..8 = 方向索引 0..7）
+        private ulong[] _gDir = new ulong[0];
+        private ushort[] _mark = new ushort[0];    // 访问状态：== 2·gen → open(已生成)，== 2·gen+1 → closed(已展开)
         private int _gen;
+
+        private const int GStepsShift = 44;
+        private const int GDirShift = 60;
+        private const ulong GMask = (1UL << GStepsShift) - 1;   // g 的低 44 位
+        private const ulong StepsMask = 0xFFFF;                 // steps 的 16 位
+
+        private static long GdG(ulong gd) => (long)(gd & GMask);
+        private static int GdSteps(ulong gd) => (int)((gd >> GStepsShift) & StepsMask);
+        private static int GdDir(ulong gd) => (int)((gd >> GDirShift) & 0xF) - 1;   // -1 = 无父（起点）
+        private static ulong PackGdir(long g, int steps, int dir) =>
+            ((ulong)g & GMask)
+            | (((ulong)steps & StepsMask) << GStepsShift)
+            | ((ulong)(dir + 1) << GDirShift);
         private readonly MinHeap _open = new MinHeap();
         private readonly int[] _dirBuf = new int[JpsDirections.Count];
 
@@ -111,9 +128,8 @@ namespace JPS.Pathfinding
             int goalId = Id(gx, gy);
 
             _open.Clear();
-            _g[startId] = 0;
-            _mark[startId] = openMark;
-            _parentDir[startId] = -1;   // 起点无来向（剪枝时探索全部方向；回溯到此即停）
+            _gDir[startId] = PackGdir(0, 0, -1);   // g=0、steps=0、无来向（剪枝时探索全部方向；回溯到此即停）
+            _mark[startId] = (ushort)openMark;
             _open.Enqueue(startId, JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy));
 
             int expandedCount = 0;
@@ -123,7 +139,7 @@ namespace JPS.Pathfinding
                 if (_mark[current] == closedMark)
                     continue;
 
-                _mark[current] = closedMark;
+                _mark[current] = (ushort)closedMark;
                 expandedCount++;
 
                 int cx = current % _w;
@@ -133,7 +149,7 @@ namespace JPS.Pathfinding
                 if (current == goalId)
                     return Success(map, startId, goalId, expandedCount);
 
-                int dirCount = FillDirections(map, cx, cy, _parentDir[current]);
+                int dirCount = FillDirections(map, cx, cy, GdDir(_gDir[current]));
 
                 for (int i = 0; i < dirCount; i++)
                 {
@@ -159,16 +175,15 @@ namespace JPS.Pathfinding
 
                     long moveCost = (long)jump.Steps * 
                         (diagonal ? JpsDirections.DiagonalCost : JpsDirections.CardinalCost);
-                    long tentative = _g[current] + moveCost;
+                    long tentative = GdG(_gDir[current]) + moveCost;
 
                     bool firstSeen = _mark[nbId] < openMark;
-                    if (!firstSeen && tentative >= _g[nbId])
+                    if (!firstSeen && tentative >= GdG(_gDir[nbId]))
                         continue;
 
-                    _g[nbId] = tentative;
-                    _mark[nbId] = openMark;
-                    _parentDir[nbId] = (sbyte)idx;
-                    _parentSteps[nbId] = (short)jump.Steps;   // 步数 ≤ 边长 ≤ short.MaxValue
+                    // g、steps、来向同字：一次 store 写入三者（步数 ≤ 边长 ≤ 32767）
+                    _gDir[nbId] = PackGdir(tentative, jump.Steps, idx);
+                    _mark[nbId] = (ushort)openMark;
 
                     if (firstSeen) obs?.OnFrontier(jump.X, jump.Y);
 
@@ -286,19 +301,18 @@ namespace JPS.Pathfinding
             _w = map.Width;
             _h = map.Height;
             _size = _w * _h;
-            _g = new long[_size];
-            _parentDir = new sbyte[_size];
-            _parentSteps = new short[_size];
-            _mark = new int[_size];
+            _gDir = new ulong[_size];
+            _mark = new ushort[_size];
             _gen = 0;
             // 跳点缓存由 JpsSystem/JumpPointCache 自行按尺寸/版本管理
         }
 
         private void NextGeneration()
         {
-            // 状态用 2·gen / 2·gen+1 编码，接近溢出时清零重来（实践几乎不触发）
+            // 状态用 2·gen / 2·gen+1 编码；mark 为 ushort → 需 2·gen+1 ≤ 65535，
+            // 故 gen 在 1..32767 循环，回绕时清零 mark（每 ~3.3 万次查询一次，摊薄可忽略）
             _gen++;
-            if (_gen <= (int.MaxValue / 2) - 1)
+            if (_gen <= 32767)
                 return;
 
             Array.Clear(_mark, 0, _mark.Length);
@@ -321,7 +335,7 @@ namespace JPS.Pathfinding
         //         · o o        正下 o、右下 o（对角本身）
         // 旁边有障碍时，再额外把“强迫邻居”方向加入探索（强迫邻居规则见 JpsRules）。
 
-        private int FillDirections(GridMap map, int x, int y, sbyte parentDir)
+        private int FillDirections(GridMap map, int x, int y, int parentDir)
         {
             // 作用：把“从 x 出发、剪枝后仍需要探索的方向索引”写进复用缓冲 _dirBuf，返回数量 n。
             // 主循环随后对这 n 个方向逐个做 CardinalJump / DiagonalJump。
@@ -480,9 +494,10 @@ namespace JPS.Pathfinding
             int current = goalId;
             while (current != startId)
             {
-                // 父节点 = 当前 − 来向 × 跳跃步数
-                var (dx, dy) = JpsDirections.All[_parentDir[current]];
-                int steps = _parentSteps[current];
+                // 父节点 = 当前 − 来向 × 跳跃步数（g_dir 一次读取同取来向与步数）
+                ulong gd = _gDir[current];
+                var (dx, dy) = JpsDirections.All[GdDir(gd)];
+                int steps = GdSteps(gd);
                 int cx = current % _w, cy = current / _w;
                 current = (cy - dy * steps) * _w + (cx - dx * steps);
                 nodes.Add(current);

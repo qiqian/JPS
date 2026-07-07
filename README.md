@@ -322,20 +322,19 @@ flowchart TD
 
 | 数据 | 字段 | A\* | JPS | 归属 |
 |---|---|---|---|---|
-| g 值 | `long` | 8 | 8 | 每实例（线程私有） |
-| 父信息 | A\*: 来向 `sbyte`；JPS: 来向 `sbyte` + 步数 `short` | 1 | 3 | 每实例（线程私有） |
-| 访问状态 | `int`（`2·gen` / `2·gen+1` 合并 seen/closed） | 4 | 4 | 每实例（线程私有） |
-| **搜索态小计** | | **13 B/格** | **15 B/格** | 每实例 |
-| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **每地图共享**（[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)） |
-| **合计** | | **13 B/格** | **27 B/格** | |
+| g / 步数 / 父 | A\*: g `long` + 来向 `sbyte`（两数组）；JPS: g+步数+来向索引打包进一个 `ulong`（单数组，位[0,44)=g、[44,60)=steps、[60,64)=来向+1） | 9 | 8 | 每实例（线程私有） |
+| 访问状态 | `2·gen` / `2·gen+1` 合并 seen/closed；A\*: `int`，JPS: `ushort`（gen 循环 1..32767） | 4 | 2 | 每实例（线程私有） |
+| **搜索态小计** | | **13 B/格** | **10 B/格** | 每实例 |
+| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte`（C# 为 AoS、gen/dist 同缓存行；C native 为按方向 SoA，字节数相同） | — | 12 | **每地图共享**（[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)） |
+| **合计** | | **13 B/格** | **22 B/格** | |
 
-- **单实例**：JPS 约为 A\* 的 **~2.1×**（多出的 14 B/格几乎全是那张 12 B/格的正交跳点缓存——这是用空间换"跳跃 O(1)"的核心代价）。
-- **多线程共享**：跳点缓存按地图只存一份、被所有线程共享，只有 15 B/格的搜索态随线程数线性增长。`T` 线程在 200×200（4 万格）地图上：
+- **单实例**：JPS 约为 A\* 的 **~1.7×**。注意 JPS 的搜索态（10 B/格）其实比 A\*（13 B/格）更省——多出来的全在那张 12 B/格的正交跳点缓存（用空间换"跳跃 O(1)"的核心代价），净多约 9 B/格。C# 与 C native 现在搜索态布局一致（同为打包 `ulong` + `ushort`），仅缓存 AoS/SoA 之别，字节数相同。
+- **多线程共享**：跳点缓存按地图只存一份、被所有线程共享，只有 10 B/格的搜索态随线程数线性增长。因 JPS 每实例搜索态比 A\* 更小，**线程数 ≥4 时 JPS 总内存反而低于 A\***。`T` 线程在 200×200（4 万格）地图上：
 
   | 线程数 | A\* | JPS |
   |---|---|---|
-  | 1 | 0.52 MB | 1.08 MB（0.60 MB 搜索态 + 0.48 MB 共享缓存） |
-  | 8 | 4.16 MB | 5.28 MB（4.80 MB 搜索态 + 0.48 MB 共享缓存） |
+  | 1 | 0.52 MB | 0.88 MB（0.40 MB 搜索态 + 0.48 MB 共享缓存） |
+  | 8 | 4.16 MB | 3.68 MB（3.20 MB 搜索态 + 0.48 MB 共享缓存） |
 
 - 地图本身（[`GridMap._blocked`](JPS.Core/Models/GridMap.cs)）**按行对齐**位压缩（~1 bit/格，行尾 padding 可忽略，≈0.125 B/格；行对齐是为了水平按字扫描），两者共享，可忽略。
 - 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
@@ -995,20 +994,19 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 | Data | Field | A\* | JPS | Owner |
 |---|---|---|---|---|
-| g value | `long` | 8 | 8 | per instance (thread-private) |
-| parent info | A\*: came-dir `sbyte`; JPS: came-dir `sbyte` + steps `short` | 1 | 3 | per instance (thread-private) |
-| visit state | `int` (`2·gen` / `2·gen+1` merged seen/closed) | 4 | 4 | per instance (thread-private) |
-| **search-state subtotal** | | **13 B/cell** | **15 B/cell** | per instance |
-| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` | — | 12 | **shared per map** ([`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)) |
-| **total** | | **13 B/cell** | **27 B/cell** | |
+| g / steps / parent | A\*: g `long` + came-dir `sbyte` (two arrays); JPS: g+steps+came-dir index packed into one `ulong` (single array; bits[0,44)=g, [44,60)=steps, [60,64)=dir+1) | 9 | 8 | per instance (thread-private) |
+| visit state | `2·gen` / `2·gen+1` merged seen/closed; A\*: `int`, JPS: `ushort` (gen cycles 1..32767) | 4 | 2 | per instance (thread-private) |
+| **search-state subtotal** | | **13 B/cell** | **10 B/cell** | per instance |
+| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` (C#: AoS, gen/dist on same cache line; C native: per-direction SoA, same byte count) | — | 12 | **shared per map** ([`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)) |
+| **total** | | **13 B/cell** | **22 B/cell** | |
 
-- **Single instance:** JPS is about **~2.1×** A\* (the extra 14 B/cell is almost entirely the 12 B/cell cardinal jump cache — the core space-for-"O(1) jump" trade-off).
-- **Multithread sharing:** the jump cache is stored once per map and shared by all threads; only the 15 B/cell search state grows linearly with thread count. For `T` threads on a 200×200 (40k-cell) map:
+- **Single instance:** JPS is about **~1.7×** A\*. Note JPS's search state (10 B/cell) is actually smaller than A\*'s (13 B/cell); the entire extra is the 12 B/cell cardinal jump cache (the space-for-"O(1) jump" trade-off), a net +9 B/cell. C# and C native now share the same search-state layout (packed `ulong` + `ushort`), differing only in AoS vs SoA cache layout at identical byte count.
+- **Multithread sharing:** the jump cache is stored once per map and shared by all threads; only the 10 B/cell search state grows linearly with thread count. Since JPS's per-instance search state is smaller than A\*'s, **at ≥4 threads JPS total memory drops below A\***. For `T` threads on a 200×200 (40k-cell) map:
 
   | Threads | A\* | JPS |
   |---|---|---|
-  | 1 | 0.52 MB | 1.08 MB (0.60 MB search state + 0.48 MB shared cache) |
-  | 8 | 4.16 MB | 5.28 MB (4.80 MB search state + 0.48 MB shared cache) |
+  | 1 | 0.52 MB | 0.88 MB (0.40 MB search state + 0.48 MB shared cache) |
+  | 8 | 4.16 MB | 3.68 MB (3.20 MB search state + 0.48 MB shared cache) |
 
 - The map itself ([`GridMap._blocked`](JPS.Core/Models/GridMap.cs)) is **row-aligned** bit-packed (~1 bit/cell, trailing padding negligible, ≈0.125 B/cell; row alignment enables the word-at-a-time horizontal scan), shared by both, negligible.
 - The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
