@@ -11,6 +11,31 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/*
+ * 平台前提的编译期固化：把原先只写在注释里的两条工具链/架构约定升级成硬断言——
+ * 换平台若不满足则**编译失败**，而非运行期悄悄给错结果。
+ *   1) 负数算术右移：下面的 jps__grid_map_get_bit 用有符号 x>>6（x 可为 -1）让越界坐标
+ *      落到哨兵带，依赖右移对负数做符号扩展（算术移位）。逻辑移位会把 -1>>1 变成大正数，
+ *      哨兵兜底失效 → 静态断言在编译期拦下。MSVC/GCC/Clang 目标均满足，此处把约定显式化。
+ *   2) 小端：行/列位图的 SIMD 扫描与回写按“低地址字 = 向量低车道、bit i ↔ 列 i”组织，
+ *      仅在小端下自洽。所有目标（x86/x64、LE 模式的 ARM）均为小端。
+ */
+#if defined(__cplusplus)
+#  define JPS_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#  define JPS_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
+JPS_STATIC_ASSERT((-1 >> 1) == -1, "JPS requires arithmetic (sign-extending) right shift on negatives");
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+JPS_STATIC_ASSERT(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "JPS requires a little-endian target");
+#elif defined(_MSC_VER)
+/* MSVC 仅面向小端目标（Windows 的 x86 / x64 / ARM64），无可用的编译期字节序宏，按小端处理。 */
+#else
+#  error "JPS: cannot determine byte order at compile time (need __BYTE_ORDER__ or MSVC)"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
