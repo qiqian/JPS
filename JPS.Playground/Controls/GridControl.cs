@@ -126,6 +126,7 @@ public sealed class GridControl : ScrollableControl
     private int _pendingBlockDx;
     private int _pendingBlockDy;
     private readonly Bitmap[] _monsterSprites = CreateMonsterSprites();
+    private readonly Direct2DGridCanvas _direct2D = new();
 
     // 当前选中的起点/终点（视图/编辑状态，作为寻路查询参数；不属于地图模型）
     private int _startX = -1, _startY = -1, _endX = -1, _endY = -1;
@@ -176,8 +177,8 @@ public sealed class GridControl : ScrollableControl
 
         SetStyle(ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint |
-                 ControlStyles.ResizeRedraw |
-                 ControlStyles.OptimizedDoubleBuffer, true);
+                 ControlStyles.Opaque |
+                 ControlStyles.ResizeRedraw, true);
 
         AutoScroll = true;   // 所有模式都启用滚动：内容超出视口（放大后/大图）即出现滚动条
 
@@ -1447,29 +1448,40 @@ public sealed class GridControl : ScrollableControl
         base.OnPaint(e);
         EnsureGrid();
 
-        var g = e.Graphics;
-        g.Clear(BackColor);
-
         int cs = _cellSize;
-
-        // 按滚动位置平移，之后所有绘制都用“世界坐标”(x*cs)。未滚动（基准缩放/小图）时偏移为 0。
         var ap = AutoScrollPosition;            // x,y <= 0
-        g.TranslateTransform(ap.X, ap.Y);
-
-        // 仅绘制当前视口覆盖的格子（大图必须裁剪，否则遍历百万格会卡）
         int viewX = -ap.X, viewY = -ap.Y;
         int sx = Math.Max(0, viewX / cs);
         int sy = Math.Max(0, viewY / cs);
         int ex = Math.Min(_map.Width, (viewX + ClientSize.Width) / cs + 1);
         int ey = Math.Min(_map.Height, (viewY + ClientSize.Height) / cs + 1);
 
+        if (_direct2D.Begin(Handle, ClientSize, BackColor, ap))
+        {
+            try { DrawScene(_direct2D, cs, sx, sy, ex, ey); }
+            finally { _direct2D.End(); }
+            return;
+        }
+
+        // Hardware initialization can fail on remote/legacy sessions. Keep the playground usable.
+        e.Graphics.Clear(BackColor);
+        e.Graphics.TranslateTransform(ap.X, ap.Y);
+        using var fallback = new GdiGridCanvas(e.Graphics);
+        DrawScene(fallback, cs, sx, sy, ex, ey);
+    }
+
+    // Direct2D clears and presents the complete frame in OnPaint. Letting WinForms
+    // process WM_ERASEBKGND first produces a visible GDI-colored frame at 30 FPS.
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+    }
+
+    private void DrawScene(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
+    {
         for (int y = sy; y < ey; y++)
         {
             for (int x = sx; x < ex; x++)
-            {
-                var rect = new Rectangle(x * cs, y * cs, cs, cs);
-                g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleBrush : WalkableBrush, rect);
-            }
+                g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleColor : WalkableColor, x * cs, y * cs, cs, cs);
         }
 
         DrawSearchOverlay(g, cs, sx, sy, ex, ey);
@@ -1481,36 +1493,23 @@ public sealed class GridControl : ScrollableControl
         DrawDynamicMonsters(g, cs, sx, sy, ex, ey);
     }
 
-    private static readonly SolidBrush WalkableBrush = new(WalkableColor);
-    private static readonly SolidBrush ObstacleBrush = new(ObstacleColor);
-
-    private void DrawDynamicBlock(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    private void DrawDynamicBlock(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
         if (!_dynamicMode)
             return;
 
-        using var blockBrush = new SolidBrush(DynamicBlockColor);
-        using var blockPen = new Pen(Color.FromArgb(210, 255, 255, 255), Math.Max(1f, cs / 9f));
         var blockRect = new Rectangle(_dynamicBlockX * cs, _dynamicBlockY * cs, DynamicBlockW * cs, DynamicBlockH * cs);
         if (blockRect.IntersectsWith(new Rectangle(sx * cs, sy * cs, (ex - sx) * cs, (ey - sy) * cs)))
         {
-            g.FillRectangle(blockBrush, blockRect);
-            g.DrawRectangle(blockPen, blockRect);
+            g.FillRectangle(DynamicBlockColor, blockRect.X, blockRect.Y, blockRect.Width, blockRect.Height);
+            g.DrawRectangle(Color.FromArgb(210, 255, 255, 255), Math.Max(1f, cs / 9f), blockRect.X, blockRect.Y, blockRect.Width, blockRect.Height);
         }
     }
 
-    private void DrawDynamicMonsters(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    private void DrawDynamicMonsters(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
         if (!_dynamicMode)
             return;
-
-        using var targetPen = new Pen(Color.FromArgb(230, MonsterColor), Math.Max(1.5f, cs / 10f));
-        var prevMode = g.SmoothingMode;
-        var prevInterpolation = g.InterpolationMode;
-        var prevPixelOffset = g.PixelOffsetMode;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
 
         foreach (var m in _monsters)
         {
@@ -1519,7 +1518,7 @@ public sealed class GridControl : ScrollableControl
                 float tx = m.TargetX * cs + cs / 2f;
                 float ty = m.TargetY * cs + cs / 2f;
                 float tr = Math.Max(2f, cs * 0.22f);
-                g.DrawEllipse(targetPen, tx - tr, ty - tr, tr * 2, tr * 2);
+                g.DrawEllipse(Color.FromArgb(230, MonsterColor), Math.Max(1.5f, cs / 10f), tx - tr, ty - tr, tr * 2, tr * 2);
             }
 
             if (m.VisualX < sx - 1 || m.VisualX >= ex + 1 || m.VisualY < sy - 1 || m.VisualY >= ey + 1)
@@ -1534,21 +1533,14 @@ public sealed class GridControl : ScrollableControl
                 size,
                 size);
             var sprite = _monsterSprites[(int)((_dynamicFrames + m.X + m.Y) % _monsterSprites.Length)];
-            g.DrawImage(sprite, dest);
+            g.DrawBitmap(sprite, dest);
         }
-
-        g.PixelOffsetMode = prevPixelOffset;
-        g.InterpolationMode = prevInterpolation;
-        g.SmoothingMode = prevMode;
     }
 
-    private void DrawDynamicMonsterPaths(Graphics g, int cs)
+    private void DrawDynamicMonsterPaths(IGridCanvas g, int cs)
     {
         if (!_dynamicMode)
             return;
-
-        var prevMode = g.SmoothingMode;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
         for (int i = 0; i < _monsters.Length; i++)
         {
@@ -1558,14 +1550,6 @@ public sealed class GridControl : ScrollableControl
                 continue;
 
             var color = DynamicPathColors[i % DynamicPathColors.Length];
-            using var pen = new Pen(Color.FromArgb(235, color), Math.Max(2.5f, cs / 3.2f))
-            {
-                StartCap = System.Drawing.Drawing2D.LineCap.Round,
-                EndCap = System.Drawing.Drawing2D.LineCap.Round,
-                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
-            };
-            using var dotBrush = new SolidBrush(Color.FromArgb(220, color));
-
             var points = new List<PointF>
             {
                 new PointF(monster.VisualX * cs + cs / 2f, monster.VisualY * cs + cs / 2f)
@@ -1584,14 +1568,12 @@ public sealed class GridControl : ScrollableControl
             if (points.Count < 2)
                 continue;
 
-            g.DrawLines(pen, points.ToArray());
+            g.DrawLines(Color.FromArgb(235, color), Math.Max(2.5f, cs / 3.2f), points);
 
             float r = Math.Max(1.8f, cs / 7f);
             for (int p = 1; p < points.Count; p += 3)
-                g.FillEllipse(dotBrush, points[p].X - r, points[p].Y - r, r * 2, r * 2);
+                g.FillEllipse(Color.FromArgb(220, color), points[p].X - r, points[p].Y - r, r * 2, r * 2);
         }
-
-        g.SmoothingMode = prevMode;
     }
 
     private static Bitmap[] CreateMonsterSprites()
@@ -1804,15 +1786,9 @@ public sealed class GridControl : ScrollableControl
         }
     }
 
-    private void DrawSearchOverlay(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    private void DrawSearchOverlay(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
         // 绿=已扩展，紫=已入队未扩展（前沿），蓝灰=扫描跳过（未进 open）
-        using var scannedBrush = new SolidBrush(ScannedColor);
-        using var frontierBrush = new SolidBrush(FrontierColor);
-        using var expandedBrush = new SolidBrush(ExpandedColor);
-        using var pathBrush = new SolidBrush(PathColor);
-        using var pathPen = new Pen(Color.FromArgb(255, 255, 140, 0), Math.Max(2f, cs / 3f));
-
         for (int y = sy; y < ey; y++)
         {
             for (int x = sx; x < ex; x++)
@@ -1821,16 +1797,16 @@ public sealed class GridControl : ScrollableControl
                     continue;
 
                 if (_overlay.IsExpanded(x, y))
-                    g.FillRectangle(expandedBrush, new Rectangle(x * cs, y * cs, cs, cs));
+                    g.FillRectangle(ExpandedColor, x * cs, y * cs, cs, cs);
                 else if (_overlay.IsFrontier(x, y))
-                    g.FillRectangle(frontierBrush, new Rectangle(x * cs, y * cs, cs, cs));
+                    g.FillRectangle(FrontierColor, x * cs, y * cs, cs, cs);
                 else if (_overlay.IsScanned(x, y))
-                    g.FillRectangle(scannedBrush, new Rectangle(x * cs, y * cs, cs, cs));
+                    g.FillRectangle(ScannedColor, x * cs, y * cs, cs, cs);
             }
         }
 
         foreach (var (x, y) in _overlay.Path)
-            g.FillRectangle(pathBrush, new Rectangle(x * cs, y * cs, cs, cs));
+            g.FillRectangle(PathColor, x * cs, y * cs, cs, cs);
 
         foreach (var segment in _overlay.PathSegments)
         {
@@ -1838,35 +1814,23 @@ public sealed class GridControl : ScrollableControl
                 continue;
 
             var points = segment
-                .Select(p => new Point(p.X * cs + cs / 2, p.Y * cs + cs / 2))
+                .Select(p => new PointF(p.X * cs + cs / 2f, p.Y * cs + cs / 2f))
                 .ToArray();
-            g.DrawLines(pathPen, points);
+            g.DrawLines(Color.FromArgb(255, 255, 140, 0), Math.Max(2f, cs / 3f), points);
         }
 
         // 平滑后的路径（视线拉直）用红色折线叠加显示
         if (_overlay.SmoothPath.Count >= 2)
         {
-            using var smoothPen = new Pen(SmoothPathColor, Math.Max(2f, cs / 4f))
-            {
-                StartCap = System.Drawing.Drawing2D.LineCap.Round,
-                EndCap = System.Drawing.Drawing2D.LineCap.Round,
-                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
-            };
-            using var nodeBrush = new SolidBrush(SmoothPathColor);
-
             var points = _overlay.SmoothPath
                 .Select(p => new PointF(p.X * cs, p.Y * cs))
                 .ToArray();
 
-            var prevMode = g.SmoothingMode;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.DrawLines(smoothPen, points);
+            g.DrawLines(SmoothPathColor, Math.Max(2f, cs / 4f), points);
 
             float r = Math.Max(2f, cs / 5f);
             foreach (var p in points)
-                g.FillEllipse(nodeBrush, p.X - r, p.Y - r, r * 2, r * 2);
-
-            g.SmoothingMode = prevMode;
+                g.FillEllipse(SmoothPathColor, p.X - r, p.Y - r, r * 2, r * 2);
         }
     }
 
@@ -1896,7 +1860,7 @@ public sealed class GridControl : ScrollableControl
                     _cleanBefore[((y * _map.Width + x) * 4) + dir] = _system.Cache.IsClean(_map, x, y, dir);
     }
 
-    private void DrawDirtyDots(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    private void DrawDirtyDots(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
         if (cs < 14)
             return;
@@ -1908,14 +1872,7 @@ public sealed class GridControl : ScrollableControl
         float half = Math.Max(2.2f, cs * 0.135f);     // 箭头底边半宽
         bool snapOk = _snapW == _map.Width && _snapH == _map.Height;
 
-        using var cleanBrush = new SolidBrush(JumpCleanColor);
-        using var freshBrush = new SolidBrush(JumpFreshColor);
-        using var dirtyBrush = new SolidBrush(JumpDirtyColor);
-        using var edgePen = new Pen(Color.FromArgb(110, 20, 20, 24), Math.Max(0.8f, cs / 40f));
         var tri = new PointF[3];
-
-        var prev = g.SmoothingMode;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
         for (int y = sy; y < ey; y++)
         {
@@ -1931,14 +1888,14 @@ public sealed class GridControl : ScrollableControl
 
                 foreach (var (dir, ox, oy) in DotLayout)
                 {
-                    Brush brush;
+                    Color dotColor;
                     if (!cacheSystem.Cache.IsClean(cacheMap, x, y, dir))
-                        brush = dirtyBrush;   // dirty：待计算/已失效
+                        dotColor = JumpDirtyColor;   // dirty：待计算/已失效
                     else
                     {
                         // clean：本次寻路新算（之前 dirty）用橙，之前已缓存用白
                         bool wasClean = snapOk && _cleanBefore[((y * _map.Width + x) * 4) + dir];
-                        brush = wasClean ? cleanBrush : freshBrush;
+                        dotColor = wasClean ? JumpCleanColor : JumpFreshColor;
                     }
 
                     // 箭头中心 = 边中点；指向 (ox,oy)；(px,py) 为其垂直向量（底边方向）
@@ -1947,33 +1904,29 @@ public sealed class GridControl : ScrollableControl
                     tri[0] = new PointF(mx + ox * len, my + oy * len);                              // 尖端（朝外）
                     tri[1] = new PointF(mx - ox * len * 0.55f + px * half, my - oy * len * 0.55f + py * half);
                     tri[2] = new PointF(mx - ox * len * 0.55f - px * half, my - oy * len * 0.55f - py * half);
-                    g.FillPolygon(brush, tri);
+                    g.FillPolygon(dotColor, tri);
                     if (cs >= 22)
-                        g.DrawPolygon(edgePen, tri);   // 放大时描边，增强对比
+                        g.DrawPolygon(Color.FromArgb(110, 20, 20, 24), Math.Max(0.8f, cs / 40f), tri);   // 放大时描边，增强对比
                 }
             }
         }
-
-        g.SmoothingMode = prev;
     }
 
-    private void DrawGridLines(Graphics g, int cs, int sx, int sy, int ex, int ey)
+    private void DrawGridLines(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
         if (cs < 4)
             return;   // 格太小：画网格线会糊成一片且拖慢大图渲染
 
-        using var pen = new Pen(GridLineColor);
-
         int y0 = sy * cs, y1 = ey * cs;
         for (int x = sx; x <= ex; x++)
-            g.DrawLine(pen, x * cs, y0, x * cs, y1);
+            g.DrawLine(GridLineColor, 1f, new PointF(x * cs, y0), new PointF(x * cs, y1));
 
         int x0 = sx * cs, x1 = ex * cs;
         for (int y = sy; y <= ey; y++)
-            g.DrawLine(pen, x0, y * cs, x1, y * cs);
+            g.DrawLine(GridLineColor, 1f, new PointF(x0, y * cs), new PointF(x1, y * cs));
     }
 
-    private void DrawMarkers(Graphics g, int cs)
+    private void DrawMarkers(IGridCanvas g, int cs)
     {
         if (HasStart)
             DrawMarker(g, _startX, _startY, cs, StartColor, "S");
@@ -1982,26 +1935,24 @@ public sealed class GridControl : ScrollableControl
             DrawMarker(g, _endX, _endY, cs, EndColor, "G");
     }
 
-    private static void DrawMarker(Graphics g, int x, int y, int cs, Color color, string label)
+    private static void DrawMarker(IGridCanvas g, int x, int y, int cs, Color color, string label)
     {
         var rect = new Rectangle(x * cs + 1, y * cs + 1, cs - 2, cs - 2);
-        using var brush = new SolidBrush(color);
-        using var pen = new Pen(Color.White, Math.Max(1.5f, cs / 8f));
-
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.FillEllipse(brush, rect);
-        g.DrawEllipse(pen, rect);
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.Default;
+        g.FillEllipse(color, rect.X, rect.Y, rect.Width, rect.Height);
+        g.DrawEllipse(Color.White, Math.Max(1.5f, cs / 8f), rect.X, rect.Y, rect.Width, rect.Height);
 
         if (cs >= 12)
+            g.DrawMarkerGlyph(Color.Black, label, x * cs, y * cs, cs);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
         {
-            using var font = new Font("Segoe UI", Math.Max(6f, cs * 0.45f), FontStyle.Bold);
-            using var textBrush = new SolidBrush(Color.Black);
-            var size = g.MeasureString(label, font);
-            g.DrawString(label, font, textBrush,
-                x * cs + (cs - size.Width) / 2f,
-                y * cs + (cs - size.Height) / 2f);
+            _direct2D.Dispose();
+            foreach (var sprite in _monsterSprites) sprite.Dispose();
         }
+        base.Dispose(disposing);
     }
 
     private bool TryGetCell(Point location, out int x, out int y)

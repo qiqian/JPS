@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
     <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
     <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
   </ItemGroup>
