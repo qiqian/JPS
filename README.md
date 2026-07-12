@@ -48,6 +48,7 @@ _The project splits into three tiers with explicit roles: **A\*** is the accurac
   - [3. 平滑方案的选择](#3-平滑方案的选择) · [Path Smoothing](#3-path-smoothing)
   - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [Lock-Free Multithreading](#4-lock-free-multithreading)
   - [5. C Native 极致优化层](#5-c-native-极致优化层) · [C Native Optimization Layer](#5-c-native-optimization-layer)
+  - [6. 确定性与帧同步](#6-确定性与帧同步deterministic-lockstep) · [Deterministic Lockstep](#6-deterministic-lockstep)
 - [三、工程与性能要点](#三工程与性能要点) · [Engineering and Performance](#iii-engineering-and-performance)
   - [1. 内存开销对比](#1-内存开销对比) · [Memory Footprint](#1-memory-footprint)
   - [2. 性能表现（最新实测）](#2-性能表现最新实测) · [Performance](#2-performance-latest-measured)
@@ -302,6 +303,28 @@ flowchart TD
 - **低分配搜索热路径**：搜索状态按访问频率拆成 SoA，堆采用 hole-sift，路径重建的 `nodes` 栈、路径结果数组和开放堆都挂在 `jps_pathfinder` 上跨查询复用，避免每次 find path 的 malloc/free 抖动。
 
 这层优化解释了当前 benchmark 的形态：hot 路径 C 主要赢在更紧的数据布局和更少分支；cold 路径 C 赢得更多，因为重扫/回写/同步受 SIMD、dirty row/col 和批量改图接口的影响更大。
+
+### 6. 确定性与帧同步（Deterministic Lockstep）
+
+**`JPS.Native` 的寻路结果是确定性的，可以用于帧同步游戏。** 给定完全相同的地图状态、起点、终点、移动规则和调用边界，各客户端会得到相同的 compact path 与平滑路径；缓存冷热状态、线程调度和 SIMD 后端只影响执行时间，不改变寻路结果。
+
+确定性来自以下实现约束：
+
+- 搜索代价、八方向启发式、LOS、跳点判断和父链重建全部使用整数运算；正交代价固定为 `1000`，对角代价固定为 `1414`，不存在浮点舍入参与分支判定。
+- 方向枚举、邻居剪枝和开放堆比较顺序固定；存在多条等价最优路径时，同一输入仍选择同一条规范路径。
+- SSE2 与 NEON 只执行等价的整数位运算和距离回填，不使用平台相关的浮点近似。
+- 平滑的 LOS 决策仍为整数；输出坐标只是格中心 `x+0.5f, y+0.5f`，在支持的地图尺寸内可被 IEEE-754 `float` 精确表示。
+- 共享惰性缓存只保存固定地图下的纯函数结果。同一缓存项即使被多个线程同时补写，写入的 `dist` 也相同，因此并发调度只改变哪一个线程先完成预热，不改变路径。
+
+用于帧同步时必须遵守下面的调用契约：
+
+1. 所有客户端使用相同的初始阻挡位图，并以相同顺序、在相同逻辑帧应用地图修改。
+2. 地图修改完成后，在该逻辑帧的寻路批次开始前由单线程调用一次 `jps_system_sync()`；并行寻路期间不得修改地图或再次 `Sync`。
+3. 每个工作线程使用独占的 `jps_pathfinder`；`jps_system` 及其惰性缓存可以由这些 finder 共享。
+4. 所有客户端使用相同的移动规则和编译选项，尤其是 `JPS_ALLOW_CORNER_CUTTING` 必须一致。
+5. 只把公开输出（compact path 或 smoothed path）用于同步逻辑；耗时、缓存命中状态以及内部结构体原始内存不属于同步状态。
+
+在上述契约内，Windows x64 的 SSE2 构建与 iOS / Android / Linux 的 NEON 或 SSE2 构建具有相同的算法语义，适合作为确定性帧同步中的本地寻路模块。
 
 ---
 
@@ -976,6 +999,28 @@ Main optimizations:
 - **Low-allocation search hot path:** search state is split by access frequency, the heap uses hole-sift, and path-rebuild `nodes`, path result storage, and the open heap live inside `jps_pathfinder` and are reused across calls.
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
+
+### 6. Deterministic Lockstep
+
+**`JPS.Native` produces deterministic pathfinding results and can be used in deterministic lockstep games.** Given the same map state, start, goal, movement rules, and call boundaries, every client obtains the same compact and smoothed paths. Cache temperature, thread scheduling, and the SIMD backend affect execution time only, not the result.
+
+The implementation preserves determinism through these constraints:
+
+- Search costs, the octile heuristic, LOS, jump-point tests, and parent-chain reconstruction all use integer arithmetic. Cardinal cost is fixed at `1000` and diagonal cost at `1414`; no floating-point rounding participates in search decisions.
+- Direction enumeration, neighbor pruning, and open-heap comparison order are fixed, so the same canonical path is selected even when several equal-cost optimal paths exist.
+- SSE2 and NEON perform equivalent integer bit operations and distance write-back, with no platform-dependent floating-point approximations.
+- Smoothing still makes LOS decisions with integers. Its output is limited to cell centers, `x+0.5f, y+0.5f`, which are exactly representable as IEEE-754 `float` values throughout the supported map dimensions.
+- The shared lazy cache stores pure-function results for a fixed map. Concurrent fills of the same cache entry write the same `dist`, so scheduling changes only which thread warms it first, not the resulting path.
+
+Lockstep integration must follow this contract:
+
+1. Every client starts from the same blocked-cell bitmap and applies map edits in the same order on the same simulation tick.
+2. After edits, a single thread calls `jps_system_sync()` before that tick's pathfinding batch. The map must not be edited or synced again while parallel searches are running.
+3. Each worker thread owns a separate `jps_pathfinder`; those finders may share one `jps_system` and its lazy cache.
+4. Every client uses identical movement rules and build options, especially `JPS_ALLOW_CORNER_CUTTING`.
+5. Only public outputs (the compact or smoothed path) participate in synchronized gameplay state. Timing, cache-hit state, and raw internal-struct memory do not.
+
+Under this contract, Windows x64 SSE2 builds and iOS / Android / Linux NEON or SSE2 builds share the same algorithmic semantics and are suitable as the local pathfinding module in a deterministic lockstep simulation.
 
 ## III. Engineering and Performance
 
