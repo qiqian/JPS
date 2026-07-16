@@ -3,7 +3,7 @@
 # build-linux.sh — 在 Linux（arm64 / x86_64）上构建并准备运行 JPS.Accuracy 与 JPS.Benchmark。
 #
 # 做三件事：
-#   1) 用 cc/gcc/clang 把 JPS.Native 的 5 个 .c + 1 个 .cpp（pathfinder.cpp）编成 libJPS.Native.so
+#   1) 用 cc/gcc/clang 把 JPS.Native 的 6 个 .c + 1 个 .cpp（pathfinder.cpp）编成 libJPS.Native.so
 #      （沿用 CMakeLists.txt 的关键编译选项，尤其是保证平滑路径与 C# 逐位一致的浮点确定性选项）；
 #   2) dotnet build 两个托管工具（net10.0，框架依赖，跑在本机 .NET 运行时上）；
 #   3) 把 .so 复制到各自的托管输出目录，使运行期 P/Invoke（DllImport "JPS.Native"）能找到它。

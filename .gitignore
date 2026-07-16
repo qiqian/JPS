@@ -13,3 +13,4 @@ android-ndk-r*
 JPS.Native/libJPS.Native.so
 /JPS.Stress/x64
 *.pyc
+/JPS.Stress/JPS.Stress/x64

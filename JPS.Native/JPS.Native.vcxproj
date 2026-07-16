@@ -84,6 +84,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="adapter.c" />
     <ClCompile Include="grid_map.c" />
     <ClCompile Include="jump_point_cache.c" />
     <ClCompile Include="min_heap.c" />

@@ -443,6 +443,26 @@ system.Sync();                                 // 再同步一次（O(W+H) 推�
 r = jps.FindPath(system, (2, 3), (60, 55));    // 继续寻路：未受影响的缓存全部复用
 ```
 
+需要大体积物体和按 id 跟踪的动态矩形时，可使用 `JpsAdapter`。阔边会同时作用于静态阻挡、
+动态阻挡和地图边界；动态矩形采用左上角 + 半开尺寸 `[x,x+w) × [y,y+h)`：
+
+```csharp
+var adapter = new JpsAdapter(map, obstaclePadding: 2); // 每边扩张 2 格
+
+adapter.UpdateDynamicObstacle(id: 100, x: 20, y: 12, width: 4, height: 3);
+adapter.UpdateDynamicObstacle(id: 100, x: 21, y: 12, width: 4, height: 3); // 下一帧移动
+adapter.UpdateDynamicObstacle(id: 100, x: 0, y: 0, width: 0, height: 0);   // 删除
+
+var largeAgentJps = new JpsPathfinder();             // 搜索状态独立；一个线程一个
+adapter.Sync();                                      // 一帧批量更新后同步一次
+PathResult largeAgentPath = largeAgentJps.FindPath(
+    adapter.System, (3, 3), (58, 52));
+
+// 一帧批量更新多个 id 后并行寻路：
+adapter.Sync();
+// 每个线程用自己的 JpsPathfinder，共享 adapter.System。
+```
+
 #### C API
 
 与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libJPS.Native.so`。
@@ -483,6 +503,33 @@ n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* 继续寻路 */
 
 jps_pathfinder_destroy(pf);
 jps_system_destroy(s);
+```
+
+大体积物体和动态矩形使用原生 `jps_adapter`；它与 C# `JpsAdapter` 语义一致：
+
+```c
+jps_adapter *a = jps_adapter_create_from_buffer(64, 64, 2, cells, 64 * 64);
+
+jps_adapter_update_dynamic_obstacle(a, 100, 20, 12, 4, 3);
+jps_adapter_update_dynamic_obstacle(a, 100, 21, 12, 4, 3); /* 下一帧移动 */
+jps_adapter_update_dynamic_obstacle(a, 100, 0, 0, 0, 0);   /* 删除 */
+
+jps_pathfinder *agent_pf = jps_pathfinder_create();          /* 搜索状态独立；一个线程一个 */
+jps_adapter_sync(a);                                        /* 一帧批量更新后同步一次 */
+int count = jps_pathfinder_find_path(
+    agent_pf, jps_adapter_system(a), 3, 3, 58, 52);
+if (count > 0) {
+    int *path = malloc(sizeof(int) * count * 2);
+    jps_pathfinder_copy_path(agent_pf, path, count);
+    free(path);
+}
+
+/* 并行寻路：更新完一帧后同步，再让每线程自己的 pathfinder 共享 borrowed system。 */
+jps_adapter_sync(a);
+jps_system *shared = jps_adapter_system(a); /* 不要 destroy，也不要直接改阻挡 */
+
+jps_pathfinder_destroy(agent_pf);
+jps_adapter_destroy(a);
 ```
 
 #### 多线程并行寻路
@@ -708,7 +755,7 @@ cd JPS.Native
 - **NDK 查找顺序**：`--ndk-path` 参数 → `ANDROID_NDK_HOME` 环境变量 → 仓库本地 `JPS.Native/ndk/<平台>/`；都没有时自动从 Google 下载 **NDK r27d** 解压到本地使用，零手工配置。
 - **默认目标**：只构建 `arm64-v8a`（min API 21，覆盖所有现代 64 位设备，Play Store 也要求 64 位）；需要 32 位 ARM 时加 `--abis "arm64-v8a;armeabi-v7a"`。
 - **产物**：`build-android-<平台>/<abi>/lib/<abi>/libJPS.Native.so`，可直接作为 Unity / Android 工程的 native plugin。
-- **跨平台一致性保证**（见 `CMakeLists.txt`）：`-ffp-contract=off -fno-fast-math` 禁止 FMA 融合与近似数学，使**平滑路径的浮点结果在 x86 / ARM 各 ABI 间逐位一致**（整数寻路本身与浮点无关）；`-fvisibility=hidden` 把 `.so` 的导出面收敛到公共 API（`jps_system_*` / `jps_pathfinder_*`），与 Windows DLL 的导出行为对齐。
+- **跨平台一致性保证**（见 `CMakeLists.txt`）：`-ffp-contract=off -fno-fast-math` 禁止 FMA 融合与近似数学，使**平滑路径的浮点结果在 x86 / ARM 各 ABI 间逐位一致**（整数寻路本身与浮点无关）；`-fvisibility=hidden` 把 `.so` 的导出面收敛到公共 API（`jps_system_*` / `jps_pathfinder_*` / `jps_adapter_*`），与 Windows DLL 的导出行为对齐。
 
 iOS / macOS 无需专用脚本：`JPS.Native` 是纯 C11、无外部依赖，把源码直接加入目标平台的构建（静态库 / framework / `.so`）即可。Linux 上跑 accuracy / benchmark 见下一节。
 
@@ -1135,6 +1182,27 @@ system.Sync();                                 // sync again (O(W+H) generation 
 r = jps.FindPath(system, (2, 3), (60, 55));    // keep pathing: all unaffected cache entries are reused
 ```
 
+For large agents and id-tracked dynamic rectangles, use `JpsAdapter`. Padding is applied to static
+obstacles, dynamic obstacles, and the map boundary. Dynamic rectangles use top-left coordinates and
+half-open dimensions `[x,x+w) × [y,y+h)`:
+
+```csharp
+var adapter = new JpsAdapter(map, obstaclePadding: 2); // grow every side by two cells
+
+adapter.UpdateDynamicObstacle(id: 100, x: 20, y: 12, width: 4, height: 3);
+adapter.UpdateDynamicObstacle(id: 100, x: 21, y: 12, width: 4, height: 3); // move next frame
+adapter.UpdateDynamicObstacle(id: 100, x: 0, y: 0, width: 0, height: 0);   // remove
+
+var largeAgentJps = new JpsPathfinder();             // independent search state; one per thread
+adapter.Sync();                                      // once after all updates for the frame
+PathResult largeAgentPath = largeAgentJps.FindPath(
+    adapter.System, (3, 3), (58, 52));
+
+// For parallel searches after updating all ids for a frame:
+adapter.Sync();
+// Give each thread its own JpsPathfinder and share adapter.System.
+```
+
 #### C API
 
 Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libJPS.Native.so`.
@@ -1175,6 +1243,34 @@ n = jps_pathfinder_find_path(pf, s, 2, 3, 60, 55);   /* keep pathing */
 
 jps_pathfinder_destroy(pf);
 jps_system_destroy(s);
+```
+
+Use the native `jps_adapter` for large agents and dynamic rectangles. Its semantics match the C#
+`JpsAdapter`:
+
+```c
+jps_adapter *a = jps_adapter_create_from_buffer(64, 64, 2, cells, 64 * 64);
+
+jps_adapter_update_dynamic_obstacle(a, 100, 20, 12, 4, 3);
+jps_adapter_update_dynamic_obstacle(a, 100, 21, 12, 4, 3); /* move next frame */
+jps_adapter_update_dynamic_obstacle(a, 100, 0, 0, 0, 0);   /* remove */
+
+jps_pathfinder *agent_pf = jps_pathfinder_create();          /* independent; one per thread */
+jps_adapter_sync(a);                                        /* once after frame updates */
+int count = jps_pathfinder_find_path(
+    agent_pf, jps_adapter_system(a), 3, 3, 58, 52);
+if (count > 0) {
+    int *path = malloc(sizeof(int) * count * 2);
+    jps_pathfinder_copy_path(agent_pf, path, count);
+    free(path);
+}
+
+/* Parallel search: sync after frame updates, then share the borrowed system across private PFs. */
+jps_adapter_sync(a);
+jps_system *shared = jps_adapter_system(a); /* do not destroy or edit obstacles directly */
+
+jps_pathfinder_destroy(agent_pf);
+jps_adapter_destroy(a);
 ```
 
 #### Multithreaded parallel pathfinding
@@ -1398,7 +1494,7 @@ cd JPS.Native
 - **NDK lookup order:** the `--ndk-path` argument → the `ANDROID_NDK_HOME` environment variable → a repo-local copy under `JPS.Native/ndk/<platform>/`. If none is found, the script downloads **NDK r27d** from Google and extracts it locally — zero manual setup.
 - **Default target:** `arm64-v8a` only (min API 21, covering all modern 64-bit devices; the Play Store requires 64-bit). Add 32-bit ARM with `--abis "arm64-v8a;armeabi-v7a"`.
 - **Output:** `build-android-<platform>/<abi>/lib/<abi>/libJPS.Native.so`, ready to use as a native plugin in Unity / Android projects.
-- **Cross-platform consistency guarantees** (see `CMakeLists.txt`): `-ffp-contract=off -fno-fast-math` disables FMA fusion and approximate math so **the smoothed path's float results are bit-identical across x86 / ARM ABIs** (integer pathfinding itself involves no floats); `-fvisibility=hidden` trims the `.so` export surface to the public API (`jps_system_*` / `jps_pathfinder_*`), matching the Windows DLL's export behavior.
+- **Cross-platform consistency guarantees** (see `CMakeLists.txt`): `-ffp-contract=off -fno-fast-math` disables FMA fusion and approximate math so **the smoothed path's float results are bit-identical across x86 / ARM ABIs** (integer pathfinding itself involves no floats); `-fvisibility=hidden` trims the `.so` export surface to the public API (`jps_system_*` / `jps_pathfinder_*` / `jps_adapter_*`), matching the Windows DLL's export behavior.
 
 iOS / macOS need no dedicated script: `JPS.Native` is pure C11 with no external dependencies — add the sources directly to the target platform's build (static library / framework / `.so`). For running accuracy / benchmark on Linux, see the next section.
 

@@ -2,8 +2,8 @@
 #
 # build.sh — 编译独立的 JPS C 压力测试（stress.c + JPS.Native 源码，静态直连，无 P/Invoke）。
 #
-# 用 -DJPS_STATIC 让 jps.h 的 JPS_API 变空（既不 export 也不 import），把 6 个 native .c 和
-# stress.c 一起编成一个可执行文件。跑在有 C 编译器（cc/gcc/clang）的任意平台。
+# 用 -DJPS_STATIC 让 jps.h 的 JPS_API 变空（既不 export 也不 import），把 6 个 native .c、
+# pathfinder.cpp、stress.c 与 adapter_tests.c 一起编成一个可执行文件。
 #
 # 用法：
 #   bash build.sh                 # 生成 ./stress
@@ -39,7 +39,7 @@ echo "==> CC=$CC  编译 stress（JPS_STATIC，含 $NATIVE 的 .c 与 .cpp）"
 COMMON=(-O2 "${ARCH_FLAGS[@]}" -DJPS_STATIC -I"$NATIVE")
 OBJDIR="$(mktemp -d)"; trap 'rm -rf "$OBJDIR"' EXIT
 OBJS=()
-for src in stress.c "$NATIVE"/*.c; do
+for src in stress.c adapter_tests.c "$NATIVE"/*.c; do
   o="$OBJDIR/$(basename "$src").o"
   "$CC" -std=c11 "${COMMON[@]}" -c "$src" -o "$o"; OBJS+=("$o")
 done

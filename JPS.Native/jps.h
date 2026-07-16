@@ -3,14 +3,15 @@
  * JPS Pathfinding — 唯一对外发布的公共头（供 C / C++ / C# P/Invoke 调用）。
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  *
- * **集成只需这一个头文件**：导出宏、返回码、两个不透明句柄的前向声明与全部公共函数都在这里；
+ * **集成只需这一个头文件**：导出宏、返回码、三个不透明句柄的前向声明与全部公共函数都在这里；
  * 结构体定义与内部模块（grid_map / jump_point_cache / pathfinder / smoother …）不对外暴露。
  *
- * 对外只有两个不透明句柄，与 C# 版 JpsSystem / JpsPathfinder 设计一致：
+ * 对外有三个不透明句柄，与 C# 版 JpsSystem / JpsPathfinder / JpsAdapter 设计一致：
  *
  *   jps_system     —— 拥有地图 + 惰性跳点缓存；承载阻挡编辑与缓存同步。
  *   jps_pathfinder —— 持有逐节点搜索状态；寻路时绑定到某个 jps_system。
  *                     **多个 jps_pathfinder 可共享同一个 jps_system。**
+ *   jps_adapter    —— 封装 system；提供阻挡阔边和按 id 跟踪的动态矩形，不持有搜索状态。
  *
  * 典型用法（C 伪代码；C# 端用 DllImport 一一对应）：
  *
@@ -78,7 +79,9 @@ enum
     JPS_ERR_NULL          = -1,   /* 句柄为 NULL */
     JPS_ERR_OUT_OF_BOUNDS = -2,   /* 起点或终点越界 */
     JPS_ERR_BLOCKED       = -3,   /* 起点或终点本身是阻挡 */
-    JPS_ERR_NO_PATH       = -4    /* 搜索完毕未找到可达路径 */
+    JPS_ERR_NO_PATH       = -4,   /* 搜索完毕未找到可达路径 */
+    JPS_ERR_INVALID_ARGUMENT = -5,/* 非法参数（如负阔边、动态矩形尺寸非法） */
+    JPS_ERR_OUT_OF_MEMORY = -6    /* native 内存分配失败 */
 };
 
 /*
@@ -87,6 +90,7 @@ enum
  */
 typedef struct jps_system jps_system;
 typedef struct jps_pathfinder jps_pathfinder;
+typedef struct jps_adapter jps_adapter;
 
 /* ==================== jps_system：建图 / 改阻挡 / 同步 ==================== */
 
@@ -134,6 +138,64 @@ JPS_API void JPS_CALL jps_system_set_blocked_batch(jps_system *s, const int *xyv
  * 寻路前调用；尤其在改动阻挡之后、find_path 之前必须调用一次。
  */
 JPS_API void JPS_CALL jps_system_sync(jps_system *s);
+
+/* ==================== jps_adapter：阔边 / 动态矩形 / system 生命周期 ==================== */
+
+/*
+ * 创建空静态地图的 adapter。obstacle_padding=p 表示静态/动态阻挡四边各扩张 p 格；
+ * 地图边界同时内缩 p 格，保证大体积物体中心不会贴边越界。非法尺寸/负 padding/内存不足返回 NULL。
+ */
+JPS_API jps_adapter *JPS_CALL jps_adapter_create(int width, int height, int obstacle_padding);
+
+/*
+ * 从行主序静态阻挡快照创建 adapter。cells 中 0=可走、非 0=阻挡，count 必须等于 width*height。
+ * adapter 不持有 cells；返回前已完成拷贝和首次 sync。
+ */
+JPS_API jps_adapter *JPS_CALL jps_adapter_create_from_buffer(int width, int height,
+                                                             int obstacle_padding,
+                                                             const uint8_t *cells, int count);
+
+JPS_API void JPS_CALL jps_adapter_destroy(jps_adapter *adapter);
+JPS_API int JPS_CALL jps_adapter_width(const jps_adapter *adapter);
+JPS_API int JPS_CALL jps_adapter_height(const jps_adapter *adapter);
+JPS_API int JPS_CALL jps_adapter_obstacle_padding(const jps_adapter *adapter);
+JPS_API int JPS_CALL jps_adapter_dynamic_obstacle_count(const jps_adapter *adapter);
+JPS_API uint64_t JPS_CALL jps_adapter_memory_bytes(const jps_adapter *adapter);
+
+/* 改变静态/动态共用阔边并重建有效图：1=改变，0=未变，负值见 JPS_ERR_*。 */
+JPS_API int JPS_CALL jps_adapter_set_obstacle_padding(jps_adapter *adapter, int obstacle_padding);
+
+/* 修改/查询阔边前的静态阻挡。set 返回 1=改变、0=越界或未变、负值=错误。 */
+JPS_API int JPS_CALL jps_adapter_set_static_blocked(jps_adapter *adapter,
+                                                    int x, int y, int blocked);
+JPS_API int JPS_CALL jps_adapter_is_static_blocked(const jps_adapter *adapter, int x, int y);
+
+/* 查询阔边、静态和全部动态矩形合成后的有效阻挡；NULL/越界视为阻挡。 */
+JPS_API int JPS_CALL jps_adapter_is_blocked(const jps_adapter *adapter, int x, int y);
+
+/*
+ * 新增/更新动态矩形：id 用于跨帧追踪，矩形为左上角 + 半开尺寸 [x,x+w)×[y,y+h)，可在地图外。
+ * width=height=0 删除该 id；其他情况尺寸必须同时为正。
+ * 返回 1=改变，0=id 不存在/矩形未变，负值见 JPS_ERR_*。
+ */
+JPS_API int JPS_CALL jps_adapter_update_dynamic_obstacle(jps_adapter *adapter, int id,
+                                                         int x, int y, int width, int height);
+
+/* 查询动态 id；找到返回 1 并写入非 NULL 输出参数，未找到返回 0，adapter=NULL 返回 JPS_ERR_NULL。 */
+JPS_API int JPS_CALL jps_adapter_get_dynamic_obstacle(const jps_adapter *adapter, int id,
+                                                      int *out_x, int *out_y,
+                                                      int *out_width, int *out_height);
+
+/* 删除所有动态阻挡：1=有删除，0=原本为空，adapter=NULL 返回 JPS_ERR_NULL。 */
+JPS_API int JPS_CALL jps_adapter_clear_dynamic_obstacles(jps_adapter *adapter);
+
+/*
+ * 返回 adapter 内部 system 的 borrowed 指针（所有权仍属 adapter，不得 destroy）。
+ * adapter 不持有 pathfinder：单线程完成更新并 jps_adapter_sync 后，每线程创建自己的 pathfinder，
+ * 共享此 system。不要通过 jps_system_set_blocked* 直接改它，否则 adapter 覆盖计数会失去同步。
+ */
+JPS_API jps_system *JPS_CALL jps_adapter_system(jps_adapter *adapter);
+JPS_API void JPS_CALL jps_adapter_sync(jps_adapter *adapter);
 
 /* ==================== jps_pathfinder：寻路 / 取结果 ==================== */
 

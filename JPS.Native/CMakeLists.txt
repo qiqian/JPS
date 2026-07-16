@@ -31,7 +31,7 @@ target_compile_options(JPS.Native PRIVATE -fPIC -O3 -funroll-loops)
 # Hide internal symbols. ELF exports every non-static symbol by default (unlike a Windows DLL, which
 # exports nothing unless marked dllexport). With -fvisibility=hidden only symbols explicitly given
 # default visibility via JPS_API (see jps.h -> __attribute__((visibility("default")))) are
-# exported, trimming the .so's dynamic symbol table to the public API (jps_system_* / jps_pathfinder_*)
+# exported, trimming the .so's dynamic symbol table to the public API (jps_system_* / jps_pathfinder_* / jps_adapter_*)
 # and matching the Windows DLL. Internal modules (grid_map / min_heap / jump_point_cache / smoother)
 # become hidden; cross-.c calls inside the .so still resolve normally.
 target_compile_options(JPS.Native PRIVATE -fvisibility=hidden)

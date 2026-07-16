@@ -15,6 +15,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="adapter.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="grid_map.c">
       <Filter>源文件</Filter>
     </ClCompile>

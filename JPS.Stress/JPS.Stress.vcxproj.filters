@@ -15,7 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\JPS.Native\adapter.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="stress.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="adapter_tests.c">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="..\JPS.Native\system.c">

@@ -19,12 +19,14 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\JPS.Native\adapter.c" />
     <ClCompile Include="..\JPS.Native\grid_map.c" />
     <ClCompile Include="..\JPS.Native\jump_point_cache.c" />
     <ClCompile Include="..\JPS.Native\min_heap.c" />
     <ClCompile Include="..\JPS.Native\pathfinder.cpp" />
     <ClCompile Include="..\JPS.Native\smoother.c" />
     <ClCompile Include="..\JPS.Native\system.c" />
+    <ClCompile Include="adapter_tests.c" />
     <ClCompile Include="stress.c" />
   </ItemGroup>
   <ItemGroup>

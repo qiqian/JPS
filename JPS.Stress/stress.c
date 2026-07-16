@@ -23,9 +23,12 @@
  *     --scen FILE  指定 scen 文件（默认 <map.map>.scen）
  *     --no-scen    不读 scen，只跑随机对
  *     -q           安静模式（不打进度）
+ *   stress --adapter-test   运行 native jps_adapter 自测（无需地图）
  */
 
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS   /* Windows UCRT：让 fopen/sscanf 不报 deprecated；非 Windows 无影响 */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +43,8 @@
 #endif
 
 #include "jps.h"   /* 公共 API；本工程用 -DJPS_STATIC 与 JPS.Native 源码一起编译 */
+
+int jps_adapter_run_tests(void);
 
 /* ---------------- 小工具 ---------------- */
 
@@ -306,6 +311,9 @@ int main(int argc, char **argv)
     int quiet = 0;
     uint64_t seed = 12345u;
 
+    if (argc == 2 && !strcmp(argv[1], "--adapter-test"))
+        return jps_adapter_run_tests();
+
     for (int i = 1; i < argc; i++)
     {
         const char *a = argv[i];
@@ -318,7 +326,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-q")) quiet = 1;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help"))
         {
-            printf("用法: %s <map.map> [--rand N] [--seed S] [--reps R] [--scen FILE] [--no-scen] [-q]\n", argv[0]);
+            printf("用法: %s <map.map> [--rand N] [--seed S] [--reps R] [--scen FILE] [--no-scen] [-q]\n"
+                   "      %s --adapter-test\n", argv[0], argv[0]);
             return 0;
         }
         else { fprintf(stderr, "未知参数：%s\n", a); return 2; }
