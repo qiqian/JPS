@@ -153,8 +153,30 @@ JPS_API uint64_t JPS_CALL jps_pathfinder_memory_bytes(const jps_pathfinder *pf);
 JPS_API int JPS_CALL jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
                                               int sx, int sy, int gx, int gy);
 
+/*
+ * 兜底版寻路（内建 goal-snapping）：与 find_path 相同，但——
+ *   1) 允许 gx,gy 落在阻挡上（膨胀后 goal 进障碍的大体型场景）；
+ *   2) 若 gx,gy 被挡，先 **goal-snapping**：把目标移到离它最近、且朝 start 一侧的可走格（接近侧接触格），
+ *      再对这个有效目标寻路——够得到就停在接触格（reached=1）；
+ *   3) 连有效目标也到不了（被墙围死等）时不返回 NO_PATH，而是返回搜索展开过的、离有效目标最近
+ *      （octile 启发最小）的节点路径（起点亦在候选内，故至少 1 点，reached=0）。
+ * 返回：>=1 = compact path 点数（成功时已完成平滑；用 jps_pathfinder_reached_goal 区分到达/最近点）；
+ *       <0 见 JPS_ERR_*（起点越界/被挡、goal 越界仍报错；goal 被挡在本函数中不再是错误）。
+ * compact/smoothed path 与 reached 标志经现有 copy/count/reached_goal 访问器读取。
+ * 路径末点即实际落脚格（goal 或其 snap）；调用方读末点即知停在哪。
+ */
+JPS_API int JPS_CALL jps_pathfinder_find_path_nearest(jps_pathfinder *pf, jps_system *system,
+                                                      int sx, int sy, int gx, int gy);
+
 /* 最近一次寻路的 compact path 点数（起点 + 跳点/拐点 + 终点；未找到/未调用为 0）。配 jps_pathfinder_copy_path。 */
 JPS_API int JPS_CALL jps_pathfinder_path_count(const jps_pathfinder *pf);
+
+/*
+ * 最近一次寻路是否到达**有效目标**：1=到达（find_path 的 goal，或 find_path_nearest 的 goal/其 snap 接触格）；
+ * 0=返回的是离目标最近的已展开点（find_path_nearest 未达）或无结果。
+ * 供 find_path_nearest 调用方区分"到达可交互落脚格"与"尽力最近"；对严格 find_path 成功时恒为 1。
+ */
+JPS_API int JPS_CALL jps_pathfinder_reached_goal(const jps_pathfinder *pf);
 
 /*
  * 最近一次寻路的**平滑**路径点数（视线拉直后的折线；未找到/未调用为 0）。配 jps_pathfinder_copy_smoothed_path。

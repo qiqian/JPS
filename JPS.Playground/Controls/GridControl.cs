@@ -1264,6 +1264,52 @@ public sealed class GridControl : ScrollableControl
         return result;
     }
 
+    /// <summary>JPS 就近寻路：终点可落在阻挡上（会 goal-snap 到最近接触格）；不可达时停在最近可达点。</summary>
+    public PathResult RunNearest()
+    {
+        EnsureGrid();
+        _system.Sync();
+        SnapshotCleanState();
+        _overlay.SetWidth(_map.Width);
+        _overlay.BeginCollect();
+        var sw = Stopwatch.StartNew();
+        var result = _jps.FindPathNearest(_system, (_startX, _startY), (_endX, _endY), _overlay);
+        sw.Stop();
+
+        _overlay.SetPath(result.Path);
+        _overlay.SetSmoothPath(result.SmoothedPath);
+        Invalidate();
+        NotifyStatus(DescribeNearest(result, sw));
+        return result;
+    }
+
+    // JPS就近的状态文案：终点可落在阻挡上（会 snap），故不走 DescribeResult 的“终点在阻挡上”早退；
+    // 用 ReachedGoal 区分“到达(含 snap 接触格)”与“不可达、停最近点”，并报出实际落脚格。
+    private string DescribeNearest(PathResult r, Stopwatch sw)
+    {
+        if (!HasStart || !HasEnd)
+            return Loc.T("请先设置起点和终点。", "Set a start and a goal first.");
+        if (!_map.IsWalkable(_startX, _startY))
+            return Loc.T("起点位于阻挡上。", "Start is on an obstacle.");
+
+        string body;
+        if (r.Success && r.Path.Count > 0)
+        {
+            var end = r.Path[^1];
+            string status = r.ReachedGoal
+                ? Loc.T("已到达", "reached")
+                : Loc.T("目标不可达，停在最近点", "unreachable, nearest");
+            body = Loc.Zh
+                ? $"JPS就近：{status}（{end.X},{end.Y}）；扩展 {r.ExpandedNodes}，路径 {r.Path.Count} 点。"
+                : $"JPS nearest: {status} ({end.X},{end.Y}); expanded {r.ExpandedNodes}, path {r.Path.Count} pts.";
+        }
+        else
+        {
+            body = Loc.T("JPS就近：无结果。", "JPS nearest: no result.");
+        }
+        return $"{body} {Loc.T("用时", "in")} {sw.Elapsed.TotalMilliseconds:F2} ms";
+    }
+
     public PathResult RunAStar()
     {
         EnsureGrid();
@@ -1776,12 +1822,12 @@ public sealed class GridControl : ScrollableControl
                 break;
 
             case EditMode.SetEnd:
-                if (_map.IsWalkable(x, y))
-                {
-                    _endX = x; _endY = y;
-                    Invalidate();
-                    NotifyStatus(Loc.Zh ? $"终点：({x}, {y})" : $"Goal: ({x}, {y})");
-                }
+                // 终点允许落在阻挡上：供 JPS就近(nearest) 演示 goal-snapping；严格 JPS/A* 遇阻挡终点会如常报错。
+                _endX = x; _endY = y;
+                Invalidate();
+                NotifyStatus(Loc.Zh
+                    ? $"终点：({x}, {y})" + (_map.IsWalkable(x, y) ? "" : "（阻挡上，用 JPS就近）")
+                    : $"Goal: ({x}, {y})" + (_map.IsWalkable(x, y) ? "" : " (on obstacle; use JPS-nearest)"));
                 break;
         }
     }

@@ -35,6 +35,7 @@ typedef struct
 typedef struct
 {
     bool success;
+    bool reached_goal;   /* true=真正到达 goal；false=返回的是离 goal 最近的可达点（find_path_nearest 未达时） */
     jps_point *path;
     int path_count;
     int path_capacity;
@@ -171,6 +172,7 @@ typedef struct jps_pathfinder jps_pathfinder;
 static void jps__result_init(jps_path_result *r)
 {
     r->success = false;
+    r->reached_goal = false;
     r->path = NULL;
     r->path_count = 0;
     r->path_capacity = 0;
@@ -187,6 +189,7 @@ static void jps__result_free(jps_path_result *r)
 static void jps__result_reset(jps_path_result *r)
 {
     r->success = false;
+    r->reached_goal = false;
     r->path_count = 0;
 }
 
@@ -608,16 +611,126 @@ static void jps__ensure_smoothed(jps_pathfinder* pf, const jps_grid_map* map)
 
 /* ---------------- 入口 ---------------- */
 
-int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
-                             int sx, int sy, int gx, int gy)
+/*
+ * goal-snapping：goal 落在阻挡上时，按 Chebyshev 环由近及远扫描，返回**最近的可走格**——
+ * 同环内取离 start 最近(octile 最小)者（即朝 start 一侧、自然的接近侧接触格），严格 tie-break
+ * （同 h 保留扫描序先者，扫描序确定 → C≡C# 一致）。周围全被挡（半径超上限）返回 false。
+ * 环由近及远 → 首个含可走格的环即最近；OOB 环格由 is_walkable 的界内判定天然跳过。
+ */
+static bool jps__snap_goal(const jps_grid_map *m, int sx, int sy, int gx, int gy,
+                           int *out_x, int *out_y)
+{
+    int max_r = m->width > m->height ? m->width : m->height;
+    int r;
+    for (r = 1; r <= max_r; r++)
+    {
+        int64_t best_h = -1;   /* 哨兵：本环尚未找到 */
+        int bx = 0, by = 0, yy, xx;
+        for (yy = gy - r; yy <= gy + r; yy++)
+        {
+            int on_y_border = (yy == gy - r || yy == gy + r);   /* 上/下边整行；中间行只取左右两端 */
+            for (xx = gx - r; xx <= gx + r; xx++)
+            {
+                int64_t h;
+                if (!on_y_border && xx != gx - r && xx != gx + r)
+                    continue;                                    /* 跳过环内部，只取边界 */
+                if (!jps_grid_map_is_walkable(m, xx, yy))
+                    continue;
+                h = jps_octile_heuristic(xx, yy, sx, sy);
+                if (best_h < 0 || h < best_h)                    /* 严格 <：同 h 保留先者 */
+                {
+                    best_h = h; bx = xx; by = yy;
+                }
+            }
+        }
+        if (best_h >= 0) { *out_x = bx; *out_y = by; return true; }
+    }
+    return false;
+}
+
+/*
+ * 跳点粒度补偿：从最近跳点 (bx,by) 做**有界 greedy-best-first flood**（按 octile-to-goal 排序），
+ * 在连通可达域内找 octile 最小的可达格——GBFS 遇死胡同会回探其他分支，故不像纯贪心那样卡局部最小
+ * （最近可达格常在需先"绕远"才能到的方向）。上限 K 格封顶开销；连通域近 goal 的最近格通常远在 K 内。
+ * 复用 open 堆 + g_dir(存 BFS 父，主搜索数据已被 reconstruct 提走，可覆盖) + mark(fresh epoch 作 visited)。
+ * 找到最近格后沿 g_dir 父链回溯，把 (bx,by) 之后到最近格的这段逐格追加进 path（平滑器后续拉直）。
+ */
+static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
+                                int bx, int by, int gx, int gy, jps_path_result *r)
+{
+    enum { JPS__REFINE_CAP = 4096 };
+    int start_packed = jps__pack_xy(bx, by);
+    int best_packed = start_packed;
+    int64_t best_h = jps_octile_heuristic(bx, by, gx, gy);
+    int visited = 0, cur, chain_len, i;
+    int64_t prio;
+
+    jps__next_epoch(pf);                         /* fresh epoch → 全新 visited 标记，不与主搜索冲突 */
+    int visited_mark = pf->epoch * 2;
+
+    jps_min_heap_clear(&pf->open);
+    pf->mark[jps__id(pf, bx, by)] = (uint16_t)visited_mark;
+    pf->g_dir[jps__id(pf, bx, by)] = (uint64_t)(uint32_t)start_packed;   /* 自指 = 无父哨兵 */
+    jps_min_heap_enqueue(&pf->open, start_packed, best_h);
+
+    while (visited < JPS__REFINE_CAP && jps_min_heap_try_dequeue(&pf->open, &cur, &prio))
+    {
+        int cx = cur & 0xFFFF, cy = cur >> 16;
+        visited++;
+        if (prio < best_h) { best_h = prio; best_packed = cur; }   /* prio 即该格 octile（入队即标记，无重复） */
+        for (i = 0; i < JPS_DIR_COUNT; i++)
+        {
+            int dx = jps__dirs[i].dx, dy = jps__dirs[i].dy;
+            int nx = cx + dx, ny = cy + dy, nid;
+            bool ok = jps__dirs[i].diagonal ? jps_diagonal_allowed(m, cx, cy, dx, dy)
+                                            : jps_grid_map_is_walkable(m, nx, ny);
+            if (!ok)
+                continue;
+            nid = jps__id(pf, nx, ny);
+            if (pf->mark[nid] == (uint16_t)visited_mark)
+                continue;
+            pf->mark[nid] = (uint16_t)visited_mark;
+            pf->g_dir[nid] = (uint64_t)(uint32_t)cur;                 /* BFS 父 = cur */
+            jps_min_heap_enqueue(&pf->open, jps__pack_xy(nx, ny), jps_octile_heuristic(nx, ny, gx, gy));
+        }
+    }
+
+    if (best_packed == start_packed)
+        return;   /* 起点即最近，无需追加 */
+
+    /* 沿 g_dir 父链收集 best→…→start（含 best、不含 start），再逆序追加为 start 之后→best 的正向段。 */
+    jps__ensure_rebuild_nodes(pf, JPS__REFINE_CAP);
+    chain_len = 0;
+    cur = best_packed;
+    while (cur != start_packed && chain_len < JPS__REFINE_CAP)
+    {
+        pf->rebuild_nodes[chain_len++] = cur;
+        cur = (int)(uint32_t)pf->g_dir[jps__id(pf, cur & 0xFFFF, cur >> 16)];
+    }
+    jps__ensure_path_capacity(r, r->path_count + chain_len);
+    for (i = chain_len - 1; i >= 0; i--)   /* 逆序：靠近 start 的先追加 */
+    {
+        int p = pf->rebuild_nodes[i];
+        r->path[r->path_count].x = p & 0xFFFF;
+        r->path[r->path_count].y = p >> 16;
+        r->path_count++;
+    }
+}
+
+/* 搜索核心：allow_nearest=false 即经典严格 find_path；true 即 find_path_nearest——
+ * goal 落在阻挡上时先 goal-snapping 到最近可走格再寻路，且搜索耗尽时返回展开过的、
+ * 离(可能已 snap 的)目标最近(octile h 最小)的节点路径，再朝 goal 贪心下降贴近。 */
+static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
+                               int sx, int sy, int gx, int gy, bool allow_nearest)
 {
     jps_grid_map *map;
     jps_path_result *out;
     int open_mark, closed_mark;
     int start_id, goal_packed;
-    int expanded_count = 0;
     int current;   /* 出队的打包坐标 (y<<16)|x */
     int64_t prio;
+    int best_packed;   /* 离 goal 最近的已展开节点（打包坐标）；nearest 兜底用 */
+    int64_t best_h;
 
     if (pf == NULL || system == NULL)
         return JPS_ERR_NULL;
@@ -629,8 +742,25 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
 
     if (!jps_grid_map_in_bounds(map, sx, sy) || !jps_grid_map_in_bounds(map, gx, gy))
         return JPS_ERR_OUT_OF_BOUNDS;
-    if (!jps_grid_map_is_walkable(map, sx, sy) || !jps_grid_map_is_walkable(map, gx, gy))
+    if (!jps_grid_map_is_walkable(map, sx, sy))
         return JPS_ERR_BLOCKED;
+    /* 严格模式要求 goal 可走；nearest 模式允许 goal 落在阻挡上（膨胀后 goal 进障碍的场景）。 */
+    if (!allow_nearest && !jps_grid_map_is_walkable(map, gx, gy))
+        return JPS_ERR_BLOCKED;
+
+    /* nearest 模式 + goal 落在阻挡上：先 goal-snapping——把 goal 移到离它最近、朝 start 一侧的
+     * 可走格，再照常寻路。够得到该 snap 目标 → reached_goal=1 停在接触格；够不到 → 退化为"离 snap
+     * 目标最近的已展开点"、reached_goal=0。周围全被挡则维持原 goal（仍走最近已展开点兜底）。
+     * 于是 reached_goal 之后表示"到达了这个**（可能已 snap 的）有效目标**"。 */
+    if (allow_nearest && !jps_grid_map_is_walkable(map, gx, gy))
+    {
+        int sgx, sgy;
+        if (jps__snap_goal(map, sx, sy, gx, gy, &sgx, &sgy))
+        {
+            gx = sgx;
+            gy = sgy;
+        }
+    }
 
     jps__ensure_buffers(pf, map);
     jps__next_epoch(pf);   /* 缓存同步由 jps_system_sync 负责（调用方在寻路前完成） */
@@ -641,10 +771,13 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
     start_id = jps__id(pf, sx, sy);
     goal_packed = jps__pack_xy(gx, gy);
 
+    best_packed = jps__pack_xy(sx, sy);                    /* 起点必是首个展开点 → best 恒有效 */
+    best_h = jps_octile_heuristic(sx, sy, gx, gy);
+
     jps_min_heap_clear(&pf->open);
     pf->g_dir[start_id] = jps__pack_gdir_root(0, 0);   /* g=0、steps=0，起点无来向 */
     pf->mark[start_id] = (uint16_t)open_mark;
-    jps_min_heap_enqueue(&pf->open, jps__pack_xy(sx, sy), jps_octile_heuristic(sx, sy, gx, gy));
+    jps_min_heap_enqueue(&pf->open, jps__pack_xy(sx, sy), best_h);
 
     while (jps_min_heap_try_dequeue(&pf->open, &current, &prio))
     {
@@ -668,8 +801,21 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
         {
             jps__reconstruct_path(pf, sx, sy, gx, gy, out);
             out->success = true;
+            out->reached_goal = true;
             jps__ensure_smoothed(pf, map);     /* benchmark 计时包含平滑；copy/count 只读缓存 */
             return out->path_count;
+        }
+
+        /* nearest 兜底：记录离 goal 最近(octile h 最小)的已展开节点。严格 tie-break
+         * （h 相等保留先展开者），展开序确定 → C≡C# 一致。仅 nearest 模式计。 */
+        if (allow_nearest)
+        {
+            int64_t h = jps_octile_heuristic(cx, cy, gx, gy);
+            if (h < best_h)
+            {
+                best_h = h;
+                best_packed = current;
+            }
         }
 
         jps__dir dir_buf[JPS_DIR_COUNT];
@@ -715,8 +861,36 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
         }
     }
 
+    /* 搜索耗尽未达 goal。 */
+    if (allow_nearest)
+    {
+        /* 先回溯到离 goal 最近的已展开节点（起点也在候选内，best_packed 恒有效），
+         * 再从该跳点朝 goal 贪心下降到局部最近可达格，让落脚点真正贴近 goal。 */
+        int bx = best_packed & 0xFFFF, by = best_packed >> 16;
+        jps__reconstruct_path(pf, sx, sy, bx, by, out);
+        jps__nearest_refine(pf, map, bx, by, gx, gy, out);
+        out->success = true;
+        out->reached_goal = false;
+        jps__ensure_smoothed(pf, map);
+        return out->path_count;
+    }
+
     out->success = false;
     return JPS_ERR_NO_PATH;
+}
+
+int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
+                             int sx, int sy, int gx, int gy)
+{
+    return jps__find_path_core(pf, system, sx, sy, gx, gy, false);
+}
+
+/* 不可达兜底版：goal 可落在阻挡上；到不了 goal 时返回展开过的、离 goal 最近的节点路径。
+ * 返回 >=1 = 路径点数（真到达或最近点——用 jps_pathfinder_reached_goal 区分）；<0 见 JPS_ERR_*。 */
+int jps_pathfinder_find_path_nearest(jps_pathfinder *pf, jps_system *system,
+                                     int sx, int sy, int gx, int gy)
+{
+    return jps__find_path_core(pf, system, sx, sy, gx, gy, true);
 }
 
 /* ---------------- 结果访问器（不跨 ABI 传结构体/堆） ---------------- */
@@ -724,6 +898,12 @@ int jps_pathfinder_find_path(jps_pathfinder *pf, jps_system *system,
 int jps_pathfinder_path_count(const jps_pathfinder *pf)
 {
     return (pf && pf->result.success) ? pf->result.path_count : 0;
+}
+
+/* 最近一次寻路是否真正到达 goal：1=到达；0=返回的是最近点（find_path_nearest 未达）或无结果。 */
+int jps_pathfinder_reached_goal(const jps_pathfinder *pf)
+{
+    return (pf && pf->result.success && pf->result.reached_goal) ? 1 : 0;
 }
 
 int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity_points)

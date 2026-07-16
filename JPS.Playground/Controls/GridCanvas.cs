@@ -116,10 +116,13 @@ internal sealed class Direct2DGridCanvas : IGridCanvas, IDisposable
         {
             if (_target is null)
             {
+                // DPI 强制 96（1 DIP = 1 物理像素）。App 为 SystemAware DPI：ClientSize/鼠标/_cellSize 全是
+                // 物理像素，而 D2D 默认 DPI=0 会取桌面 DPI（如 150% 时 144），把按像素画的内容再放大 1.5×——
+                // 导致地图缩放错、点击落错格。锁 96 让 D2D 坐标空间与 WinForms 像素空间一致。
                 var properties = new RenderTargetProperties(
                     RenderTargetType.Hardware,
                     new PixelFormat(Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Ignore),
-                    0, 0,
+                    96, 96,
                     RenderTargetUsage.None,
                     FeatureLevel.Default);
                 var hwndProperties = new HwndRenderTargetProperties

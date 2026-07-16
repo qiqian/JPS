@@ -59,6 +59,9 @@ namespace JPS
             btnStatic.ToolTipText = Loc.T("静态障碍测试：方向键移动大障碍，其他障碍静止，小怪并行重新寻路",
                 "Static obstacle test: arrow keys move a large block; other obstacles stay put; monsters re-path in parallel");
             btnFindPath.Text = Loc.T("JPS寻路", "JPS Path");
+            btnFindPathNearest.Text = Loc.T("JPS就近", "JPS Near");
+            btnFindPathNearest.ToolTipText = Loc.T("JPS 就近寻路：终点可落在阻挡上，会 snap 到最近接触格；不可达时停在最近可达点",
+                "JPS nearest: goal may sit on an obstacle (snaps to nearest contact cell); if unreachable, stops at the nearest reachable cell");
             btnFindPathAStar.Text = Loc.T("A*寻路", "A* Path");
             btnSave.Text = Loc.T("保存", "Save");
             btnSave.ToolTipText = Loc.T("把阻挡、起点、终点保存为 JSON",
@@ -84,12 +87,13 @@ namespace JPS
             btnDynamic.Image = IconDynamic();
             btnStatic.Image = IconStatic();
             btnFindPath.Image = IconJps();
+            btnFindPathNearest.Image = IconJps();
             btnFindPathAStar.Image = IconAStar();
             btnSave.Image = IconArrow(down: true);
             btnLoad.Image = IconArrow(down: false);
             btnOpenMap.Image = IconGrid();
 
-            foreach (var b in new[] { btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, btnFindPath, btnFindPathAStar, btnSave, btnLoad, btnOpenMap })
+            foreach (var b in new[] { btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, btnFindPath, btnFindPathNearest, btnFindPathAStar, btnSave, btnLoad, btnOpenMap })
                 b.DisplayStyle = ToolStripItemDisplayStyle.ImageAndText;
         }
 
@@ -266,6 +270,8 @@ namespace JPS
         }
 
         private void BtnFindPath_Click(object? sender, EventArgs e) => gridControl.RunJps();
+
+        private void BtnFindPathNearest_Click(object? sender, EventArgs e) => gridControl.RunNearest();
 
         private void BtnFindPathAStar_Click(object? sender, EventArgs e) => gridControl.RunAStar();
 

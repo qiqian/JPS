@@ -17,6 +17,7 @@ namespace JPS
         private ToolStripButton btnDynamic;
         private ToolStripButton btnStatic;
         private ToolStripButton btnFindPath;
+        private ToolStripButton btnFindPathNearest;
         private ToolStripButton btnFindPathAStar;
         private ToolStripButton btnSave;
         private ToolStripButton btnLoad;
@@ -50,6 +51,7 @@ namespace JPS
             btnStatic = new ToolStripButton();
             toolStripSeparator1 = new ToolStripSeparator();
             btnFindPath = new ToolStripButton();
+            btnFindPathNearest = new ToolStripButton();
             btnFindPathAStar = new ToolStripButton();
             toolStripSeparator2 = new ToolStripSeparator();
             btnSave = new ToolStripButton();
@@ -71,7 +73,7 @@ namespace JPS
             toolStrip1.ImageScalingSize = new Size(20, 20);
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
-                btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, toolStripSeparator1, btnFindPath, btnFindPathAStar,
+                btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, toolStripSeparator1, btnFindPath, btnFindPathNearest, btnFindPathAStar,
                 toolStripSeparator2, btnSave, btnLoad, btnOpenMap
             });
             toolStrip1.Location = new Point(0, 0);
@@ -142,7 +144,16 @@ namespace JPS
             btnFindPath.Size = new Size(80, 28);
             btnFindPath.Text = "JPS寻路";
             btnFindPath.Click += BtnFindPath_Click;
-            // 
+            //
+            // btnFindPathNearest
+            //
+            btnFindPathNearest.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            btnFindPathNearest.Name = "btnFindPathNearest";
+            btnFindPathNearest.Size = new Size(80, 28);
+            btnFindPathNearest.Text = "JPS就近";
+            btnFindPathNearest.ToolTipText = "JPS 就近寻路：终点可落在阻挡上，会 snap 到最近接触格；不可达时停在最近可达点";
+            btnFindPathNearest.Click += BtnFindPathNearest_Click;
+            //
             // btnFindPathAStar
             // 
             btnFindPathAStar.DisplayStyle = ToolStripItemDisplayStyle.Text;

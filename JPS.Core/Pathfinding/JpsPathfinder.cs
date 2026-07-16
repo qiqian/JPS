@@ -46,6 +46,9 @@ namespace JPS.Pathfinding
     public sealed class PathResult
     {
         public bool Success { get; set; }
+        /// <summary>true=到达有效目标（goal，或 FindPathNearest 对被挡 goal 做 snap 后的接触格）；
+        /// false=返回的是离目标最近的已展开点（FindPathNearest 未达时）。</summary>
+        public bool ReachedGoal { get; set; }
         /// <summary>
         /// JPS exposes only compact path points. It does not expose an expanded per-cell path.
         /// A* keeps its adjacent-cell baseline path for cost/accuracy comparison.
@@ -107,15 +110,39 @@ namespace JPS.Pathfinding
         /// 每个 JpsPathfinder 只持有自己的逐节点搜索状态，故不同实例可在各自线程上共用同一个 system。
         /// </summary>
         public PathResult FindPath(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
+            => FindPathCore(system, start, goal, obs, allowNearest: false);
+
+        /// <summary>
+        /// 不可达兜底版寻路：与 <see cref="FindPath"/> 相同，但 (1) 允许 goal 落在阻挡上（膨胀后 goal 进障碍的
+        /// 大体型场景）；(2) 到不了 goal（含 goal 被挡/被围）时不失败，而是返回搜索展开过的、离 goal 最近
+        /// (octile 启发最小) 的节点路径（起点亦在候选内，至少 1 点）。用 <see cref="PathResult.ReachedGoal"/>
+        /// 区分“真到达”与“尽力最近”。与 C 版 jps_pathfinder_find_path_nearest 语义与定序严格一致。
+        /// </summary>
+        public PathResult FindPathNearest(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs = null)
+            => FindPathCore(system, start, goal, obs, allowNearest: true);
+
+        private PathResult FindPathCore(JpsSystem system, (int X, int Y) start, (int X, int Y) goal, ISearchObserver? obs, bool allowNearest)
         {
             var map = system.Map;
             _cache = system.Cache;
 
-            if (start.X < 0 || start.Y < 0 || goal.X < 0 || goal.Y < 0)
-                return new PathResult { Message = "请先设置起点和终点。" };
+            if (start.X < 0 || start.Y < 0 || start.X >= map.Width || start.Y >= map.Height ||
+                goal.X < 0 || goal.Y < 0 || goal.X >= map.Width || goal.Y >= map.Height)
+                return new PathResult { Message = "起点或终点越界。" };
+            if (!map.IsWalkable(start.X, start.Y))
+                return new PathResult { Message = "起点位于阻挡上。" };
+            // 严格模式要求 goal 可走；nearest 模式允许 goal 落在阻挡上。
+            if (!allowNearest && !map.IsWalkable(goal.X, goal.Y))
+                return new PathResult { Message = "终点位于阻挡上。" };
 
-            if (!map.IsWalkable(start.X, start.Y) || !map.IsWalkable(goal.X, goal.Y))
-                return new PathResult { Message = "起点或终点位于阻挡上。" };
+            // nearest 模式 + goal 被挡：先 goal-snapping 到最近、朝 start 一侧的可走格（接近侧接触格）再寻路；
+            // 够得到 → reached=true 停在接触格，够不到 → 退化为最近已展开点。snap 不到则维持原 goal。
+            // 于是 ReachedGoal 表示“到达了这个（可能已 snap 的）有效目标”。与 C 版 jps__snap_goal 逐位一致。
+            if (allowNearest && !map.IsWalkable(goal.X, goal.Y)
+                && SnapGoal(map, start.X, start.Y, goal.X, goal.Y, out int sgx, out int sgy))
+            {
+                goal = (sgx, sgy);
+            }
 
             EnsureBuffers(map);
             NextGeneration();   // 缓存同步由 JpsSystem.Sync 负责（调用方在寻路前完成）
@@ -127,10 +154,13 @@ namespace JPS.Pathfinding
             int startId = Id(start.X, start.Y);
             int goalId = Id(gx, gy);
 
+            int bestNode = startId;                                              // 起点必是首个展开点 → best 恒有效
+            long bestH = JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy);
+
             _open.Clear();
             _gDir[startId] = PackGdir(0, 0, -1);   // g=0、steps=0、无来向（剪枝时探索全部方向；回溯到此即停）
             _mark[startId] = (ushort)openMark;
-            _open.Enqueue(startId, JpsDirections.OctileHeuristic(start.X, start.Y, gx, gy));
+            _open.Enqueue(startId, bestH);
 
             int expandedCount = 0;
 
@@ -147,7 +177,15 @@ namespace JPS.Pathfinding
                 obs?.OnExpand(cx, cy);
 
                 if (current == goalId)
-                    return Success(map, startId, goalId, expandedCount);
+                    return Success(map, startId, goalId, expandedCount, reached: true, gx, gy);
+
+                // nearest 兜底：记录离 goal 最近(octile 最小)的已展开节点。严格 tie-break（h 相等保留先展开者），
+                // 展开序确定 → C≡C# 一致。仅 nearest 模式计。
+                if (allowNearest)
+                {
+                    long h = JpsDirections.OctileHeuristic(cx, cy, gx, gy);
+                    if (h < bestH) { bestH = h; bestNode = current; }
+                }
 
                 int dirCount = FillDirections(map, cx, cy, GdDir(_gDir[current]));
 
@@ -191,6 +229,9 @@ namespace JPS.Pathfinding
                 }
             }
 
+            // 搜索耗尽未达 goal。返回离 goal 最近的已展开节点，再朝 goal 贪心下降贴近（在 Success 内）。
+            if (allowNearest)
+                return Success(map, startId, bestNode, expandedCount, reached: false, gx, gy);
             return Failure(expandedCount);
         }
 
@@ -275,21 +316,122 @@ namespace JPS.Pathfinding
 
         // ---------------- 结果构造 ----------------
 
-        private PathResult Success(GridMap map, int startId, int goalId, int expandedCount)
+        private PathResult Success(GridMap map, int startId, int endId, int expandedCount, bool reached, int gx, int gy)
         {
-            var path = ReconstructPath(startId, goalId);
+            var path = ReconstructPath(startId, endId);
+            if (!reached)
+                NearestRefine(map, path[^1].X, path[^1].Y, gx, gy, path);   // 跳点粒度补偿：从最近跳点有界 GBFS 找真最近可达格
             return new PathResult
             {
                 Success = true,
+                ReachedGoal = reached,
                 Path = path,
                 SmoothedPath = PathSmoother.Smooth(map, path),
                 ExpandedNodes = expandedCount,
-                Message = $"JPS：扩展 {expandedCount}，路径 {path.Count} 点。"
+                Message = reached
+                    ? $"JPS：扩展 {expandedCount}，路径 {path.Count} 点。"
+                    : $"JPS：未达终点，返回最近点（扩展 {expandedCount}，路径 {path.Count} 点）。"
             };
         }
 
         private static PathResult Failure(int expandedCount) =>
             new PathResult { ExpandedNodes = expandedCount, Message = $"JPS：未找到路径（扩展 {expandedCount}）。" };
+
+        /// <summary>
+        /// goal-snapping：goal 落在阻挡上时按 Chebyshev 环由近及远扫，返回最近的可走格——同环内取离 start
+        /// 最近(octile 最小)者（接近侧接触格），严格 tie-break（同 h 保留扫描序先者）。周围全被挡返回 false。
+        /// 环由近及远 → 首个含可走格的环即最近；OOB 环格由 IsWalkable 的界内判定天然跳过。
+        /// 与 C 版 jps__snap_goal 的环迭代序与选取严格一致，保证 C≡C#。
+        /// </summary>
+        private static bool SnapGoal(GridMap map, int sx, int sy, int gx, int gy, out int ox, out int oy)
+        {
+            ox = 0; oy = 0;
+            int maxR = Math.Max(map.Width, map.Height);
+            for (int r = 1; r <= maxR; r++)
+            {
+                long bestH = -1;   // 哨兵：本环尚未找到
+                int bx = 0, by = 0;
+                for (int yy = gy - r; yy <= gy + r; yy++)
+                {
+                    bool onYBorder = (yy == gy - r || yy == gy + r);   // 上/下边整行；中间行只取左右两端
+                    for (int xx = gx - r; xx <= gx + r; xx++)
+                    {
+                        if (!onYBorder && xx != gx - r && xx != gx + r)
+                            continue;                                  // 跳过环内部，只取边界
+                        if (!map.IsWalkable(xx, yy))
+                            continue;
+                        long h = JpsDirections.OctileHeuristic(xx, yy, sx, sy);
+                        if (bestH < 0 || h < bestH)                    // 严格 <：同 h 保留先者
+                        {
+                            bestH = h; bx = xx; by = yy;
+                        }
+                    }
+                }
+                if (bestH >= 0) { ox = bx; oy = by; return true; }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 跳点粒度补偿：从最近跳点 (bx,by) 做有界 greedy-best-first flood（按 octile-to-goal 排序），在连通
+        /// 可达域内找 octile 最小的可达格——GBFS 遇死胡同会回探其他分支，故不像纯贪心那样卡局部最小（最近
+        /// 可达格常在需先“绕远”才能到的方向）。上限 Cap 格封顶开销。复用 _open 堆 + _gDir(存 BFS 父，主搜索
+        /// 数据已被 ReconstructPath 提走) + _mark(fresh 世代作 visited)。沿父链回溯把 (bx,by) 之后到最近格逐格
+        /// 追加进 path（平滑器后续拉直）。堆只按 octile 排序、载荷(id)不参与比较 → 出队序与 C 版一致，输出相同。
+        /// </summary>
+        private void NearestRefine(GridMap map, int bx, int by, int gx, int gy, List<(int X, int Y)> path)
+        {
+            const int Cap = 4096;
+            int startNode = Id(bx, by);
+            int bestNode = startNode;
+            long bestH = JpsDirections.OctileHeuristic(bx, by, gx, gy);
+            int visited = 0;
+
+            NextGeneration();                          // fresh 世代 → 全新 visited 标记，不与主搜索冲突
+            int visitedMark = _gen * 2;
+
+            _open.Clear();
+            _mark[startNode] = (ushort)visitedMark;
+            _gDir[startNode] = (ulong)(uint)startNode;   // 自指 = 无父哨兵
+            _open.Enqueue(startNode, bestH);
+
+            while (visited < Cap && _open.TryDequeue(out int cur, out long prio))
+            {
+                int cx = cur % _w, cy = cur / _w;
+                visited++;
+                if (prio < bestH) { bestH = prio; bestNode = cur; }   // prio 即该格 octile（入队即标记，无重复）
+                for (int i = 0; i < JpsDirections.Count; i++)
+                {
+                    var (dx, dy) = JpsDirections.All[i];
+                    int nx = cx + dx, ny = cy + dy;
+                    bool ok = JpsDirections.IsDiagonalIndex(i)
+                        ? JpsDirections.DiagonalAllowed(map, cx, cy, dx, dy)
+                        : map.IsWalkable(nx, ny);
+                    if (!ok)
+                        continue;
+                    int nid = Id(nx, ny);
+                    if (_mark[nid] == (ushort)visitedMark)
+                        continue;
+                    _mark[nid] = (ushort)visitedMark;
+                    _gDir[nid] = (ulong)(uint)cur;                    // BFS 父 = cur
+                    _open.Enqueue(nid, JpsDirections.OctileHeuristic(nx, ny, gx, gy));
+                }
+            }
+
+            if (bestNode == startNode)
+                return;   // 起点即最近，无需追加
+
+            // 沿 _gDir 父链收集 best→…→start（含 best、不含 start），逆序追加为 start 之后→best 的正向段
+            var chain = new List<int>();
+            int c = bestNode;
+            while (c != startNode && chain.Count < Cap)
+            {
+                chain.Add(c);
+                c = (int)(uint)_gDir[c];
+            }
+            for (int i = chain.Count - 1; i >= 0; i--)
+                path.Add((chain[i] % _w, chain[i] / _w));
+        }
 
         // ---------------- 缓冲区与代次 ----------------
 
