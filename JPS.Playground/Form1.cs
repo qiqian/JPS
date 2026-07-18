@@ -19,6 +19,7 @@ namespace JPS
         private static readonly (Func<Color> Color, string Label)[] LegendItems =
         [
             (() => GridControl.ObstacleColor, Loc.T("阻挡", "Obstacle")),
+            (() => GridControl.AdapterExpandedObstacleColor, Loc.T("Adapter 扩展阻挡", "Adapter padding")),
             (() => GridControl.StartColor, Loc.T("起点 S", "Start S")),
             (() => GridControl.EndColor, Loc.T("终点 G", "Goal G")),
             (() => GridControl.PathColor, Loc.T("路径", "Path")),
@@ -63,6 +64,12 @@ namespace JPS
             btnFindPathNearest.ToolTipText = Loc.T("JPS 就近寻路：终点可落在阻挡上，会 snap 到最近接触格；不可达时停在最近可达点",
                 "JPS nearest: goal may sit on an obstacle (snaps to nearest contact cell); if unreachable, stops at the nearest reachable cell");
             btnFindPathAStar.Text = Loc.T("A*寻路", "A* Path");
+            bodySizeLabel.Text = Loc.T("体型:", "Body:");
+            bodySizeLabel.ToolTipText = Loc.T("单位中心到边缘的格数；adapter 会按此值扩展阻挡",
+                "Cells from the unit center to its edge; the adapter expands obstacles by this amount");
+            txtBodySize.AccessibleName = Loc.T("体型阔边", "Body padding");
+            txtBodySize.ToolTipText = Loc.T("0 表示 1×1；1 表示占用宽度 3 格",
+                "0 means 1×1; 1 means a 3-cell-wide body");
             btnSave.Text = Loc.T("保存", "Save");
             btnSave.ToolTipText = Loc.T("把阻挡、起点、终点保存为 JSON",
                 "Save obstacles, start and goal to JSON");
@@ -274,6 +281,37 @@ namespace JPS
         private void BtnFindPathNearest_Click(object? sender, EventArgs e) => gridControl.RunNearest();
 
         private void BtnFindPathAStar_Click(object? sender, EventArgs e) => gridControl.RunAStar();
+
+        private void BodySize_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                ApplyBodySize();
+                gridControl.Focus();
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                txtBodySize.Text = gridControl.ObstaclePadding.ToString();
+                gridControl.Focus();
+                e.SuppressKeyPress = true;
+            }
+        }
+
+        private void BodySize_Leave(object? sender, EventArgs e) => ApplyBodySize();
+
+        private void ApplyBodySize()
+        {
+            if (int.TryParse(txtBodySize.Text.Trim(), out int padding) && padding is >= 0 and <= 128)
+            {
+                txtBodySize.Text = padding.ToString();
+                gridControl.SetObstaclePadding(padding);
+                return;
+            }
+
+            txtBodySize.Text = gridControl.ObstaclePadding.ToString();
+            statusLabel.Text = Loc.T("体型请输入 0～128 的整数。", "Body padding must be an integer from 0 to 128.");
+        }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {

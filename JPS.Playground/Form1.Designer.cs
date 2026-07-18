@@ -19,6 +19,8 @@ namespace JPS
         private ToolStripButton btnFindPath;
         private ToolStripButton btnFindPathNearest;
         private ToolStripButton btnFindPathAStar;
+        private ToolStripLabel bodySizeLabel;
+        private ToolStripTextBox txtBodySize;
         private ToolStripButton btnSave;
         private ToolStripButton btnLoad;
         private ToolStripButton btnOpenMap;
@@ -53,6 +55,8 @@ namespace JPS
             btnFindPath = new ToolStripButton();
             btnFindPathNearest = new ToolStripButton();
             btnFindPathAStar = new ToolStripButton();
+            bodySizeLabel = new ToolStripLabel();
+            txtBodySize = new ToolStripTextBox();
             toolStripSeparator2 = new ToolStripSeparator();
             btnSave = new ToolStripButton();
             btnLoad = new ToolStripButton();
@@ -74,7 +78,7 @@ namespace JPS
             toolStrip1.Items.AddRange(new ToolStripItem[]
             {
                 btnBrush, btnStart, btnEnd, btnClear, btnDynamic, btnStatic, toolStripSeparator1, btnFindPath, btnFindPathNearest, btnFindPathAStar,
-                toolStripSeparator2, btnSave, btnLoad, btnOpenMap
+                bodySizeLabel, txtBodySize, toolStripSeparator2, btnSave, btnLoad, btnOpenMap
             });
             toolStrip1.Location = new Point(0, 0);
             toolStrip1.Name = "toolStrip1";
@@ -161,6 +165,25 @@ namespace JPS
             btnFindPathAStar.Size = new Size(80, 28);
             btnFindPathAStar.Text = "A*寻路";
             btnFindPathAStar.Click += BtnFindPathAStar_Click;
+            //
+            // bodySizeLabel
+            //
+            bodySizeLabel.Name = "bodySizeLabel";
+            bodySizeLabel.Size = new Size(45, 28);
+            bodySizeLabel.Text = "体型:";
+            bodySizeLabel.ToolTipText = "单位中心到边缘的格数；adapter 会按此值扩展阻挡";
+            //
+            // txtBodySize
+            //
+            txtBodySize.AccessibleName = "体型阔边";
+            txtBodySize.MaxLength = 3;
+            txtBodySize.Name = "txtBodySize";
+            txtBodySize.Size = new Size(42, 31);
+            txtBodySize.Text = "0";
+            txtBodySize.TextBoxTextAlign = HorizontalAlignment.Center;
+            txtBodySize.ToolTipText = "0 表示 1×1；1 表示占用宽度 3 格";
+            txtBodySize.KeyDown += BodySize_KeyDown;
+            txtBodySize.Leave += BodySize_Leave;
             // 
             // btnSave
             // 

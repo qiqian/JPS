@@ -29,6 +29,7 @@ public sealed class GridControl : ScrollableControl
     private const double DynamicObstacleMoveChance = 0.18;
     private const double DynamicRandomRepathChance = 0.06;
     private const int DynamicPathfinderPoolInitialSize = 2;
+    private const int DynamicBlockAdapterId = 1;
 
     private sealed class DynamicMonster
     {
@@ -63,6 +64,7 @@ public sealed class GridControl : ScrollableControl
         public int Y;
         public readonly List<(int X, int Y)> Cells = new();
         public readonly HashSet<(int X, int Y)> CellSet = new();
+        public readonly List<int> AdapterIds = new();
 
         public DynamicObstacle(int x, int y)
         {
@@ -99,8 +101,12 @@ public sealed class GridControl : ScrollableControl
     private readonly AStarPathfinder _astar = new();
     private readonly SearchOverlay _overlay = new();   // 视图层的可视化叠加，与模型分离
 
-    private JpsSystem _system;   // 地图 + 共享跳点缓存
-    private GridMap _map;        // = _system.Map（保留以简化既有引用）
+    private JpsAdapter _adapter = null!; // 原始阻挡 + 体型阔边 + 动态阻挡
+    private JpsSystem _system = null!;   // = _adapter.System；供独立 JpsPathfinder 使用
+    private GridMap _map = null!;        // = _adapter.Map（阔边后的有效地图）
+    private int _obstaclePadding;
+    private int? _pendingObstaclePadding;
+    private int _nextDynamicAdapterId = DynamicBlockAdapterId + 1;
     private EditMode _mode = EditMode.BrushObstacle;
     private bool _isPainting;
     private bool _eraseObstacle;
@@ -142,6 +148,7 @@ public sealed class GridControl : ScrollableControl
     // 公开的配色，供图例复用，保证图例与网格颜色一致
     public static readonly Color WalkableColor = Color.FromArgb(112, 112, 118);
     public static readonly Color ObstacleColor = Color.FromArgb(32, 32, 36);
+    public static readonly Color AdapterExpandedObstacleColor = Color.FromArgb(43, 78, 104);
     public static readonly Color ExpandedColor = Color.FromArgb(30, 158, 70);
     public static readonly Color FrontierColor = Color.FromArgb(168, 84, 224);
     public static readonly Color ScannedColor = Color.FromArgb(70, 104, 168);
@@ -183,8 +190,7 @@ public sealed class GridControl : ScrollableControl
         AutoScroll = true;   // 所有模式都启用滚动：内容超出视口（放大后/大图）即出现滚动条
 
         BackColor = Color.FromArgb(60, 60, 64);
-        _system = new JpsSystem(new GridMap(80, 50));
-        _map = _system.Map;
+        ReplaceAdapter(new GridMap(80, 50));
         _overlay.SetWidth(_map.Width);
 
         _dynamicTimer.Interval = 33;
@@ -198,6 +204,62 @@ public sealed class GridControl : ScrollableControl
             EnsureGrid();
             return _map;
         }
+    }
+
+    /// <summary>大体型单位的阻挡阔边（格数）。0 表示单格中心点寻路。</summary>
+    public int ObstaclePadding => _obstaclePadding;
+
+    public void SetObstaclePadding(int obstaclePadding)
+    {
+        if (obstaclePadding < 0)
+            throw new ArgumentOutOfRangeException(nameof(obstaclePadding));
+        if (_obstaclePadding == obstaclePadding)
+            return;
+        if (_dynamicMode && _dynamicBusy)
+        {
+            _pendingObstaclePadding = obstaclePadding;
+            NotifyStatus(Loc.T("体型将在当前动态寻路帧结束后更新。",
+                "Body size will update after the current dynamic pathfinding frame."));
+            return;
+        }
+
+        _obstaclePadding = obstaclePadding;
+        _adapter.SetObstaclePadding(obstaclePadding);
+        if (_dynamicMode)
+            RevalidateDynamicMonstersForBodySize();
+        _overlay.Clear();
+        Invalidate();
+        NotifyStatus(Loc.Zh
+            ? $"体型阔边：{obstaclePadding} 格（占用宽度 {obstaclePadding * 2L + 1} 格）。"
+            : $"Body padding: {obstaclePadding} cells ({obstaclePadding * 2L + 1} cells wide).");
+    }
+
+    private void RevalidateDynamicMonstersForBodySize()
+    {
+        for (int i = 0; i < _monsters.Length; i++)
+        {
+            var monster = _monsters[i];
+            if (!_map.IsWalkable(monster.X, monster.Y))
+            {
+                var position = RandomDynamicFreeCell(exceptMonster: i);
+                monster.X = position.X;
+                monster.Y = position.Y;
+                monster.VisualX = position.X;
+                monster.VisualY = position.Y;
+            }
+
+            if (!_map.IsWalkable(monster.TargetX, monster.TargetY))
+                PickMonsterTarget(i);
+            else
+                ClearMonsterPath(monster);
+        }
+    }
+
+    private void ReplaceAdapter(GridMap originalMap)
+    {
+        _adapter = new JpsAdapter(originalMap, _obstaclePadding);
+        _system = _adapter.System;
+        _map = _adapter.Map;
     }
 
     public void SetMode(EditMode mode) => _mode = mode;
@@ -248,6 +310,7 @@ public sealed class GridControl : ScrollableControl
         _dynamicBlockX = DynamicWidth / 2 - DynamicBlockW / 2;
         _dynamicBlockY = DynamicHeight / 2 - DynamicBlockH / 2;
         BuildDynamicStaticObstacles();
+        RebuildDynamicDisplayMap();
         EnsureDynamicPathfinderPool();
 
         _monsters = new DynamicMonster[DynamicMonsterCount];
@@ -258,7 +321,6 @@ public sealed class GridControl : ScrollableControl
             PickMonsterTarget(i);
         }
 
-        RebuildDynamicDisplayMap();
         Focus();
         _dynamicTimer.Start();
         Invalidate();
@@ -277,6 +339,8 @@ public sealed class GridControl : ScrollableControl
             return;
 
         _dynamicTimer.Stop();
+        // 停止后把当前动态场景固化为原始静态地图，避免清掉动态 id 后留下“幽灵阔边”。
+        var snapshot = BuildDynamicMap();
         _dynamicMode = false;
         _obstaclesAutoMove = true;
         _dynamicBusy = false;
@@ -286,6 +350,9 @@ public sealed class GridControl : ScrollableControl
         _pendingBlockDx = 0;
         _pendingBlockDy = 0;
         _overlay.Clear();
+        ReplaceAdapter(snapshot);
+        _overlay.SetWidth(_map.Width);
+        Invalidate();
         NotifyStatus(Loc.T("障碍测试已停止。", "Obstacle test stopped."));
     }
 
@@ -293,6 +360,7 @@ public sealed class GridControl : ScrollableControl
     {
         _dynamicStaticBlocked = new bool[DynamicWidth, DynamicHeight];
         _dynamicObstacles.Clear();
+        _nextDynamicAdapterId = DynamicBlockAdapterId + 1;
 
         for (int x = 0; x < DynamicWidth; x++)
         {
@@ -384,8 +452,11 @@ public sealed class GridControl : ScrollableControl
         if (obstacle.Cells.Count == 0 || !CanPlaceDynamicObstacle(obstacle, 0, 0))
             return;
 
+        for (int i = 0; i < obstacle.Cells.Count; i++)
+            obstacle.AdapterIds.Add(_nextDynamicAdapterId++);
+
         _dynamicObstacles.Add(obstacle);
-        SetDynamicObstacleCells(obstacle, blocked: true, updateMap: false);
+        SetDynamicObstacleCells(obstacle, blocked: true);
     }
 
     private void AddDynamicStaticCell(int x, int y)
@@ -440,10 +511,11 @@ public sealed class GridControl : ScrollableControl
         if (!CanPlaceDynamicObstacle(obstacle, dx, dy))
             return false;
 
-        SetDynamicObstacleCells(obstacle, blocked: false, updateMap: true);
+        SetDynamicObstacleCells(obstacle, blocked: false);
         obstacle.X = nextX;
         obstacle.Y = nextY;
-        SetDynamicObstacleCells(obstacle, blocked: true, updateMap: true);
+        SetDynamicObstacleCells(obstacle, blocked: true);
+        UpdateDynamicObstacleInAdapter(obstacle);
         return true;
     }
 
@@ -460,7 +532,7 @@ public sealed class GridControl : ScrollableControl
                 return false;
             if (IsInDynamicBlock(x, y))
                 return false;
-            if (DynamicCellHasMonster(x, y))
+            if (DynamicCellTouchesMonster(x, y))
                 return false;
             if (_dynamicStaticBlocked[x, y] && !obstacle.ContainsWorldCell(x, y))
                 return false;
@@ -469,19 +541,20 @@ public sealed class GridControl : ScrollableControl
         return true;
     }
 
-    private bool DynamicCellHasMonster(int x, int y)
+    private bool DynamicCellTouchesMonster(int x, int y)
     {
         for (int i = 0; i < _monsters.Length; i++)
         {
             var m = _monsters[i];
-            if (m.X == x && m.Y == y)
+            if (Math.Abs(m.X - x) <= _obstaclePadding &&
+                Math.Abs(m.Y - y) <= _obstaclePadding)
                 return true;
         }
 
         return false;
     }
 
-    private void SetDynamicObstacleCells(DynamicObstacle obstacle, bool blocked, bool updateMap)
+    private void SetDynamicObstacleCells(DynamicObstacle obstacle, bool blocked)
     {
         if (_dynamicStaticBlocked == null)
             return;
@@ -494,8 +567,16 @@ public sealed class GridControl : ScrollableControl
                 continue;
 
             _dynamicStaticBlocked[x, y] = blocked;
-            if (updateMap && _map.Width == DynamicWidth && _map.Height == DynamicHeight)
-                _map.SetBlocked(x, y, blocked);
+        }
+    }
+
+    private void UpdateDynamicObstacleInAdapter(DynamicObstacle obstacle)
+    {
+        for (int i = 0; i < obstacle.Cells.Count; i++)
+        {
+            var cell = obstacle.Cells[i];
+            _adapter.UpdateDynamicObstacle(
+                obstacle.AdapterIds[i], obstacle.X + cell.X, obstacle.Y + cell.Y, 1, 1);
         }
     }
 
@@ -525,6 +606,11 @@ public sealed class GridControl : ScrollableControl
         finally
         {
             _dynamicBusy = false;
+            if (_pendingObstaclePadding is int padding)
+            {
+                _pendingObstaclePadding = null;
+                SetObstaclePadding(padding);
+            }
         }
     }
 
@@ -553,7 +639,7 @@ public sealed class GridControl : ScrollableControl
         if (_dynamicFrames % DynamicMonsterMoveInterval != 0)
             return;
 
-        _system.Sync();
+        _adapter.Sync();
         SnapshotCleanState();   // 本 tick 寻路前的 clean 快照，供跳点缓存可视化区分“本帧新算(橙)/之前已缓存(白)”
         var requests = new List<DynamicMonsterSnapshot>();
 
@@ -848,11 +934,40 @@ public sealed class GridControl : ScrollableControl
         return map;
     }
 
+    private GridMap BuildDynamicAdapterStaticMap()
+    {
+        var map = new GridMap(DynamicWidth, DynamicHeight);
+        if (_dynamicStaticBlocked == null)
+            return map;
+
+        for (int y = 0; y < DynamicHeight; y++)
+        {
+            for (int x = 0; x < DynamicWidth; x++)
+            {
+                if (_dynamicStaticBlocked[x, y] && !IsMovingDynamicObstacleCell(x, y))
+                    map.SetBlocked(x, y, true);
+            }
+        }
+
+        return map;
+    }
+
+    private bool IsMovingDynamicObstacleCell(int x, int y)
+    {
+        foreach (var obstacle in _dynamicObstacles)
+            if (obstacle.ContainsWorldCell(x, y))
+                return true;
+        return false;
+    }
+
     private void RebuildDynamicDisplayMap()
     {
-        var map = BuildDynamicMap();
-        _system = new JpsSystem(map);
-        _map = map;
+        ReplaceAdapter(BuildDynamicAdapterStaticMap());
+        _adapter.UpdateDynamicObstacle(
+            DynamicBlockAdapterId, _dynamicBlockX, _dynamicBlockY, DynamicBlockW, DynamicBlockH);
+        foreach (var obstacle in _dynamicObstacles)
+            UpdateDynamicObstacleInAdapter(obstacle);
+        _adapter.Sync();
         _overlay.SetWidth(_map.Width);
         if (!_dynamicMode)
             _overlay.Clear();
@@ -1027,9 +1142,7 @@ public sealed class GridControl : ScrollableControl
     {
         if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
             return false;
-        if (_dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y])
-            return false;
-        if (IsInDynamicBlock(x, y))
+        if (!_map.IsWalkable(x, y))
             return false;
 
         for (int i = 0; i < _monsters.Length; i++)
@@ -1053,9 +1166,7 @@ public sealed class GridControl : ScrollableControl
     {
         if ((uint)x >= DynamicWidth || (uint)y >= DynamicHeight)
             return true;
-        if (_dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y])
-            return true;
-        return IsInDynamicBlock(x, y);
+        return _map.IsBlocked(x, y);
     }
 
     // 怪物从 (fx,fy) 走一步到相邻格 (tx,ty) 是否合法：目标格 free（含避让其他怪），
@@ -1123,11 +1234,9 @@ public sealed class GridControl : ScrollableControl
         if (DynamicBlockOverlapsMonster(nextX, nextY))
             return false;
 
-        int oldX = _dynamicBlockX;
-        int oldY = _dynamicBlockY;
         _dynamicBlockX = nextX;
         _dynamicBlockY = nextY;
-        ApplyDynamicBlockToCurrentMap(oldX, oldY, nextX, nextY);
+        ApplyDynamicBlockToCurrentMap(nextX, nextY);
 
         _overlay.Clear();
         return true;
@@ -1138,34 +1247,28 @@ public sealed class GridControl : ScrollableControl
         for (int i = 0; i < _monsters.Length; i++)
         {
             var m = _monsters[i];
-            if (m.X >= blockX && m.X < blockX + DynamicBlockW &&
-                m.Y >= blockY && m.Y < blockY + DynamicBlockH)
+            if (m.X >= blockX - _obstaclePadding &&
+                m.X < blockX + DynamicBlockW + _obstaclePadding &&
+                m.Y >= blockY - _obstaclePadding &&
+                m.Y < blockY + DynamicBlockH + _obstaclePadding)
                 return true;
         }
 
         return false;
     }
 
-    private void ApplyDynamicBlockToCurrentMap(int oldX, int oldY, int newX, int newY)
+    private void ApplyDynamicBlockToCurrentMap(int newX, int newY)
     {
-        for (int y = oldY; y < oldY + DynamicBlockH; y++)
-            for (int x = oldX; x < oldX + DynamicBlockW; x++)
-                if (_dynamicStaticBlocked == null || !_dynamicStaticBlocked[x, y])
-                    SetDynamicAwareBlocked(x, y, false);
-
-        for (int y = newY; y < newY + DynamicBlockH; y++)
-            for (int x = newX; x < newX + DynamicBlockW; x++)
-                _map.SetBlocked(x, y, true);
-
-        _system.Sync();
+        _adapter.UpdateDynamicObstacle(
+            DynamicBlockAdapterId, newX, newY, DynamicBlockW, DynamicBlockH);
+        _adapter.Sync();
     }
 
     public void ClearMap()
     {
         StopDynamicDemo();
         EnsureGrid();
-        _map.ClearAll();
-        _system.Sync();
+        ReplaceAdapter(new GridMap(_map.Width, _map.Height));
         _startX = _startY = _endX = _endY = -1;
         _overlay.Clear();
         Invalidate();
@@ -1184,7 +1287,7 @@ public sealed class GridControl : ScrollableControl
 
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
-                if (_map.IsBlocked(x, y))
+                if (_adapter.IsStaticBlocked(x, y))
                     data.Obstacles.Add(new PointData { X = x, Y = y });
 
         return data;
@@ -1198,8 +1301,7 @@ public sealed class GridControl : ScrollableControl
     {
         StopDynamicDemo();
         _fixedSize = true;
-        _system = new JpsSystem(map);
-        _map = map;
+        ReplaceAdapter(map);
         _startX = _startY = _endX = _endY = -1;
         _overlay.SetWidth(_map.Width);
         _overlay.Clear();
@@ -1249,7 +1351,7 @@ public sealed class GridControl : ScrollableControl
     public PathResult RunJps()
     {
         EnsureGrid();
-        _system.Sync();         // 单线程把共享缓存同步到当前地图（按版本置脏）
+        _adapter.Sync();        // 单线程把 adapter 的共享缓存同步到有效地图（按版本置脏）
         SnapshotCleanState();   // 记录寻路前的 clean 状态，供 UI 区分本次新更新的方向
         _overlay.SetWidth(_map.Width);
         _overlay.BeginCollect();
@@ -1268,7 +1370,7 @@ public sealed class GridControl : ScrollableControl
     public PathResult RunNearest()
     {
         EnsureGrid();
-        _system.Sync();
+        _adapter.Sync();
         SnapshotCleanState();
         _overlay.SetWidth(_map.Width);
         _overlay.BeginCollect();
@@ -1378,7 +1480,7 @@ public sealed class GridControl : ScrollableControl
 
         _isPainting = true;
         // 按下时的格子决定整笔笔触：点在阻挡上 → 擦除（单格）；点在空地 → 绘制（2×2）
-        _eraseObstacle = _map.IsBlocked(x, y);
+        _eraseObstacle = IsOriginalObstacle(x, y);
         ApplyEdit(x, y);
     }
 
@@ -1527,7 +1629,14 @@ public sealed class GridControl : ScrollableControl
         for (int y = sy; y < ey; y++)
         {
             for (int x = sx; x < ex; x++)
-                g.FillRectangle(_map.IsBlocked(x, y) ? ObstacleColor : WalkableColor, x * cs, y * cs, cs, cs);
+            {
+                Color color = !_map.IsBlocked(x, y)
+                    ? WalkableColor
+                    : IsOriginalObstacle(x, y)
+                        ? ObstacleColor
+                        : AdapterExpandedObstacleColor;
+                g.FillRectangle(color, x * cs, y * cs, cs, cs);
+            }
         }
 
         DrawSearchOverlay(g, cs, sx, sy, ex, ey);
@@ -1537,6 +1646,17 @@ public sealed class GridControl : ScrollableControl
         DrawDirtyDots(g, cs, sx, sy, ex, ey);
         DrawDynamicMonsterPaths(g, cs);
         DrawDynamicMonsters(g, cs, sx, sy, ex, ey);
+    }
+
+    private bool IsOriginalObstacle(int x, int y)
+    {
+        if (_adapter.IsStaticBlocked(x, y))
+            return true;
+        if (!_dynamicMode)
+            return false;
+        if (IsInDynamicBlock(x, y))
+            return true;
+        return _dynamicStaticBlocked != null && _dynamicStaticBlocked[x, y];
     }
 
     private void DrawDynamicBlock(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
@@ -1614,6 +1734,7 @@ public sealed class GridControl : ScrollableControl
             if (points.Count < 2)
                 continue;
 
+            DrawBodyPathFootprint(g, cs, points, color);
             g.DrawLines(Color.FromArgb(235, color), Math.Max(2.5f, cs / 3.2f), points);
 
             float r = Math.Max(1.8f, cs / 7f);
@@ -1726,11 +1847,10 @@ public sealed class GridControl : ScrollableControl
         int copyH = Math.Min(rows, _map.Height);
         for (int y = 0; y < copyH; y++)
             for (int x = 0; x < copyW; x++)
-                if (_map.IsBlocked(x, y))
+                if (_adapter.IsStaticBlocked(x, y))
                     next.SetBlocked(x, y, true);
 
-        _system = new JpsSystem(next);   // 新地图 → 新的共享缓存
-        _map = next;
+        ReplaceAdapter(next);            // 新原始地图 → 新 adapter / 新共享缓存
         _overlay.SetWidth(_map.Width);
         _overlay.Clear();   // 网格尺寸变化，旧的搜索结果失效
 
@@ -1775,7 +1895,7 @@ public sealed class GridControl : ScrollableControl
     {
         if (!_dynamicMode)
         {
-            _map.SetBlocked(x, y, blocked);
+            _adapter.SetStaticBlocked(x, y, blocked);
             return;
         }
 
@@ -1783,12 +1903,14 @@ public sealed class GridControl : ScrollableControl
             return;
         if (IsInDynamicBlock(x, y))
             return;
-        if (blocked && DynamicCellHasMonster(x, y))
+        if (IsMovingDynamicObstacleCell(x, y))
+            return;
+        if (blocked && DynamicCellTouchesMonster(x, y))
             return;
 
         _dynamicStaticBlocked ??= new bool[DynamicWidth, DynamicHeight];
         _dynamicStaticBlocked[x, y] = blocked;
-        _map.SetBlocked(x, y, blocked);
+        _adapter.SetStaticBlocked(x, y, blocked);
     }
 
     private void ApplyEdit(int x, int y)
@@ -1808,7 +1930,7 @@ public sealed class GridControl : ScrollableControl
                     PaintObstacleBlock(x, y);        // 点在空地：刷 2×2 阻挡
                     ClearMarkersOnObstacles();       // 起终点被刷成阻挡则清除
                 }
-                _system.Sync();
+                _adapter.Sync();
                 Invalidate();
                 break;
 
@@ -1834,6 +1956,14 @@ public sealed class GridControl : ScrollableControl
 
     private void DrawSearchOverlay(IGridCanvas g, int cs, int sx, int sy, int ex, int ey)
     {
+        if (_obstaclePadding > 0)
+        {
+            PointF[] bodyPoints = _overlay.SmoothPath.Count >= 2
+                ? _overlay.SmoothPath.Select(p => new PointF(p.X * cs, p.Y * cs)).ToArray()
+                : _overlay.Path.Select(p => new PointF(p.X * cs + cs / 2f, p.Y * cs + cs / 2f)).ToArray();
+            DrawBodyPathFootprint(g, cs, bodyPoints, PathColor);
+        }
+
         // 绿=已扩展，紫=已入队未扩展（前沿），蓝灰=扫描跳过（未进 open）
         for (int y = sy; y < ey; y++)
         {
@@ -1878,6 +2008,24 @@ public sealed class GridControl : ScrollableControl
             foreach (var p in points)
                 g.FillEllipse(SmoothPathColor, p.X - r, p.Y - r, r * 2, r * 2);
         }
+    }
+
+    private void DrawBodyPathFootprint(IGridCanvas g, int cs, IReadOnlyList<PointF> points, Color color)
+    {
+        if (_obstaclePadding <= 0 || points.Count == 0)
+            return;
+
+        float diameter = (float)((_obstaclePadding * 2d + 1d) * cs);
+        Color footprint = Color.FromArgb(58, color);
+        if (points.Count >= 2)
+        {
+            g.DrawLines(footprint, diameter, points);
+            return;
+        }
+
+        float radius = diameter / 2f;
+        g.FillEllipse(footprint,
+            points[0].X - radius, points[0].Y - radius, diameter, diameter);
     }
 
     // 在每个可走格内按方位摆 4 个指向外侧的三角箭头，表示该格 4 个正交方向跳点缓存的状态。
