@@ -115,19 +115,21 @@ if [[ -z "$NDK_PATH" ]]; then
     done
 
     if [[ -z "$extracted" ]]; then
-      if command -v unzip >/dev/null 2>&1; then
-        echo "Extracting $download_path ..."
-        unzip -q -o "$download_path" -d "$ndk_dir"
-      elif command -v pwsh >/dev/null 2>&1; then
-        echo "Extracting with pwsh Expand-Archive ..."
-        pwsh -NoProfile -Command "Expand-Archive -Path \"$download_path\" -DestinationPath \"$ndk_dir\" -Force"
-      elif command -v powershell.exe >/dev/null 2>&1; then
-        echo "Extracting with powershell Expand-Archive ..."
-        powershell.exe -NoProfile -Command "Expand-Archive -Path \"$download_path\" -DestinationPath \"$ndk_dir\" -Force"
-      else
-        echo "unzip not found and no PowerShell available to extract archive. Please install unzip or provide NDK manually." >&2
+      # Only 'unzip' is used: it preserves the NDK's Unix executable bits (needed for the cross
+      # compilers) and is far faster than PowerShell's Expand-Archive, which also can't read POSIX
+      # paths (/mnt/...) when reached from WSL via interop. If it's missing, tell the user to install it.
+      if ! command -v unzip >/dev/null 2>&1; then
+        echo "Error: 'unzip' is required to extract the NDK but was not found." >&2
+        echo "  Install it and re-run — the downloaded archive is cached, so it won't be fetched again:" >&2
+        echo "    Debian/Ubuntu/WSL:  sudo apt install unzip" >&2
+        echo "    Fedora/RHEL:        sudo dnf install unzip" >&2
+        echo "    Arch:               sudo pacman -S unzip" >&2
+        echo "  Or point --ndk-path / ANDROID_NDK_HOME at an already-extracted NDK." >&2
+        echo "  Cached archive: $download_path" >&2
         exit 1
       fi
+      echo "Extracting $download_path ..."
+      unzip -q -o "$download_path" -d "$ndk_dir"
 
       for d in "$ndk_dir"/android-ndk-$NDK_VERSION*; do
         if [[ -f "$d/build/cmake/android.toolchain.cmake" ]]; then extracted="$d"; break; fi

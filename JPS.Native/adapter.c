@@ -1,6 +1,6 @@
 /*
  * adapter.c
- * JPS Pathfinding - native C adapter for obstacle padding and id-tracked dynamic rectangles.
+ * JPS Pathfinding - native C adapter for immutable static padding and id-tracked dynamic rectangles.
  * Copyright (c) 2026 Qian Qian <qiqian82@gmail.com>. MIT License.
  */
 
@@ -12,12 +12,13 @@
 
 typedef struct jps_adapter_obstacle
 {
-    int id;
-    int x;
-    int y;
-    int width;
-    int height;
+    int32_t id;
+    uint32_t xy;
+    uint32_t size;
 } jps_adapter_obstacle;
+
+_Static_assert(sizeof(jps_adapter_obstacle) == 12,
+               "jps_adapter_obstacle must remain a 12-byte packed-value layout");
 
 typedef struct jps_adapter_rect
 {
@@ -27,19 +28,84 @@ typedef struct jps_adapter_rect
     int bottom;
 } jps_adapter_rect;
 
+/* Sorted by (y,x). Map sides are <=32767, so the compact native layout is 6 bytes/entry. */
+typedef struct jps_adapter_coverage
+{
+    uint16_t x;
+    uint16_t y;
+    uint16_t ref_count;
+} jps_adapter_coverage;
+
+typedef struct jps_adapter_cursor
+{
+    jps_adapter_rect rect;
+    int map_width;
+    int x;
+    int y;
+    int started;
+    uint32_t current;
+} jps_adapter_cursor;
+
 struct jps_adapter
 {
     int width;
     int height;
     int obstacle_padding;
     size_t cell_count;
-    uint8_t *static_blocked;
-    uint32_t *coverage;
+    size_t bit_word_count;
+    uint64_t *static_blocked_bits;
+    uint64_t *expanded_static_bits;
+    jps_adapter_coverage *coverage;
+    jps_adapter_coverage *coverage_scratch;
+    size_t coverage_count;
+    size_t coverage_capacity;
+    size_t scratch_capacity;
     jps_adapter_obstacle *obstacles;
     int obstacle_count;
     int obstacle_capacity;
     jps_system *system;
 };
+
+static int jps__adapter_get_bit(const uint64_t *bits, size_t index)
+{
+    return (bits[index >> 6] & ((uint64_t)1u << (index & 63))) != 0;
+}
+
+static void jps__adapter_set_bit(uint64_t *bits, size_t index)
+{
+    bits[index >> 6] |= (uint64_t)1u << (index & 63);
+}
+
+static int jps__adapter_obstacle_x(const jps_adapter_obstacle *o)
+{
+    return (int)(int16_t)(o->xy & UINT32_C(0xffff));
+}
+
+static int jps__adapter_obstacle_y(const jps_adapter_obstacle *o)
+{
+    return (int)(int16_t)(o->xy >> 16);
+}
+
+static int jps__adapter_obstacle_width(const jps_adapter_obstacle *o)
+{
+    return (int)(uint16_t)(o->size & UINT32_C(0xffff));
+}
+
+static int jps__adapter_obstacle_height(const jps_adapter_obstacle *o)
+{
+    return (int)(uint16_t)(o->size >> 16);
+}
+
+static jps_adapter_obstacle jps__adapter_make_obstacle(int id, int x, int y,
+                                                       int width, int height)
+{
+    jps_adapter_obstacle o;
+    o.id = (int32_t)id;
+    o.xy = (uint32_t)(uint16_t)(int16_t)x |
+           ((uint32_t)(uint16_t)(int16_t)y << 16);
+    o.size = (uint32_t)(uint16_t)width | ((uint32_t)(uint16_t)height << 16);
+    return o;
+}
 
 static jps_adapter_rect jps__adapter_empty_rect(void)
 {
@@ -52,26 +118,21 @@ static int jps__adapter_rect_empty(jps_adapter_rect r)
     return r.left > r.right || r.top > r.bottom;
 }
 
-static jps_adapter_rect jps__adapter_intersect(jps_adapter_rect a, jps_adapter_rect b)
+static size_t jps__adapter_rect_area(jps_adapter_rect r)
 {
-    jps_adapter_rect r;
-    if (jps__adapter_rect_empty(a) || jps__adapter_rect_empty(b))
-        return jps__adapter_empty_rect();
-    r.left = a.left > b.left ? a.left : b.left;
-    r.top = a.top > b.top ? a.top : b.top;
-    r.right = a.right < b.right ? a.right : b.right;
-    r.bottom = a.bottom < b.bottom ? a.bottom : b.bottom;
-    return r;
+    if (jps__adapter_rect_empty(r))
+        return 0;
+    return (size_t)(r.right - r.left + 1) * (size_t)(r.bottom - r.top + 1);
 }
 
 static jps_adapter_rect jps__adapter_expanded_rect(const jps_adapter *a,
                                                    int x, int y, int width, int height)
 {
-    int64_t padding = a->obstacle_padding;
-    int64_t left = (int64_t)x - padding;
-    int64_t top = (int64_t)y - padding;
-    int64_t right = (int64_t)x + (int64_t)width - 1 + padding;
-    int64_t bottom = (int64_t)y + (int64_t)height - 1 + padding;
+    int64_t p = a->obstacle_padding;
+    int64_t left = (int64_t)x - p;
+    int64_t top = (int64_t)y - p;
+    int64_t right = (int64_t)x + (int64_t)width - 1 + p;
+    int64_t bottom = (int64_t)y + (int64_t)height - 1 + p;
     jps_adapter_rect r;
 
     if (left < 0) left = 0;
@@ -88,85 +149,192 @@ static jps_adapter_rect jps__adapter_expanded_rect(const jps_adapter *a,
     return r;
 }
 
-static void jps__adapter_change_coverage(jps_adapter *a, int x, int y, int delta)
+static void jps__adapter_cursor_init(jps_adapter_cursor *cursor,
+                                     jps_adapter_rect rect, int map_width)
 {
-    size_t index = (size_t)y * (size_t)a->width + (size_t)x;
-    uint32_t before = a->coverage[index];
-    uint32_t after;
+    cursor->rect = rect;
+    cursor->map_width = map_width;
+    cursor->x = rect.left;
+    cursor->y = rect.top;
+    cursor->started = 0;
+    cursor->current = UINT32_MAX;
+}
 
-    if (delta > 0)
+static int jps__adapter_cursor_next(jps_adapter_cursor *cursor)
+{
+    if (jps__adapter_rect_empty(cursor->rect))
+        return 0;
+    if (!cursor->started)
     {
-        /* Source count is bounded by map/dynamic-array sizes; saturate defensively. */
-        if (before == UINT32_MAX)
-            return;
-        after = before + 1u;
+        cursor->started = 1;
+    }
+    else if (cursor->x < cursor->rect.right)
+    {
+        cursor->x++;
     }
     else
     {
-        /* Internal calls are paired; keep zero safe if state is ever inconsistent. */
-        if (before == 0)
-            return;
-        after = before - 1u;
+        cursor->x = cursor->rect.left;
+        cursor->y++;
+        if (cursor->y > cursor->rect.bottom)
+            return 0;
     }
-
-    a->coverage[index] = after;
-    if (before == 0 && after != 0)
-        jps_system_set_blocked(a->system, x, y, 1);
-    else if (before != 0 && after == 0)
-        jps_system_set_blocked(a->system, x, y, 0);
+    cursor->current = (uint32_t)((size_t)cursor->y * (size_t)cursor->map_width +
+                                 (size_t)cursor->x);
+    return 1;
 }
 
-static void jps__adapter_apply_rect(jps_adapter *a, jps_adapter_rect r, int delta)
+static int jps__adapter_ensure_scratch(jps_adapter *a, size_t required)
 {
-    int x, y;
-    if (jps__adapter_rect_empty(r))
-        return;
-    for (y = r.top; y <= r.bottom; y++)
-        for (x = r.left; x <= r.right; x++)
-            jps__adapter_change_coverage(a, x, y, delta);
-}
+    size_t capacity;
+    jps_adapter_coverage *next;
+    if (a->scratch_capacity >= required)
+        return 1;
 
-static void jps__adapter_apply_expanded(jps_adapter *a,
-                                        int x, int y, int width, int height, int delta)
-{
-    jps__adapter_apply_rect(a, jps__adapter_expanded_rect(a, x, y, width, height), delta);
-}
-
-static void jps__adapter_apply_difference(jps_adapter *a, jps_adapter_rect source,
-                                          jps_adapter_rect subtract, int delta)
-{
-    jps_adapter_rect intersection;
-    jps_adapter_rect strip;
-    if (jps__adapter_rect_empty(source))
-        return;
-
-    intersection = jps__adapter_intersect(source, subtract);
-    if (jps__adapter_rect_empty(intersection))
+    capacity = a->scratch_capacity == 0 ? 16 : a->scratch_capacity;
+    while (capacity < required)
     {
-        jps__adapter_apply_rect(a, source, delta);
-        return;
+        if (capacity > SIZE_MAX / 2)
+        {
+            capacity = required;
+            break;
+        }
+        capacity *= 2;
     }
-
-    strip = (jps_adapter_rect){ source.left, source.top, source.right, intersection.top - 1 };
-    jps__adapter_apply_rect(a, strip, delta);
-    strip = (jps_adapter_rect){ source.left, intersection.bottom + 1, source.right, source.bottom };
-    jps__adapter_apply_rect(a, strip, delta);
-    strip = (jps_adapter_rect){ source.left, intersection.top, intersection.left - 1, intersection.bottom };
-    jps__adapter_apply_rect(a, strip, delta);
-    strip = (jps_adapter_rect){ intersection.right + 1, intersection.top, source.right, intersection.bottom };
-    jps__adapter_apply_rect(a, strip, delta);
+    if (capacity > SIZE_MAX / sizeof(jps_adapter_coverage))
+        return 0;
+    next = (jps_adapter_coverage *)realloc(
+        a->coverage_scratch, capacity * sizeof(jps_adapter_coverage));
+    if (next == NULL)
+        return 0;
+    a->coverage_scratch = next;
+    a->scratch_capacity = capacity;
+    return 1;
 }
 
-static void jps__adapter_replace_expanded(jps_adapter *a,
-                                          const jps_adapter_obstacle *old_obstacle,
-                                          const jps_adapter_obstacle *new_obstacle)
+static uint32_t jps__adapter_coverage_index(const jps_adapter *a,
+                                            const jps_adapter_coverage *coverage)
 {
-    jps_adapter_rect old_rect = jps__adapter_expanded_rect(a, old_obstacle->x, old_obstacle->y,
-                                                           old_obstacle->width, old_obstacle->height);
-    jps_adapter_rect new_rect = jps__adapter_expanded_rect(a, new_obstacle->x, new_obstacle->y,
-                                                           new_obstacle->width, new_obstacle->height);
-    jps__adapter_apply_difference(a, new_rect, old_rect, 1);
-    jps__adapter_apply_difference(a, old_rect, new_rect, -1);
+    return (uint32_t)coverage->y * (uint32_t)a->width + (uint32_t)coverage->x;
+}
+
+/*
+ * Three-way row-major merge: current coverage, old footprint(-1), new footprint(+1).
+ * A cell present in both old and new receives delta 0 before the effective map is touched.
+ */
+static int jps__adapter_apply_dynamic_change(jps_adapter *a,
+                                             const jps_adapter_obstacle *old_obstacle,
+                                             const jps_adapter_obstacle *new_obstacle)
+{
+    jps_adapter_rect old_rect = old_obstacle != NULL
+        ? jps__adapter_expanded_rect(a, jps__adapter_obstacle_x(old_obstacle),
+                                     jps__adapter_obstacle_y(old_obstacle),
+                                     jps__adapter_obstacle_width(old_obstacle),
+                                     jps__adapter_obstacle_height(old_obstacle))
+        : jps__adapter_empty_rect();
+    jps_adapter_rect new_rect = new_obstacle != NULL
+        ? jps__adapter_expanded_rect(a, jps__adapter_obstacle_x(new_obstacle),
+                                     jps__adapter_obstacle_y(new_obstacle),
+                                     jps__adapter_obstacle_width(new_obstacle),
+                                     jps__adapter_obstacle_height(new_obstacle))
+        : jps__adapter_empty_rect();
+    jps_adapter_cursor old_cursor;
+    jps_adapter_cursor new_cursor;
+    int has_old;
+    int has_new;
+    size_t input = 0;
+    size_t output = 0;
+    size_t maximum_output;
+
+    if (jps__adapter_rect_area(new_rect) > SIZE_MAX - a->coverage_count)
+        return 0;
+    maximum_output = a->coverage_count + jps__adapter_rect_area(new_rect);
+    if (!jps__adapter_ensure_scratch(a, maximum_output))
+        return 0;
+
+    jps__adapter_cursor_init(&old_cursor, old_rect, a->width);
+    jps__adapter_cursor_init(&new_cursor, new_rect, a->width);
+    has_old = jps__adapter_cursor_next(&old_cursor);
+    has_new = jps__adapter_cursor_next(&new_cursor);
+
+    while (input < a->coverage_count || has_old || has_new)
+    {
+        uint32_t key = input < a->coverage_count
+            ? jps__adapter_coverage_index(a, &a->coverage[input])
+            : UINT32_MAX;
+        int before = 0;
+        int delta = 0;
+        int after;
+
+        if (has_old && old_cursor.current < key) key = old_cursor.current;
+        if (has_new && new_cursor.current < key) key = new_cursor.current;
+
+        if (input < a->coverage_count &&
+            jps__adapter_coverage_index(a, &a->coverage[input]) == key)
+        {
+            before = a->coverage[input].ref_count;
+            input++;
+        }
+        if (has_old && old_cursor.current == key)
+        {
+            delta--;
+            has_old = jps__adapter_cursor_next(&old_cursor);
+        }
+        if (has_new && new_cursor.current == key)
+        {
+            delta++;
+            has_new = jps__adapter_cursor_next(&new_cursor);
+        }
+
+        after = before + delta;
+        if (after < 0 || after > UINT16_MAX)
+            return 0;
+
+        if (before == 0 && after != 0)
+            jps_system_set_blocked(a->system, (int)(key % (uint32_t)a->width),
+                                   (int)(key / (uint32_t)a->width), 1);
+        else if (before != 0 && after == 0 &&
+                 !jps__adapter_get_bit(a->expanded_static_bits, key))
+            jps_system_set_blocked(a->system, (int)(key % (uint32_t)a->width),
+                                   (int)(key / (uint32_t)a->width), 0);
+
+        if (after != 0)
+        {
+            a->coverage_scratch[output].x = (uint16_t)(key % (uint32_t)a->width);
+            a->coverage_scratch[output].y = (uint16_t)(key / (uint32_t)a->width);
+            a->coverage_scratch[output].ref_count = (uint16_t)after;
+            output++;
+        }
+    }
+
+    {
+        jps_adapter_coverage *entries = a->coverage;
+        size_t capacity = a->coverage_capacity;
+        a->coverage = a->coverage_scratch;
+        a->coverage_capacity = a->scratch_capacity;
+        a->coverage_scratch = entries;
+        a->scratch_capacity = capacity;
+        a->coverage_count = output;
+    }
+    return 1;
+}
+
+static void jps__adapter_set_expanded_static(jps_adapter *a, int x, int y)
+{
+    size_t index = (size_t)y * (size_t)a->width + (size_t)x;
+    if (jps__adapter_get_bit(a->expanded_static_bits, index))
+        return;
+    jps__adapter_set_bit(a->expanded_static_bits, index);
+    jps_system_set_blocked(a->system, x, y, 1);
+}
+
+static void jps__adapter_apply_expanded_static(jps_adapter *a, int x, int y)
+{
+    jps_adapter_rect r = jps__adapter_expanded_rect(a, x, y, 1, 1);
+    int xx, yy;
+    for (yy = r.top; yy <= r.bottom; yy++)
+        for (xx = r.left; xx <= r.right; xx++)
+            jps__adapter_set_expanded_static(a, xx, yy);
 }
 
 static void jps__adapter_apply_boundary(jps_adapter *a)
@@ -178,26 +346,27 @@ static void jps__adapter_apply_boundary(jps_adapter *a)
     for (y = 0; y < a->height; y++)
         for (x = 0; x < a->width; x++)
             if (x < p || x >= a->width - p || y < p || y >= a->height - p)
-                jps__adapter_change_coverage(a, x, y, 1);
+                jps__adapter_set_expanded_static(a, x, y);
 }
 
-static void jps__adapter_rebuild(jps_adapter *a)
+static int jps__adapter_rebuild(jps_adapter *a)
 {
-    int x, y, i;
-    memset(a->coverage, 0, a->cell_count * sizeof(uint32_t));
+    size_t index;
+    int i;
+    memset(a->expanded_static_bits, 0, a->bit_word_count * sizeof(uint64_t));
     jps_system_clear_all(a->system);
     jps__adapter_apply_boundary(a);
 
-    for (y = 0; y < a->height; y++)
-        for (x = 0; x < a->width; x++)
-            if (a->static_blocked[(size_t)y * (size_t)a->width + (size_t)x] != 0)
-                jps__adapter_apply_expanded(a, x, y, 1, 1, 1);
+    for (index = 0; index < a->cell_count; index++)
+        if (jps__adapter_get_bit(a->static_blocked_bits, index))
+            jps__adapter_apply_expanded_static(a, (int)(index % (size_t)a->width),
+                                               (int)(index / (size_t)a->width));
 
+    a->coverage_count = 0;
     for (i = 0; i < a->obstacle_count; i++)
-    {
-        const jps_adapter_obstacle *o = &a->obstacles[i];
-        jps__adapter_apply_expanded(a, o->x, o->y, o->width, o->height, 1);
-    }
+        if (!jps__adapter_apply_dynamic_change(a, NULL, &a->obstacles[i]))
+            return 0;
+    return 1;
 }
 
 static int jps__adapter_find_obstacle(const jps_adapter *a, int id)
@@ -215,21 +384,12 @@ static int jps__adapter_reserve_obstacle(jps_adapter *a)
     jps_adapter_obstacle *next;
     if (a->obstacle_count < a->obstacle_capacity)
         return 1;
-
-    if (a->obstacle_capacity == 0)
-        new_capacity = 8;
-    else
-    {
-        if (a->obstacle_capacity > INT_MAX / 2)
-            return 0;
-        new_capacity = a->obstacle_capacity * 2;
-    }
-
-    if ((size_t)new_capacity > SIZE_MAX / sizeof(jps_adapter_obstacle))
+    new_capacity = a->obstacle_capacity == 0 ? 8 : a->obstacle_capacity * 2;
+    if (new_capacity < a->obstacle_capacity ||
+        (size_t)new_capacity > SIZE_MAX / sizeof(jps_adapter_obstacle))
         return 0;
-
-    next = (jps_adapter_obstacle *)realloc(a->obstacles,
-                                            (size_t)new_capacity * sizeof(jps_adapter_obstacle));
+    next = (jps_adapter_obstacle *)realloc(
+        a->obstacles, (size_t)new_capacity * sizeof(jps_adapter_obstacle));
     if (next == NULL)
         return 0;
     a->obstacles = next;
@@ -242,6 +402,7 @@ static jps_adapter *jps__adapter_create_core(int width, int height, int obstacle
 {
     jps_adapter *a;
     size_t cell_count;
+    size_t i;
     if (width <= 0 || height <= 0 || width > 32767 || height > 32767 || obstacle_padding < 0)
         return NULL;
     cell_count = (size_t)width * (size_t)height;
@@ -255,22 +416,26 @@ static jps_adapter *jps__adapter_create_core(int width, int height, int obstacle
     a->height = height;
     a->obstacle_padding = obstacle_padding;
     a->cell_count = cell_count;
-    a->static_blocked = (uint8_t *)calloc(cell_count, sizeof(uint8_t));
-    a->coverage = (uint32_t *)calloc(cell_count, sizeof(uint32_t));
+    a->bit_word_count = (cell_count + 63) >> 6;
+    a->static_blocked_bits = (uint64_t *)calloc(a->bit_word_count, sizeof(uint64_t));
+    a->expanded_static_bits = (uint64_t *)calloc(a->bit_word_count, sizeof(uint64_t));
     a->system = jps_system_create(width, height);
-    if (a->static_blocked == NULL || a->coverage == NULL || a->system == NULL)
+    if (a->static_blocked_bits == NULL || a->expanded_static_bits == NULL || a->system == NULL)
     {
         jps_adapter_destroy(a);
         return NULL;
     }
 
     if (cells != NULL)
-    {
-        size_t i;
         for (i = 0; i < cell_count; i++)
-            a->static_blocked[i] = cells[i] != 0 ? 1u : 0u;
+            if (cells[i] != 0)
+                jps__adapter_set_bit(a->static_blocked_bits, i);
+
+    if (!jps__adapter_rebuild(a))
+    {
+        jps_adapter_destroy(a);
+        return NULL;
     }
-    jps__adapter_rebuild(a);
     jps_system_sync(a->system);
     return a;
 }
@@ -294,8 +459,10 @@ void jps_adapter_destroy(jps_adapter *a)
         return;
     jps_system_destroy(a->system);
     free(a->obstacles);
+    free(a->coverage_scratch);
     free(a->coverage);
-    free(a->static_blocked);
+    free(a->expanded_static_bits);
+    free(a->static_blocked_bits);
     free(a);
 }
 
@@ -303,53 +470,50 @@ int jps_adapter_width(const jps_adapter *a) { return a != NULL ? a->width : 0; }
 int jps_adapter_height(const jps_adapter *a) { return a != NULL ? a->height : 0; }
 int jps_adapter_obstacle_padding(const jps_adapter *a) { return a != NULL ? a->obstacle_padding : 0; }
 int jps_adapter_dynamic_obstacle_count(const jps_adapter *a) { return a != NULL ? a->obstacle_count : 0; }
+int jps_adapter_dynamic_covered_cell_count(const jps_adapter *a)
+{
+    return a != NULL ? (int)a->coverage_count : 0;
+}
 
 uint64_t jps_adapter_memory_bytes(const jps_adapter *a)
 {
     if (a == NULL)
         return 0;
     return (uint64_t)sizeof(*a)
-        + (uint64_t)a->cell_count * sizeof(uint8_t)
-        + (uint64_t)a->cell_count * sizeof(uint32_t)
+        + (uint64_t)a->bit_word_count * sizeof(uint64_t) * 2u
+        + (uint64_t)a->coverage_capacity * sizeof(jps_adapter_coverage)
+        + (uint64_t)a->scratch_capacity * sizeof(jps_adapter_coverage)
         + (uint64_t)(size_t)a->obstacle_capacity * sizeof(jps_adapter_obstacle)
         + jps_system_memory_bytes(a->system);
 }
 
 int jps_adapter_set_obstacle_padding(jps_adapter *a, int obstacle_padding)
 {
+    int old_padding;
     if (a == NULL)
         return JPS_ERR_NULL;
     if (obstacle_padding < 0)
         return JPS_ERR_INVALID_ARGUMENT;
     if (a->obstacle_padding == obstacle_padding)
         return 0;
+    old_padding = a->obstacle_padding;
     a->obstacle_padding = obstacle_padding;
-    jps__adapter_rebuild(a);
-    return 1;
-}
-
-int jps_adapter_set_static_blocked(jps_adapter *a, int x, int y, int blocked)
-{
-    size_t index;
-    uint8_t value;
-    if (a == NULL)
-        return JPS_ERR_NULL;
-    if (x < 0 || x >= a->width || y < 0 || y >= a->height)
-        return 0;
-    index = (size_t)y * (size_t)a->width + (size_t)x;
-    value = blocked != 0 ? 1u : 0u;
-    if (a->static_blocked[index] == value)
-        return 0;
-    a->static_blocked[index] = value;
-    jps__adapter_apply_expanded(a, x, y, 1, 1, value != 0 ? 1 : -1);
+    if (!jps__adapter_rebuild(a))
+    {
+        a->obstacle_padding = old_padding;
+        jps__adapter_rebuild(a);
+        return JPS_ERR_OUT_OF_MEMORY;
+    }
     return 1;
 }
 
 int jps_adapter_is_static_blocked(const jps_adapter *a, int x, int y)
 {
+    size_t index;
     if (a == NULL || x < 0 || x >= a->width || y < 0 || y >= a->height)
         return 0;
-    return a->static_blocked[(size_t)y * (size_t)a->width + (size_t)x] != 0 ? 1 : 0;
+    index = (size_t)y * (size_t)a->width + (size_t)x;
+    return jps__adapter_get_bit(a->static_blocked_bits, index);
 }
 
 int jps_adapter_is_blocked(const jps_adapter *a, int x, int y)
@@ -370,35 +534,44 @@ int jps_adapter_update_dynamic_obstacle(jps_adapter *a, int id,
     remove = width == 0 && height == 0;
     if (!remove && (width <= 0 || height <= 0))
         return JPS_ERR_INVALID_ARGUMENT;
+    if (!remove && (x < INT16_MIN || x > INT16_MAX ||
+                    y < INT16_MIN || y > INT16_MAX ||
+                    width > UINT16_MAX || height > UINT16_MAX))
+        return JPS_ERR_INVALID_ARGUMENT;
 
     index = jps__adapter_find_obstacle(a, id);
     if (remove)
     {
-        const jps_adapter_obstacle *old;
+        jps_adapter_obstacle old;
         if (index < 0)
             return 0;
-        old = &a->obstacles[index];
-        jps__adapter_apply_expanded(a, old->x, old->y, old->width, old->height, -1);
+        old = a->obstacles[index];
+        if (!jps__adapter_apply_dynamic_change(a, &old, NULL))
+            return JPS_ERR_OUT_OF_MEMORY;
         a->obstacle_count--;
         if (index != a->obstacle_count)
             a->obstacles[index] = a->obstacles[a->obstacle_count];
         return 1;
     }
 
-    next = (jps_adapter_obstacle){ id, x, y, width, height };
+    next = jps__adapter_make_obstacle(id, x, y, width, height);
     if (index >= 0)
     {
-        jps_adapter_obstacle *old = &a->obstacles[index];
-        if (old->x == x && old->y == y && old->width == width && old->height == height)
+        jps_adapter_obstacle old = a->obstacles[index];
+        if (old.xy == next.xy && old.size == next.size)
             return 0;
-        jps__adapter_replace_expanded(a, old, &next);
-        *old = next;
+        if (!jps__adapter_apply_dynamic_change(a, &old, &next))
+            return JPS_ERR_OUT_OF_MEMORY;
+        a->obstacles[index] = next;
         return 1;
     }
 
+    if (a->obstacle_count >= UINT16_MAX)
+        return JPS_ERR_INVALID_ARGUMENT;
     if (!jps__adapter_reserve_obstacle(a))
         return JPS_ERR_OUT_OF_MEMORY;
-    jps__adapter_apply_expanded(a, x, y, width, height, 1);
+    if (!jps__adapter_apply_dynamic_change(a, NULL, &next))
+        return JPS_ERR_OUT_OF_MEMORY;
     a->obstacles[a->obstacle_count++] = next;
     return 1;
 }
@@ -414,25 +587,28 @@ int jps_adapter_get_dynamic_obstacle(const jps_adapter *a, int id,
     if (index < 0)
         return 0;
     o = &a->obstacles[index];
-    if (out_x != NULL) *out_x = o->x;
-    if (out_y != NULL) *out_y = o->y;
-    if (out_width != NULL) *out_width = o->width;
-    if (out_height != NULL) *out_height = o->height;
+    if (out_x != NULL) *out_x = jps__adapter_obstacle_x(o);
+    if (out_y != NULL) *out_y = jps__adapter_obstacle_y(o);
+    if (out_width != NULL) *out_width = jps__adapter_obstacle_width(o);
+    if (out_height != NULL) *out_height = jps__adapter_obstacle_height(o);
     return 1;
 }
 
 int jps_adapter_clear_dynamic_obstacles(jps_adapter *a)
 {
-    int i;
+    size_t i;
     if (a == NULL)
         return JPS_ERR_NULL;
     if (a->obstacle_count == 0)
         return 0;
-    for (i = 0; i < a->obstacle_count; i++)
+    for (i = 0; i < a->coverage_count; i++)
     {
-        const jps_adapter_obstacle *o = &a->obstacles[i];
-        jps__adapter_apply_expanded(a, o->x, o->y, o->width, o->height, -1);
+        uint32_t index = jps__adapter_coverage_index(a, &a->coverage[i]);
+        if (!jps__adapter_get_bit(a->expanded_static_bits, index))
+            jps_system_set_blocked(a->system, (int)(index % (uint32_t)a->width),
+                                   (int)(index / (uint32_t)a->width), 0);
     }
+    a->coverage_count = 0;
     a->obstacle_count = 0;
     return 1;
 }

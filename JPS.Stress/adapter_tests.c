@@ -64,6 +64,8 @@ static int test_static_padding_and_boundary(void)
     cells[4 * 9 + 4] = 1;
     a = jps_adapter_create_from_buffer(9, 9, 1, cells, 81);
     CHECK(a != NULL);
+    cells[4 * 9 + 4] = 0; /* adapter owns an immutable bit snapshot */
+    cells[6 * 9 + 6] = 1;
     CHECK(jps_adapter_width(a) == 9 && jps_adapter_height(a) == 9);
     CHECK(jps_adapter_obstacle_padding(a) == 1);
 
@@ -77,6 +79,7 @@ static int test_static_padding_and_boundary(void)
     }
     CHECK(jps_adapter_is_blocked(a, 2, 2) == 0);
     CHECK(jps_adapter_is_static_blocked(a, 4, 4) == 1);
+    CHECK(jps_adapter_is_static_blocked(a, 6, 6) == 0);
     CHECK(jps_adapter_memory_bytes(a) > 0);
     jps_adapter_destroy(a);
     return 0;
@@ -84,8 +87,11 @@ static int test_static_padding_and_boundary(void)
 
 static int test_dynamic_move_overlap_and_remove(void)
 {
-    jps_adapter *a = jps_adapter_create(12, 10, 1);
+    uint8_t cells[12 * 10] = {0};
+    jps_adapter *a;
     int x, y, w, h;
+    cells[4 * 12 + 4] = 1;
+    a = jps_adapter_create_from_buffer(12, 10, 1, cells, 120);
     CHECK(a != NULL);
     CHECK(jps_adapter_update_dynamic_obstacle(a, 7, 3, 3, 2, 2) == 1);
     CHECK(jps_adapter_update_dynamic_obstacle(a, 8, 5, 4, 1, 1) == 1);
@@ -101,9 +107,23 @@ static int test_dynamic_move_overlap_and_remove(void)
     CHECK(jps_adapter_update_dynamic_obstacle(a, 7, 0, 0, 0, 0) == 1);
     CHECK(jps_adapter_is_blocked(a, 5, 4) == 1); /* id 8 still covers it */
     CHECK(jps_adapter_update_dynamic_obstacle(a, 8, 0, 0, 0, 0) == 1);
-    CHECK(jps_adapter_is_blocked(a, 5, 4) == 0);
+    CHECK(jps_adapter_is_blocked(a, 5, 4) == 1); /* immutable static padding remains */
+    CHECK(jps_adapter_is_blocked(a, 6, 4) == 0);
     CHECK(jps_adapter_update_dynamic_obstacle(a, 8, 0, 0, 0, 0) == 0);
+    CHECK(jps_adapter_update_dynamic_obstacle(a, 9, 7, 7, 1, 1) == 1);
+    CHECK(jps_adapter_clear_dynamic_obstacles(a) == 1);
+    CHECK(jps_adapter_dynamic_covered_cell_count(a) == 0);
+    CHECK(jps_adapter_is_blocked(a, 5, 4) == 1);
+    CHECK(jps_adapter_is_blocked(a, 7, 7) == 0);
     CHECK(jps_adapter_update_dynamic_obstacle(a, 1, 1, 1, 0, 2) == JPS_ERR_INVALID_ARGUMENT);
+    CHECK(jps_adapter_update_dynamic_obstacle(a, 1, INT16_MIN - 1, 1, 1, 1) == JPS_ERR_INVALID_ARGUMENT);
+    CHECK(jps_adapter_update_dynamic_obstacle(a, 1, 1, INT16_MAX + 1, 1, 1) == JPS_ERR_INVALID_ARGUMENT);
+    CHECK(jps_adapter_update_dynamic_obstacle(a, 1, 1, 1, UINT16_MAX + 1, 1) == JPS_ERR_INVALID_ARGUMENT);
+    CHECK(jps_adapter_update_dynamic_obstacle(a, 1, 1, 1, 1, UINT16_MAX + 1) == JPS_ERR_INVALID_ARGUMENT);
+    CHECK(jps_adapter_update_dynamic_obstacle(
+        a, 42, INT16_MIN, INT16_MAX, UINT16_MAX, UINT16_MAX) == 1);
+    CHECK(jps_adapter_get_dynamic_obstacle(a, 42, &x, &y, &w, &h) == 1);
+    CHECK(x == INT16_MIN && y == INT16_MAX && w == UINT16_MAX && h == UINT16_MAX);
     jps_adapter_destroy(a);
     return 0;
 }
@@ -142,25 +162,24 @@ static int test_random_updates_against_reference(void)
     enum { WIDTH = 16, HEIGHT = 13, IDS = 6 };
     uint8_t static_cells[WIDTH * HEIGHT] = {0};
     test_obstacle obstacles[IDS];
-    jps_adapter *a = jps_adapter_create(WIDTH, HEIGHT, 0);
+    jps_adapter *a;
     int padding = 0;
     int step, x, y;
     memset(obstacles, 0, sizeof(obstacles));
+
+    for (y = 0; y < HEIGHT; y++)
+        for (x = 0; x < WIDTH; x++)
+            if (test_range(0, 8) == 0)
+                static_cells[y * WIDTH + x] = 1;
+
+    a = jps_adapter_create_from_buffer(
+        WIDTH, HEIGHT, 0, static_cells, WIDTH * HEIGHT);
     CHECK(a != NULL);
 
     for (step = 0; step < 300; step++)
     {
-        int action = test_range(0, 4);
+        int action = test_range(0, 3);
         if (action == 0)
-        {
-            int blocked;
-            x = test_range(0, WIDTH);
-            y = test_range(0, HEIGHT);
-            blocked = test_range(0, 2);
-            CHECK(jps_adapter_set_static_blocked(a, x, y, blocked) >= 0);
-            static_cells[y * WIDTH + x] = (uint8_t)blocked;
-        }
-        else if (action <= 2)
         {
             int id = test_range(0, IDS);
             test_obstacle *o = &obstacles[id];
@@ -172,7 +191,7 @@ static int test_random_updates_against_reference(void)
             CHECK(jps_adapter_update_dynamic_obstacle(a, id, o->x, o->y,
                                                       o->width, o->height) >= 0);
         }
-        else if (test_range(0, 2) == 0)
+        else if (action == 1)
         {
             int id = test_range(0, IDS);
             CHECK(jps_adapter_update_dynamic_obstacle(a, id, 0, 0, 0, 0) >= 0);

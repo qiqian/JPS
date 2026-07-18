@@ -104,6 +104,7 @@ public sealed class GridControl : ScrollableControl
     private JpsAdapter _adapter = null!; // 原始阻挡 + 体型阔边 + 动态阻挡
     private JpsSystem _system = null!;   // = _adapter.System；供独立 JpsPathfinder 使用
     private GridMap _map = null!;        // = _adapter.Map（阔边后的有效地图）
+    private GridMap _rawMap = null!;     // Playground 可编辑原图；每次编辑后重建不可变静态 adapter
     private int _obstaclePadding;
     private int? _pendingObstaclePadding;
     private int _nextDynamicAdapterId = DynamicBlockAdapterId + 1;
@@ -257,9 +258,20 @@ public sealed class GridControl : ScrollableControl
 
     private void ReplaceAdapter(GridMap originalMap)
     {
-        _adapter = new JpsAdapter(originalMap, _obstaclePadding);
+        _rawMap = CloneMap(originalMap);
+        _adapter = new JpsAdapter(_rawMap, _obstaclePadding);
         _system = _adapter.System;
         _map = _adapter.Map;
+    }
+
+    private static GridMap CloneMap(GridMap source)
+    {
+        var clone = new GridMap(source.Width, source.Height);
+        for (int y = 0; y < source.Height; y++)
+            for (int x = 0; x < source.Width; x++)
+                if (source.IsBlocked(x, y))
+                    clone.SetBlocked(x, y, true);
+        return clone;
     }
 
     public void SetMode(EditMode mode) => _mode = mode;
@@ -1287,7 +1299,7 @@ public sealed class GridControl : ScrollableControl
 
         for (int y = 0; y < _map.Height; y++)
             for (int x = 0; x < _map.Width; x++)
-                if (_adapter.IsStaticBlocked(x, y))
+                if (_rawMap.IsBlocked(x, y))
                     data.Obstacles.Add(new PointData { X = x, Y = y });
 
         return data;
@@ -1650,7 +1662,7 @@ public sealed class GridControl : ScrollableControl
 
     private bool IsOriginalObstacle(int x, int y)
     {
-        if (_adapter.IsStaticBlocked(x, y))
+        if (_rawMap.IsBlocked(x, y))
             return true;
         if (!_dynamicMode)
             return false;
@@ -1847,7 +1859,7 @@ public sealed class GridControl : ScrollableControl
         int copyH = Math.Min(rows, _map.Height);
         for (int y = 0; y < copyH; y++)
             for (int x = 0; x < copyW; x++)
-                if (_adapter.IsStaticBlocked(x, y))
+                if (_rawMap.IsBlocked(x, y))
                     next.SetBlocked(x, y, true);
 
         ReplaceAdapter(next);            // 新原始地图 → 新 adapter / 新共享缓存
@@ -1895,7 +1907,7 @@ public sealed class GridControl : ScrollableControl
     {
         if (!_dynamicMode)
         {
-            _adapter.SetStaticBlocked(x, y, blocked);
+            _rawMap.SetBlocked(x, y, blocked);
             return;
         }
 
@@ -1910,7 +1922,6 @@ public sealed class GridControl : ScrollableControl
 
         _dynamicStaticBlocked ??= new bool[DynamicWidth, DynamicHeight];
         _dynamicStaticBlocked[x, y] = blocked;
-        _adapter.SetStaticBlocked(x, y, blocked);
     }
 
     private void ApplyEdit(int x, int y)
@@ -1928,9 +1939,12 @@ public sealed class GridControl : ScrollableControl
                 else
                 {
                     PaintObstacleBlock(x, y);        // 点在空地：刷 2×2 阻挡
-                    ClearMarkersOnObstacles();       // 起终点被刷成阻挡则清除
                 }
-                _adapter.Sync();
+                if (_dynamicMode)
+                    RebuildDynamicDisplayMap();
+                else
+                    ReplaceAdapter(_rawMap);
+                ClearMarkersOnObstacles();           // adapter 重建后按阔边后的有效地图检查标记
                 Invalidate();
                 break;
 

@@ -311,8 +311,11 @@ int main(int argc, char **argv)
     int quiet = 0;
     uint64_t seed = 12345u;
 
-    if (argc == 2 && !strcmp(argv[1], "--adapter-test"))
-        return jps_adapter_run_tests();
+	if (jps_adapter_run_tests() != 0)
+	{
+		fprintf(stderr, "jps_adapter 自测失败。\n");
+		return 1;
+	}
 
     for (int i = 1; i < argc; i++)
     {

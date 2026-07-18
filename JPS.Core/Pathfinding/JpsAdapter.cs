@@ -5,66 +5,93 @@
  */
 
 using System;
-using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using JPS.Models;
 
 namespace JPS.Pathfinding
 {
     /// <summary>由 <see cref="JpsAdapter"/> 跟踪的一块动态矩形阻挡。</summary>
+    [StructLayout(LayoutKind.Sequential)]
     public readonly struct DynamicObstacle
     {
-        public int Id { get; }
-        public int X { get; }
-        public int Y { get; }
-        public int Width { get; }
-        public int Height { get; }
+        private readonly int _id;
+        private readonly uint _xy;
+        private readonly uint _size;
+
+        public int Id => _id;
+        public int X => (short)(_xy & ushort.MaxValue);
+        public int Y => (short)(_xy >> 16);
+        public int Width => (ushort)(_size & ushort.MaxValue);
+        public int Height => (ushort)(_size >> 16);
 
         public DynamicObstacle(int id, int x, int y, int width, int height)
         {
-            Id = id;
-            X = x;
-            Y = y;
-            Width = width;
-            Height = height;
+            if (x < short.MinValue || x > short.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(x));
+            if (y < short.MinValue || y > short.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(y));
+            if (width <= 0 || width > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(width));
+            if (height <= 0 || height > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(height));
+
+            _id = id;
+            _xy = (uint)(ushort)(short)x | ((uint)(ushort)(short)y << 16);
+            _size = (uint)(ushort)width | ((uint)(ushort)height << 16);
         }
+
+        internal bool SameRectangle(DynamicObstacle other) =>
+            _xy == other._xy && _size == other._size;
     }
 
     /// <summary>
-    /// 面向游戏逻辑的 JPS 适配器：封装一份 <see cref="JpsSystem"/>，在原始静态阻挡之上提供
-    /// 障碍阔边以及按 id 更新的动态矩形阻挡。
-    ///
-    /// <para><see cref="ObstaclePadding"/> 使用 Chebyshev/矩形阔边：padding=p 时，每块阻挡向
-    /// 左、右、上、下各扩张 p 格。地图外也视为阻挡，因此有效地图四周会同时保留 p 格安全边界。
-    /// 传给构造函数的静态地图会被快照；之后请用 <see cref="SetStaticBlocked"/> 修改静态阻挡，
-    /// 不要直接修改 <see cref="Map"/>，否则覆盖计数会失去同步。</para>
-    ///
-    /// <para>动态阻挡坐标采用左上角 + 半开尺寸 [x,x+w)×[y,y+h)，允许矩形部分或全部位于地图外。
-    /// 同一个 id 可逐帧更新位置/尺寸；w=h=0 删除。静态阻挡、地图安全边界和多个动态 id 的阔边
-    /// 可以任意重叠，删除其中一个不会错误放开仍被其他来源覆盖的格子。</para>
-    ///
-    /// <para>本类的阻挡更新不是并发写安全的。批量更新完一帧的动态阻挡后，先在单线程调用
-    /// <see cref="Sync"/>，再让每个线程持有自己的 <see cref="JpsPathfinder"/> 并共享
-    /// <see cref="System"/>。adapter 不持有搜索状态。</para>
+    /// 面向游戏逻辑的 JPS 适配器。静态地图在构造时快照并保持不可变；运行时变化全部使用
+    /// 按 id 跟踪的动态矩形。adapter 持有共享 <see cref="JpsSystem"/>，但不持有 pathfinder。
     /// </summary>
+    /// <remarks>
+    /// 静态原图和静态阔边分别使用 1 bit/格。动态覆盖只保存 refcount&gt;0 的格子，按线性格索引
+    /// 排序并使用 ushort 引用计数；更新动态矩形时把旧位置 -1、新位置 +1 与现有覆盖数组线性归并，
+    /// 所以新旧 footprint 的交集不会产生临时的 1→0→1 地图抖动。动态障碍使用紧凑数组保存，
+    /// 线性查找 id，并以末项覆盖删除位置。不要直接修改 <see cref="Map"/>；
+    /// 一帧更新完成后先调用 <see cref="Sync"/>，再用独立的 <see cref="JpsPathfinder"/> 查询。
+    /// </remarks>
     public sealed class JpsAdapter
     {
-        private readonly bool[] _staticBlocked;
-        private readonly int[] _coverage;
-        private readonly Dictionary<int, DynamicObstacle> _dynamicObstacles =
-            new Dictionary<int, DynamicObstacle>();
+        private struct DynamicCoverage
+        {
+            public ushort X;
+            public ushort Y;
+            public ushort RefCount;
+
+            public DynamicCoverage(int index, int mapWidth, ushort refCount)
+            {
+                X = (ushort)(index % mapWidth);
+                Y = (ushort)(index / mapWidth);
+                RefCount = refCount;
+            }
+        }
+
+        private readonly ulong[] _staticBlockedBits;
+        private readonly ulong[] _expandedStaticBits;
+        private DynamicObstacle[] _dynamicObstacles = Array.Empty<DynamicObstacle>();
+        private int _dynamicObstacleCount;
+        private DynamicCoverage[] _dynamicCoverage = Array.Empty<DynamicCoverage>();
+        private DynamicCoverage[] _coverageScratch = Array.Empty<DynamicCoverage>();
+        private int _dynamicCoverageCount;
 
         public GridMap Map { get; }
         public JpsSystem System { get; }
         public int ObstaclePadding { get; private set; }
-        public int DynamicObstacleCount => _dynamicObstacles.Count;
+        public int DynamicObstacleCount => _dynamicObstacleCount;
+        public int DynamicCoveredCellCount => _dynamicCoverageCount;
 
-        /// <summary>创建一张空的静态地图并应用阔边。</summary>
+        /// <summary>创建一张不可变的空静态地图。</summary>
         public JpsAdapter(int width, int height, int obstaclePadding = 0)
             : this(new GridMap(width, height), obstaclePadding)
         {
         }
 
-        /// <summary>快照 <paramref name="staticMap"/>，生成供 JPS 使用的阔边后有效地图。</summary>
+        /// <summary>快照静态地图；之后如需改变静态阻挡，请创建新的 adapter。</summary>
         public JpsAdapter(GridMap staticMap, int obstaclePadding = 0)
         {
             if (staticMap == null)
@@ -74,54 +101,53 @@ namespace JPS.Pathfinding
             ObstaclePadding = obstaclePadding;
             Map = new GridMap(staticMap.Width, staticMap.Height);
             System = new JpsSystem(Map);
-            _staticBlocked = new bool[staticMap.Width * staticMap.Height];
-            _coverage = new int[_staticBlocked.Length];
+            int wordCount = (staticMap.Width * staticMap.Height + 63) >> 6;
+            _staticBlockedBits = new ulong[wordCount];
+            _expandedStaticBits = new ulong[wordCount];
 
             for (int y = 0; y < staticMap.Height; y++)
                 for (int x = 0; x < staticMap.Width; x++)
-                    _staticBlocked[y * staticMap.Width + x] = staticMap.IsBlocked(x, y);
+                    if (staticMap.IsBlocked(x, y))
+                        SetBit(_staticBlockedBits, y * staticMap.Width + x);
 
-            RebuildEffectiveMap(clearMap: false);
+            RebuildEffectiveMap();
             System.Sync();
         }
 
-        /// <summary>
-        /// 改变静态与动态阻挡共用的阔边大小，并重建有效地图。返回 false 表示值未变化。
-        /// </summary>
+        /// <summary>改变静态和动态阻挡共用的阔边大小并重建有效地图。</summary>
         public bool SetObstaclePadding(int obstaclePadding)
         {
             ValidatePadding(obstaclePadding);
             if (ObstaclePadding == obstaclePadding)
                 return false;
 
+            int previousPadding = ObstaclePadding;
             ObstaclePadding = obstaclePadding;
-            RebuildEffectiveMap(clearMap: true);
+            try
+            {
+                RebuildEffectiveMap();
+            }
+            catch
+            {
+                ObstaclePadding = previousPadding;
+                RebuildEffectiveMap();
+                throw;
+            }
             return true;
         }
 
-        /// <summary>增删一个原始静态阻挡格；越界或值未变化时返回 false。</summary>
-        public bool SetStaticBlocked(int x, int y, bool blocked)
-        {
-            if (!Map.InBounds(x, y))
-                return false;
-
-            int index = y * Map.Width + x;
-            if (_staticBlocked[index] == blocked)
-                return false;
-
-            _staticBlocked[index] = blocked;
-            ApplyExpandedRectangle(x, y, 1, 1, blocked ? 1 : -1);
-            return true;
-        }
-
-        /// <summary>查询未阔边前的静态阻挡；越界返回 false。</summary>
+        /// <summary>查询构造时快照的、未经阔边的静态阻挡。</summary>
         public bool IsStaticBlocked(int x, int y) =>
-            Map.InBounds(x, y) && _staticBlocked[y * Map.Width + x];
+            Map.InBounds(x, y) && GetBit(_staticBlockedBits, y * Map.Width + x);
+
+        /// <summary>查询静态、阔边和动态矩形合成后的有效阻挡；地图外视为阻挡。</summary>
+        public bool IsBlocked(int x, int y) =>
+            !Map.InBounds(x, y) || Map.IsBlocked(x, y);
 
         /// <summary>
-        /// 新增或更新一块动态阻挡。同 id 更新会保留新旧阔边重叠区的覆盖，不会反复开关这些格子。
-        /// 仅当 width==0 且 height==0 时表示删除；其余尺寸必须同时为正。
-        /// 返回 false 表示删除了不存在的 id，或矩形完全未变化。
+        /// 新增或更新动态矩形。同 id 可跨帧移动；仅 width=height=0 表示删除。
+        /// 矩形以 int16 x/y + uint16 width/height 压缩存储。
+        /// 动态障碍总数不能超过 ushort.MaxValue，以保证每格引用计数不会溢出。
         /// </summary>
         public bool UpdateDynamicObstacle(int id, int x, int y, int width, int height)
         {
@@ -133,53 +159,112 @@ namespace JPS.Pathfinding
                 throw new ArgumentOutOfRangeException(nameof(height),
                     "动态阻挡尺寸必须同时为正；仅 width=height=0 表示删除。");
 
-            DynamicObstacle oldObstacle;
-            bool existed = _dynamicObstacles.TryGetValue(id, out oldObstacle);
+            if (!remove && (x < short.MinValue || x > short.MaxValue))
+                throw new ArgumentOutOfRangeException(nameof(x),
+                    "动态阻挡 x 必须在 Int16 范围内。");
+            if (!remove && (y < short.MinValue || y > short.MaxValue))
+                throw new ArgumentOutOfRangeException(nameof(y),
+                    "动态阻挡 y 必须在 Int16 范围内。");
+            if (!remove && width > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(width),
+                    "动态阻挡 width 必须在 UInt16 范围内。");
+            if (!remove && height > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(height),
+                    "动态阻挡 height 必须在 UInt16 范围内。");
 
+            int obstacleIndex = FindDynamicObstacle(id);
             if (remove)
             {
-                if (!existed)
+                if (obstacleIndex < 0)
                     return false;
-                ApplyExpandedRectangle(oldObstacle.X, oldObstacle.Y, oldObstacle.Width, oldObstacle.Height, -1);
-                _dynamicObstacles.Remove(id);
+
+                DynamicObstacle oldObstacle = _dynamicObstacles[obstacleIndex];
+                ApplyDynamicChange(oldObstacle, null);
+                int lastIndex = --_dynamicObstacleCount;
+                if (obstacleIndex != lastIndex)
+                    _dynamicObstacles[obstacleIndex] = _dynamicObstacles[lastIndex];
+                _dynamicObstacles[lastIndex] = default;
                 return true;
             }
 
-            if (existed && oldObstacle.X == x && oldObstacle.Y == y &&
-                oldObstacle.Width == width && oldObstacle.Height == height)
-                return false;
-
             var newObstacle = new DynamicObstacle(id, x, y, width, height);
+            if (obstacleIndex >= 0)
+            {
+                DynamicObstacle oldObstacle = _dynamicObstacles[obstacleIndex];
+                if (oldObstacle.SameRectangle(newObstacle))
+                    return false;
 
-            if (existed)
-            {
-                ReplaceExpandedRectangle(oldObstacle, newObstacle);
+                ApplyDynamicChange(oldObstacle, newObstacle);
+                _dynamicObstacles[obstacleIndex] = newObstacle;
+                return true;
             }
-            else
-            {
-                ApplyExpandedRectangle(x, y, width, height, 1);
-            }
-            _dynamicObstacles[id] = newObstacle;
+
+            if (_dynamicObstacleCount >= ushort.MaxValue)
+                throw new InvalidOperationException("动态障碍数量不能超过 65535。");
+            EnsureObstacleCapacity(_dynamicObstacleCount + 1);
+            ApplyDynamicChange(null, newObstacle);
+            _dynamicObstacles[_dynamicObstacleCount++] = newObstacle;
             return true;
         }
 
-        public bool TryGetDynamicObstacle(int id, out DynamicObstacle obstacle) =>
-            _dynamicObstacles.TryGetValue(id, out obstacle);
+        public bool TryGetDynamicObstacle(int id, out DynamicObstacle obstacle)
+        {
+            int index = FindDynamicObstacle(id);
+            if (index >= 0)
+            {
+                obstacle = _dynamicObstacles[index];
+                return true;
+            }
 
-        /// <summary>删除全部动态阻挡；没有动态阻挡时返回 false。</summary>
+            obstacle = default;
+            return false;
+        }
+
         public bool ClearDynamicObstacles()
         {
-            if (_dynamicObstacles.Count == 0)
+            if (_dynamicObstacleCount == 0)
                 return false;
 
-            foreach (DynamicObstacle obstacle in _dynamicObstacles.Values)
-                ApplyExpandedRectangle(obstacle.X, obstacle.Y, obstacle.Width, obstacle.Height, -1);
-            _dynamicObstacles.Clear();
+            for (int i = 0; i < _dynamicCoverageCount; i++)
+            {
+                int index = CoverageIndex(_dynamicCoverage[i]);
+                if (!GetBit(_expandedStaticBits, index))
+                    Map.SetBlocked(index % Map.Width, index / Map.Width, false);
+            }
+
+            _dynamicCoverageCount = 0;
+            Array.Clear(_dynamicObstacles, 0, _dynamicObstacleCount);
+            _dynamicObstacleCount = 0;
             return true;
         }
 
-        /// <summary>把 JPS 跳点缓存同步到当前有效地图；一帧批量更新后调用一次即可。</summary>
         public void Sync() => System.Sync();
+
+        private int FindDynamicObstacle(int id)
+        {
+            for (int i = 0; i < _dynamicObstacleCount; i++)
+                if (_dynamicObstacles[i].Id == id)
+                    return i;
+            return -1;
+        }
+
+        private void EnsureObstacleCapacity(int required)
+        {
+            if (_dynamicObstacles.Length >= required)
+                return;
+
+            int capacity = _dynamicObstacles.Length == 0 ? 8 : _dynamicObstacles.Length;
+            while (capacity < required)
+            {
+                int next = capacity <= ushort.MaxValue / 2
+                    ? capacity * 2
+                    : ushort.MaxValue;
+                if (next == capacity)
+                    throw new OutOfMemoryException();
+                capacity = next;
+            }
+            Array.Resize(ref _dynamicObstacles, capacity);
+        }
 
         private static void ValidatePadding(int obstaclePadding)
         {
@@ -187,137 +272,172 @@ namespace JPS.Pathfinding
                 throw new ArgumentOutOfRangeException(nameof(obstaclePadding), "阻挡阔边不能为负数。");
         }
 
-        private void RebuildEffectiveMap(bool clearMap)
+        private void RebuildEffectiveMap()
         {
-            Array.Clear(_coverage, 0, _coverage.Length);
-            if (clearMap)
-                Map.ClearAll();
-
+            Array.Clear(_expandedStaticBits, 0, _expandedStaticBits.Length);
+            Map.ClearAll();
             ApplyMapBoundary();
 
-            for (int y = 0; y < Map.Height; y++)
-                for (int x = 0; x < Map.Width; x++)
-                    if (_staticBlocked[y * Map.Width + x])
-                        ApplyExpandedRectangle(x, y, 1, 1, 1);
+            int cellCount = Map.Width * Map.Height;
+            for (int index = 0; index < cellCount; index++)
+            {
+                if (GetBit(_staticBlockedBits, index))
+                    ApplyExpandedStatic(index % Map.Width, index / Map.Width);
+            }
 
-            foreach (DynamicObstacle obstacle in _dynamicObstacles.Values)
-                ApplyExpandedRectangle(obstacle.X, obstacle.Y, obstacle.Width, obstacle.Height, 1);
+            _dynamicCoverageCount = 0;
+            for (int i = 0; i < _dynamicObstacleCount; i++)
+                ApplyDynamicChange(null, _dynamicObstacles[i]);
         }
 
-        /// <summary>地图外是墙；给大体积物体的中心点留下 padding 格边界安全区。</summary>
         private void ApplyMapBoundary()
         {
-            int padding = ObstaclePadding;
-            if (padding == 0)
+            int p = ObstaclePadding;
+            if (p == 0)
                 return;
 
             for (int y = 0; y < Map.Height; y++)
             {
                 for (int x = 0; x < Map.Width; x++)
                 {
-                    if (x < padding || x >= Map.Width - padding ||
-                        y < padding || y >= Map.Height - padding)
-                        ChangeCoverage(x, y, 1);
+                    if (x < p || x >= Map.Width - p || y < p || y >= Map.Height - p)
+                        SetExpandedStatic(x, y);
                 }
             }
         }
 
-        private void ApplyExpandedRectangle(int x, int y, int width, int height, int delta)
+        private void ApplyExpandedStatic(int x, int y)
         {
-            CoverageRectangle rectangle = GetExpandedRectangle(x, y, width, height);
-            ApplyCoverageRectangle(rectangle, delta);
+            CoverageRectangle rectangle = GetExpandedRectangle(x, y, 1, 1);
+            for (int yy = rectangle.Top; yy <= rectangle.Bottom; yy++)
+                for (int xx = rectangle.Left; xx <= rectangle.Right; xx++)
+                    SetExpandedStatic(xx, yy);
         }
 
-        /// <summary>
-        /// 只更新新旧 footprint 的差集。动态矩形逐帧小步移动时，复杂度与进入/离开的边条面积相关，
-        /// 而不是每帧重新遍历整个矩形；重叠部分仍保持原有那一份 coverage。
-        /// </summary>
-        private void ReplaceExpandedRectangle(DynamicObstacle oldObstacle, DynamicObstacle newObstacle)
+        private void SetExpandedStatic(int x, int y)
         {
-            CoverageRectangle oldRectangle = GetExpandedRectangle(
-                oldObstacle.X, oldObstacle.Y, oldObstacle.Width, oldObstacle.Height);
-            CoverageRectangle newRectangle = GetExpandedRectangle(
-                newObstacle.X, newObstacle.Y, newObstacle.Width, newObstacle.Height);
-
-            ApplyRectangleDifference(newRectangle, oldRectangle, 1);
-            ApplyRectangleDifference(oldRectangle, newRectangle, -1);
+            int index = y * Map.Width + x;
+            if (GetBit(_expandedStaticBits, index))
+                return;
+            SetBit(_expandedStaticBits, index);
+            Map.SetBlocked(x, y, true);
         }
+
+        private void ApplyDynamicChange(DynamicObstacle? oldObstacle, DynamicObstacle? newObstacle)
+        {
+            CoverageRectangle oldRectangle = oldObstacle.HasValue
+                ? GetExpandedRectangle(oldObstacle.Value.X, oldObstacle.Value.Y,
+                    oldObstacle.Value.Width, oldObstacle.Value.Height)
+                : CoverageRectangle.Empty;
+            CoverageRectangle newRectangle = newObstacle.HasValue
+                ? GetExpandedRectangle(newObstacle.Value.X, newObstacle.Value.Y,
+                    newObstacle.Value.Width, newObstacle.Value.Height)
+                : CoverageRectangle.Empty;
+
+            long maximumOutput = (long)_dynamicCoverageCount + newRectangle.Area;
+            if (maximumOutput > int.MaxValue)
+                throw new InvalidOperationException("动态覆盖格数量过大。");
+            EnsureScratchCapacity((int)maximumOutput);
+
+            var oldCells = new RectangleCellCursor(oldRectangle, Map.Width);
+            var newCells = new RectangleCellCursor(newRectangle, Map.Width);
+            bool hasOld = oldCells.MoveNext();
+            bool hasNew = newCells.MoveNext();
+            int coveragePosition = 0;
+            int outputCount = 0;
+
+            while (coveragePosition < _dynamicCoverageCount || hasOld || hasNew)
+            {
+                int key = coveragePosition < _dynamicCoverageCount
+                    ? CoverageIndex(_dynamicCoverage[coveragePosition])
+                    : int.MaxValue;
+                if (hasOld && oldCells.Current < key) key = oldCells.Current;
+                if (hasNew && newCells.Current < key) key = newCells.Current;
+
+                int before = 0;
+                if (coveragePosition < _dynamicCoverageCount &&
+                    CoverageIndex(_dynamicCoverage[coveragePosition]) == key)
+                {
+                    before = _dynamicCoverage[coveragePosition].RefCount;
+                    coveragePosition++;
+                }
+
+                int delta = 0;
+                if (hasOld && oldCells.Current == key)
+                {
+                    delta--;
+                    hasOld = oldCells.MoveNext();
+                }
+                if (hasNew && newCells.Current == key)
+                {
+                    delta++;
+                    hasNew = newCells.MoveNext();
+                }
+
+                int after = before + delta;
+                if (after < 0 || after > ushort.MaxValue)
+                    throw new InvalidOperationException("动态阻挡引用计数失衡或溢出。");
+
+                if (before == 0 && after != 0)
+                    Map.SetBlocked(key % Map.Width, key / Map.Width, true);
+                else if (before != 0 && after == 0 && !GetBit(_expandedStaticBits, key))
+                    Map.SetBlocked(key % Map.Width, key / Map.Width, false);
+
+                if (after != 0)
+                    _coverageScratch[outputCount++] = new DynamicCoverage(key, Map.Width, (ushort)after);
+            }
+
+            DynamicCoverage[] previous = _dynamicCoverage;
+            _dynamicCoverage = _coverageScratch;
+            _coverageScratch = previous;
+            _dynamicCoverageCount = outputCount;
+        }
+
+        private void EnsureScratchCapacity(int required)
+        {
+            if (_coverageScratch.Length >= required)
+                return;
+
+            int capacity = _coverageScratch.Length == 0 ? 16 : _coverageScratch.Length;
+            while (capacity < required)
+            {
+                int next = capacity <= int.MaxValue / 2 ? capacity * 2 : int.MaxValue;
+                if (next == capacity)
+                    throw new OutOfMemoryException();
+                capacity = next;
+            }
+            _coverageScratch = new DynamicCoverage[capacity];
+        }
+
+        private int CoverageIndex(DynamicCoverage coverage) => coverage.Y * Map.Width + coverage.X;
 
         private CoverageRectangle GetExpandedRectangle(int x, int y, int width, int height)
         {
-            long padding = ObstaclePadding;
-            long left = (long)x - padding;
-            long top = (long)y - padding;
-            long right = (long)x + width - 1L + padding;
-            long bottom = (long)y + height - 1L + padding;
-
-            int x0 = (int)Math.Max(0L, left);
-            int y0 = (int)Math.Max(0L, top);
-            int x1 = (int)Math.Min(Map.Width - 1L, right);
-            int y1 = (int)Math.Min(Map.Height - 1L, bottom);
-            if (x0 > x1 || y0 > y1)
-                return CoverageRectangle.Empty;
-
-            return new CoverageRectangle(x0, y0, x1, y1);
+            long p = ObstaclePadding;
+            int left = (int)Math.Max(0L, (long)x - p);
+            int top = (int)Math.Max(0L, (long)y - p);
+            int right = (int)Math.Min(Map.Width - 1L, (long)x + width - 1L + p);
+            int bottom = (int)Math.Min(Map.Height - 1L, (long)y + height - 1L + p);
+            return left > right || top > bottom
+                ? CoverageRectangle.Empty
+                : new CoverageRectangle(left, top, right, bottom);
         }
 
-        private void ApplyRectangleDifference(CoverageRectangle source, CoverageRectangle subtract, int delta)
-        {
-            if (source.IsEmpty)
-                return;
+        private static bool GetBit(ulong[] bits, int index) =>
+            (bits[index >> 6] & (1UL << (index & 63))) != 0;
 
-            CoverageRectangle intersection = CoverageRectangle.Intersect(source, subtract);
-            if (intersection.IsEmpty)
-            {
-                ApplyCoverageRectangle(source, delta);
-                return;
-            }
-
-            // source - intersection，拆成互不重叠的上、下、左、右四条。
-            ApplyCoverageRectangle(new CoverageRectangle(
-                source.Left, source.Top, source.Right, intersection.Top - 1), delta);
-            ApplyCoverageRectangle(new CoverageRectangle(
-                source.Left, intersection.Bottom + 1, source.Right, source.Bottom), delta);
-            ApplyCoverageRectangle(new CoverageRectangle(
-                source.Left, intersection.Top, intersection.Left - 1, intersection.Bottom), delta);
-            ApplyCoverageRectangle(new CoverageRectangle(
-                intersection.Right + 1, intersection.Top, source.Right, intersection.Bottom), delta);
-        }
-
-        private void ApplyCoverageRectangle(CoverageRectangle rectangle, int delta)
-        {
-            if (rectangle.IsEmpty)
-                return;
-
-            for (int yy = rectangle.Top; yy <= rectangle.Bottom; yy++)
-                for (int xx = rectangle.Left; xx <= rectangle.Right; xx++)
-                    ChangeCoverage(xx, yy, delta);
-        }
-
-        private void ChangeCoverage(int x, int y, int delta)
-        {
-            int index = y * Map.Width + x;
-            int before = _coverage[index];
-            int after = before + delta;
-            if (after < 0)
-                throw new InvalidOperationException("JpsAdapter 阻挡覆盖计数失衡。");
-
-            _coverage[index] = after;
-            if (before == 0 && after != 0)
-                Map.SetBlocked(x, y, true);
-            else if (before != 0 && after == 0)
-                Map.SetBlocked(x, y, false);
-        }
+        private static void SetBit(ulong[] bits, int index) =>
+            bits[index >> 6] |= 1UL << (index & 63);
 
         private readonly struct CoverageRectangle
         {
             public static CoverageRectangle Empty => new CoverageRectangle(0, 0, -1, -1);
-
             public readonly int Left;
             public readonly int Top;
             public readonly int Right;
             public readonly int Bottom;
             public bool IsEmpty => Left > Right || Top > Bottom;
+            public long Area => IsEmpty ? 0L : (long)(Right - Left + 1) * (Bottom - Top + 1);
 
             public CoverageRectangle(int left, int top, int right, int bottom)
             {
@@ -326,16 +446,50 @@ namespace JPS.Pathfinding
                 Right = right;
                 Bottom = bottom;
             }
+        }
 
-            public static CoverageRectangle Intersect(CoverageRectangle a, CoverageRectangle b)
+        private struct RectangleCellCursor
+        {
+            private readonly CoverageRectangle _rectangle;
+            private readonly int _mapWidth;
+            private int _x;
+            private int _y;
+            private bool _started;
+            public int Current { get; private set; }
+
+            public RectangleCellCursor(CoverageRectangle rectangle, int mapWidth)
             {
-                if (a.IsEmpty || b.IsEmpty)
-                    return Empty;
-                return new CoverageRectangle(
-                    Math.Max(a.Left, b.Left),
-                    Math.Max(a.Top, b.Top),
-                    Math.Min(a.Right, b.Right),
-                    Math.Min(a.Bottom, b.Bottom));
+                _rectangle = rectangle;
+                _mapWidth = mapWidth;
+                _x = rectangle.Left;
+                _y = rectangle.Top;
+                _started = false;
+                Current = -1;
+            }
+
+            public bool MoveNext()
+            {
+                if (_rectangle.IsEmpty)
+                    return false;
+
+                if (!_started)
+                {
+                    _started = true;
+                }
+                else if (_x < _rectangle.Right)
+                {
+                    _x++;
+                }
+                else
+                {
+                    _x = _rectangle.Left;
+                    _y++;
+                    if (_y > _rectangle.Bottom)
+                        return false;
+                }
+
+                Current = _y * _mapWidth + _x;
+                return true;
             }
         }
     }
