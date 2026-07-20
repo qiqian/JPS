@@ -34,22 +34,71 @@ namespace JPS.Benchmark
         // Linux: sched_setaffinity(pid = 0 -> the calling thread, cpusetsize in bytes, mask). Returns 0 on success.
         [DllImport("libc", SetLastError = true)]
         private static extern int sched_setaffinity(int pid, IntPtr cpusetsize, ref ulong mask);
+        [DllImport("libc", SetLastError = true)]
+        private static extern int sched_getaffinity(int pid, IntPtr cpusetsize, out ulong mask);
 #pragma warning restore SYSLIB1054
 
-        private static bool TrySetCurrentThreadAffinity(int cpuIndex)
+        private sealed class ThreadAffinityScope : IDisposable
         {
-            if (cpuIndex < 0 || cpuIndex >= 64)
-                return false;
-            ulong mask = 1UL << cpuIndex;
-            try
+            private readonly IntPtr _windowsThread;
+            private readonly UIntPtr _previousWindowsMask;
+            private readonly ulong _previousLinuxMask;
+            private readonly int _platform;
+
+            private ThreadAffinityScope(IntPtr windowsThread, UIntPtr previousWindowsMask)
             {
-                if (OperatingSystem.IsWindows())
-                    return SetThreadAffinityMask(GetCurrentThread(), new UIntPtr(mask)) != UIntPtr.Zero;
-                if (OperatingSystem.IsLinux())
-                    return sched_setaffinity(0, (IntPtr)sizeof(ulong), ref mask) == 0;
+                _windowsThread = windowsThread;
+                _previousWindowsMask = previousWindowsMask;
+                _platform = 1;
             }
-            catch { /* API missing / call blocked -> fall through to no-op */ }
-            return false;   // macOS / other: no portable per-core pinning
+
+            private ThreadAffinityScope(ulong previousLinuxMask)
+            {
+                _previousLinuxMask = previousLinuxMask;
+                _platform = 2;
+            }
+
+            public static ThreadAffinityScope? TryPinCurrentThread(int cpuIndex)
+            {
+                if (cpuIndex < 0 || cpuIndex >= 64)
+                    return null;
+
+                ulong mask = 1UL << cpuIndex;
+                try
+                {
+                    if (OperatingSystem.IsWindows())
+                    {
+                        IntPtr thread = GetCurrentThread();
+                        UIntPtr previousWindows = SetThreadAffinityMask(thread, new UIntPtr(mask));
+                        return previousWindows != UIntPtr.Zero
+                            ? new ThreadAffinityScope(thread, previousWindows)
+                            : null;
+                    }
+                    if (OperatingSystem.IsLinux() &&
+                        sched_getaffinity(0, (IntPtr)sizeof(ulong), out ulong previousLinux) == 0 &&
+                        sched_setaffinity(0, (IntPtr)sizeof(ulong), ref mask) == 0)
+                    {
+                        return new ThreadAffinityScope(previousLinux);
+                    }
+                }
+                catch { /* API missing / call blocked -> fall through to no-op */ }
+                return null;   // macOS / other: no portable per-core pinning
+            }
+
+            public void Dispose()
+            {
+                try
+                {
+                    if (_platform == 1)
+                        SetThreadAffinityMask(_windowsThread, _previousWindowsMask);
+                    else if (_platform == 2)
+                    {
+                        ulong mask = _previousLinuxMask;
+                        sched_setaffinity(0, (IntPtr)sizeof(ulong), ref mask);
+                    }
+                }
+                catch { /* affinity is best-effort; never fail benchmark teardown */ }
+            }
         }
 
         // Usage: combo [q] [subdir] [--cpus LIST]
@@ -802,33 +851,26 @@ namespace JPS.Benchmark
                 scenTcs[i] = new TaskCompletionSource<PhaseResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
 
-            Task[] workerTasks = new Task[workers];
+            // Dedicated threads keep affinity out of the CLR thread pool. GC and background-JIT threads retain
+            // their normal process-wide scheduling freedom; only these benchmark execution threads are pinned.
+            Thread[] workerThreads = new Thread[workers];
             var workerReady = new TaskCompletionSource<bool>[workers];
             for (int i = 0; i < workers; i++) workerReady[i] = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            for (int wi = 0; wi < workerTasks.Length; wi++)
+            for (int wi = 0; wi < workerThreads.Length; wi++)
             {
                 int localWorkerIndex = wi; // capture
-                workerTasks[wi] = Task.Run(() =>
+                workerThreads[wi] = new Thread(() =>
                 {
-
-                    // Pin this worker thread to its assigned CPU (workers == number of requested CPUs, 1:1).
-                    try
-                    {
-                        TrySetCurrentThreadAffinity(cpus[localWorkerIndex]);
-                    }
-                    catch { }
-
-                    // Give the thread an initial name (Thread.Name can only be set once).
-                    try { System.Threading.Thread.CurrentThread.Name ??= $"init-{localWorkerIndex}"; } catch { }
+                    // Save/restore the original mask even though this dedicated thread normally exits here.
+                    // This makes the affinity lifetime exactly match the benchmark worker body.
+                    using ThreadAffinityScope? affinity =
+                        ThreadAffinityScope.TryPinCurrentThread(cpus[localWorkerIndex]);
 
                     // Signal the main thread that this worker finished init and is ready.
                     try { workerReady[localWorkerIndex].TrySetResult(true); } catch { }
 
                     foreach (var job in jobsQueue.GetConsumingEnumerable())
                     {
-                        // Best-effort rename to job-{job.Index} (Thread.Name may already be set; ignore failures).
-                        try { System.Threading.Thread.CurrentThread.Name = $"job-{job.Index}"; } catch { }
-
                         // MapRunner runs rand -> scen for one map, submitting each phase to randTcs/scenTcs as it finishes.
                         // Exceptions are caught inside Run and posted to the unsubmitted phase(s), so both TCS always resolve.
                         try
@@ -842,7 +884,12 @@ namespace JPS.Benchmark
                             ShowProgress($"[{done}/{total} done] {job.SortKey}", true);
                         }
                     }
-                });
+                })
+                {
+                    IsBackground = false,
+                    Name = $"jps-benchmark-{localWorkerIndex}"
+                };
+                workerThreads[wi].Start();
             }
 
             // Wait until all workers finish init before dispatching, so the first job is not delayed by thread startup/affinity.
@@ -889,8 +936,9 @@ namespace JPS.Benchmark
                 }
             }
 
-            // Wait for all worker tasks to finish.
-            Task.WaitAll(workerTasks);
+            // Wait for all dedicated workers to restore their previous affinity and exit.
+            foreach (Thread workerThread in workerThreads)
+                workerThread.Join();
 
             ClearProgress();
             Console.WriteLine(new string('-', rule));
