@@ -300,7 +300,7 @@ flowchart TD
 - **行 + 列双位图**：横向扫描走行位图，纵向扫描走转置后的列位图；两者都能复用同一套 128-bit SIMD 扫描逻辑，不再像 C# 参考实现那样只有横向按字加速。
 - **按方向 SoA 跳点缓存**：`dist` / `gen` 拆成连续平面，配合 SIMD 一次写回多个 16 位距离；行方向用 `row_gen`，列方向用 `col_gen`，只让受影响的行/列失效。
 - **高效地图同步**：整图初始化走 `jps_system_set_blocked_buffer`，局部动态改图走 `jps_system_set_blocked_batch`；`Sync` 根据 dirty rows / dirty cols 推进缓存世代，而不是每次全表清空。
-- **低分配搜索热路径**：搜索状态按访问频率拆成 SoA，堆采用 hole-sift，路径重建的 `nodes` 栈、路径结果数组和开放堆都挂在 `jps_pathfinder` 上跨查询复用，避免每次 find path 的 malloc/free 抖动。
+- **低分配搜索热路径**：搜索状态按访问频率拆成 SoA，堆采用 hole-sift，compact path 用单个 packed `uint32_t` 数组直接完成父链收集与原地翻转，并和开放堆一起跨查询复用，避免每次 find path 的 malloc/free 抖动。
 
 这层优化解释了当前 benchmark 的形态：hot 路径 C 主要赢在更紧的数据布局和更少分支；cold 路径 C 赢得更多，因为重扫/回写/同步受 SIMD、dirty row/col 和批量改图接口的影响更大。
 
@@ -336,7 +336,7 @@ flowchart TD
 - **世代戳免清零**：每次查询自增世代号判断"是否本次访问过"，无需每次清零数组。
 - **共享惰性跳点缓存**：正交跳点距离按地图共享，多个 C# pathfinder 可并发预热同一缓存。
 - **跨平台 C native 数据布局**：SSE2/NEON 128-bit SIMD、guard-banded 位图消除边界分支，按方向 SoA 缓存提升连续访问，行/列 dirty 结构让局部改图只同步受影响区域。
-- **低分配搜索热路径**：堆采用 hole-sift，路径重建 nodes、剪枝方向、搜索状态等缓冲按地图尺寸持久复用。
+- **低分配搜索热路径**：堆采用 hole-sift，compact path 以 packed `uint32_t` 单缓冲重建，剪枝方向和搜索状态等缓冲跨查询复用。
 - **基准与准确性验证**：benchmark 按地图分组多线程执行并按分发顺序输出；accuracy 对 142.3 万条官方 `.scen` 做 A\*/C#/C 交叉验证。
 
 ### 1. 内存开销对比
@@ -1043,7 +1043,7 @@ Main optimizations:
 - **Row + column bitmaps:** horizontal scans use the row bitmap, vertical scans use a transposed column bitmap; both reuse the same 128-bit SIMD scan code, whereas the C# reference only has word-at-a-time acceleration horizontally.
 - **Per-direction SoA jump cache:** `dist` / `gen` are stored as contiguous planes, enabling SIMD write-back of multiple 16-bit distances; row directions use `row_gen`, column directions use `col_gen`, invalidating only affected rows/columns.
 - **Efficient map sync:** initial full loads use `jps_system_set_blocked_buffer`, sparse dynamic edits use `jps_system_set_blocked_batch`, and `Sync` advances cache generations from dirty rows / dirty columns instead of clearing the whole table.
-- **Low-allocation search hot path:** search state is split by access frequency, the heap uses hole-sift, and path-rebuild `nodes`, path result storage, and the open heap live inside `jps_pathfinder` and are reused across calls.
+- **Low-allocation search hot path:** search state is split by access frequency, the heap uses hole-sift, and a single packed-`uint32_t` compact-path buffer collects and reverses the parent chain in place; it and the open heap are reused across calls.
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
 

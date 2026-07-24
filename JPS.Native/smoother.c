@@ -132,7 +132,15 @@ bool jps__line_of_sight_unchecked(const jps_grid_map *m, int x0, int y0, int x1,
     return true;
 }
 
-static jps_point_f jps__center(jps_point c)
+static jps_point jps__unpack_point(uint32_t packed)
+{
+    jps_point p;
+    p.x = (int)(packed & 0xFFFFu);
+    p.y = (int)(packed >> 16);
+    return p;
+}
+
+static jps_point_f jps__center_point(jps_point c)
 {
     jps_point_f p;
     p.x = (float)c.x + 0.5f;
@@ -140,7 +148,12 @@ static jps_point_f jps__center(jps_point c)
     return p;
 }
 
-int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path_count,
+static jps_point_f jps__center(uint32_t packed)
+{
+    return jps__center_point(jps__unpack_point(packed));
+}
+
+int jps__smooth_path_into(const jps_grid_map *m, const uint32_t *path, int path_count,
                           jps_point_f *out_points, int capacity_points)
 {
     int count = 0;
@@ -156,12 +169,12 @@ int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path
     if (path_count == 1)
         return count;
 
-    anchor = path[0];
-    previous = path[0];
+    anchor = jps__unpack_point(path[0]);
+    previous = anchor;
     for (segment = 1; segment < path_count; segment++)
     {
-        jps_point from = path[segment - 1];
-        jps_point to = path[segment];
+        jps_point from = jps__unpack_point(path[segment - 1]);
+        jps_point to = jps__unpack_point(path[segment]);
         int step_x = jps_sign(to.x - from.x);
         int step_y = jps_sign(to.y - from.y);
         int dx = abs(to.x - from.x);
@@ -210,7 +223,7 @@ int jps__smooth_path_into(const jps_grid_map *m, const jps_point *path, int path
 
                 best_point.x = from.x + step_x * best;
                 best_point.y = from.y + step_y * best;
-                if (count < capacity_points) out_points[count] = jps__center(best_point);
+                if (count < capacity_points) out_points[count] = jps__center_point(best_point);
                 count++;
                 anchor = best_point;
 

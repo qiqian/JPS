@@ -28,7 +28,7 @@ typedef struct
 
 
 /*
- * 寻路结果（纯内部状态，不进公共头）：path 是 compact path 动态数组，
+ * 寻路结果（纯内部状态，不进公共头）：path 是 packed_xy compact path 动态数组，
  * path_count 为起点、跳点/拐点与终点的点数。
  * 缓冲可跨次查询复用。对外只通过 copy/count 等访问器暴露，不跨 ABI 传结构体。
  */
@@ -36,7 +36,7 @@ typedef struct
 {
     bool success;
     bool reached_goal;   /* true=真正到达 goal；false=返回的是离 goal 最近的可达点（find_path_nearest 未达时） */
-    jps_point *path;
+    uint32_t *path;      /* 每点 (y<<16)|x；地图边长 <=32767，最高位恒为 0 */
     int path_count;
     int path_capacity;
 } jps_path_result;
@@ -157,9 +157,6 @@ struct jps_pathfinder
     jps_jump_point_cache *cache;   /* 当前查询绑定的共享跳点缓存 */
     jps_path_result result;        /* 最近一次寻路结果（供 copy/count 访问器读取） */
 
-    int *rebuild_nodes;            /* 路径重建用父链节点栈，跨查询复用，避免每次 malloc/free */
-    int rebuild_nodes_capacity;
-
     /* 平滑路径缓存：find_path 成功后复用 g_dir 内存窗口，copy_smoothed_path 直接拷。 */
     jps_point_f *smoothed;            /* g_dir 的别名，不拥有内存；搜索结束后才可覆盖 */
     int smoothed_count;
@@ -202,7 +199,7 @@ static void jps__ensure_path_capacity(jps_path_result *r, int count)
     n = r->path_capacity < 16 ? 16 : r->path_capacity * 2;
     while (n < count)
         n *= 2;
-    r->path = (jps_point *)realloc(r->path, (size_t)n * sizeof(jps_point));
+    r->path = (uint32_t *)realloc(r->path, (size_t)n * sizeof(uint32_t));
     r->path_capacity = n;
 }
 
@@ -220,8 +217,6 @@ jps_pathfinder *jps_pathfinder_create(void)
     jps_min_heap_init(&pf->open, 64);
     pf->cache = NULL;
     jps__result_init(&pf->result);
-    pf->rebuild_nodes = NULL;
-    pf->rebuild_nodes_capacity = 0;
     pf->smoothed = NULL;
     pf->smoothed_count = 0;
     pf->smoothed_capacity = 0;
@@ -234,7 +229,6 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
         return;
     free(pf->g_dir);
     free(pf->mark);
-    free(pf->rebuild_nodes);
     jps_min_heap_free(&pf->open);
     jps__result_free(&pf->result);
     free(pf);
@@ -257,9 +251,7 @@ uint64_t jps_pathfinder_memory_bytes(const jps_pathfinder *pf)
     if (pf->open.prio != NULL)
         bytes += (uint64_t)((size_t)pf->open.capacity * sizeof(int64_t));
     if (pf->result.path != NULL)
-        bytes += (uint64_t)((size_t)pf->result.path_capacity * sizeof(jps_point));
-    if (pf->rebuild_nodes != NULL)
-        bytes += (uint64_t)((size_t)pf->rebuild_nodes_capacity * sizeof(int));
+        bytes += (uint64_t)((size_t)pf->result.path_capacity * sizeof(uint32_t));
     return bytes;
 }
 
@@ -538,39 +530,32 @@ static int jps__fill_directions(jps__dir* dir_buf, const jps_grid_map *m, int x,
 
 /* ---------------- 路径重建 ---------------- */
 
-static void jps__ensure_rebuild_nodes(jps_pathfinder *pf, int count)
+static void jps__reverse_packed_path(uint32_t *path, int begin, int end)
 {
-    int n;
-    if (count <= pf->rebuild_nodes_capacity)
-        return;
-
-    n = pf->rebuild_nodes_capacity < 16 ? 16 : pf->rebuild_nodes_capacity * 2;
-    while (n < count)
-        n *= 2;
-    pf->rebuild_nodes = (int *)realloc(pf->rebuild_nodes, (size_t)n * sizeof(int));
-    pf->rebuild_nodes_capacity = n;
+    int left = begin;
+    int right = end - 1;
+    while (left < right)
+    {
+        uint32_t t = path[left];
+        path[left++] = path[right];
+        path[right--] = t;
+    }
 }
 
 static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, int gy, jps_path_result *r)
 {
     /* 沿父链收集 compact path（goal → start），再反向写出 start → goal。
      * 对外只暴露 compact path：起点、跳点/拐点、终点；不展开跳跃段中间格。
-     * 直接沿 (x,y) 坐标回溯（父 = 当前 − dir×steps），nodes 存打包坐标——
-     * 全程无除法：查 g_dir 用一次乘法定位，写出用移位解包。 */
-    int *nodes = pf->rebuild_nodes;
+     * 直接沿 (x,y) 坐标回溯（父 = 当前 − dir×steps），结果数组本身存 packed_xy，
+     * 收集后原地翻转，无第二份 rebuild 缓冲。 */
     int nodes_count = 0;
     int cx = gx, cy = gy;
-    int i, write;
 
-    /* 收集 */
     for (;;)
     {
-        if (nodes_count == pf->rebuild_nodes_capacity)
-        {
-            jps__ensure_rebuild_nodes(pf, nodes_count + 1);
-            nodes = pf->rebuild_nodes;
-        }
-        nodes[nodes_count++] = jps__pack_xy(cx, cy);
+        if (nodes_count == r->path_capacity)
+            jps__ensure_path_capacity(r, nodes_count + 1);
+        r->path[nodes_count++] = (uint32_t)jps__pack_xy(cx, cy);
 
         if (cx == sx && cy == sy)
             break;
@@ -585,18 +570,8 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, in
         }
     }
 
-    /* compact path = JPS 原始跳点序列（起点、跳点/拐点、终点），不做共线合并、不展开中间格。
-     * nodes 为 goal→start，反向写出 start→goal。 */
-    jps__ensure_path_capacity(r, nodes_count);
-    write = 0;
-    for (i = nodes_count - 1; i >= 0; i--)
-    {
-        int packed = nodes[i];
-        r->path[write].x = packed & 0xFFFF;
-        r->path[write].y = packed >> 16;
-        write++;
-    }
-    r->path_count = write;
+    jps__reverse_packed_path(r->path, 0, nodes_count);
+    r->path_count = nodes_count;
 }
 
 /* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
@@ -662,7 +637,7 @@ static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
     int start_packed = jps__pack_xy(bx, by);
     int best_packed = start_packed;
     int64_t best_h = jps_octile_heuristic(bx, by, gx, gy);
-    int visited = 0, cur, chain_len, i;
+    int visited = 0, cur, chain_begin, i;
     int64_t prio;
 
     jps__next_epoch(pf);                         /* fresh epoch → 全新 visited 标记，不与主搜索冲突 */
@@ -698,23 +673,17 @@ static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
     if (best_packed == start_packed)
         return;   /* 起点即最近，无需追加 */
 
-    /* 沿 g_dir 父链收集 best→…→start（含 best、不含 start），再逆序追加为 start 之后→best 的正向段。 */
-    jps__ensure_rebuild_nodes(pf, JPS__REFINE_CAP);
-    chain_len = 0;
+    /* 把 best→…→start（含 best、不含 start）直接追加进 packed 结果区，再只翻转新增后缀。 */
+    chain_begin = r->path_count;
     cur = best_packed;
-    while (cur != start_packed && chain_len < JPS__REFINE_CAP)
+    while (cur != start_packed && r->path_count - chain_begin < JPS__REFINE_CAP)
     {
-        pf->rebuild_nodes[chain_len++] = cur;
+        if (r->path_count == r->path_capacity)
+            jps__ensure_path_capacity(r, r->path_count + 1);
+        r->path[r->path_count++] = (uint32_t)cur;
         cur = (int)(uint32_t)pf->g_dir[jps__id(pf, cur & 0xFFFF, cur >> 16)];
     }
-    jps__ensure_path_capacity(r, r->path_count + chain_len);
-    for (i = chain_len - 1; i >= 0; i--)   /* 逆序：靠近 start 的先追加 */
-    {
-        int p = pf->rebuild_nodes[i];
-        r->path[r->path_count].x = p & 0xFFFF;
-        r->path[r->path_count].y = p >> 16;
-        r->path_count++;
-    }
+    jps__reverse_packed_path(r->path, chain_begin, r->path_count);
 }
 
 /* 搜索核心：allow_nearest=false 即经典严格 find_path；true 即 find_path_nearest——
@@ -919,8 +888,9 @@ int jps_pathfinder_copy_path(const jps_pathfinder *pf, int *out_xy, int capacity
 
     for (i = 0; i < n; i++)
     {
-        out_xy[i * 2]     = pf->result.path[i].x;
-        out_xy[i * 2 + 1] = pf->result.path[i].y;
+        uint32_t packed = pf->result.path[i];
+        out_xy[i * 2]     = (int)(packed & 0xFFFFu);
+        out_xy[i * 2 + 1] = (int)(packed >> 16);
     }
     return n;
 }

@@ -157,6 +157,43 @@ static int test_padding_rebuild_and_find(void)
     return 0;
 }
 
+static int test_nearest_refine_packed_path(void)
+{
+    enum { WIDTH = 9, HEIGHT = 7 };
+    uint8_t cells[WIDTH * HEIGHT] = {0};
+    jps_adapter *a;
+    jps_pathfinder *pf;
+    int y, n, sn, xy[32];
+    float sxy[32];
+
+    for (y = 0; y < HEIGHT; y++)
+        cells[y * WIDTH + 4] = 1;   /* Solid wall: nearest must stop immediately before it at x=3. */
+
+    a = jps_adapter_create_from_buffer(WIDTH, HEIGHT, 0, cells, WIDTH * HEIGHT);
+    CHECK(a != NULL);
+    pf = jps_pathfinder_create();
+    CHECK(pf != NULL);
+    jps_adapter_sync(a);
+
+    CHECK(jps_pathfinder_find_path(pf, jps_adapter_system(a), 1, 3, 7, 3) == JPS_ERR_NO_PATH);
+    n = jps_pathfinder_find_path_nearest(pf, jps_adapter_system(a), 1, 3, 7, 3);
+    CHECK(n >= 2 && n <= 16);
+    CHECK(jps_pathfinder_reached_goal(pf) == 0);
+    CHECK(jps_pathfinder_copy_path(pf, xy, 16) == n);
+    CHECK(xy[0] == 1 && xy[1] == 3);
+    CHECK(xy[(n - 1) * 2] == 3 && xy[(n - 1) * 2 + 1] == 3);
+
+    sn = jps_pathfinder_smoothed_path_count(pf);
+    CHECK(sn >= 2 && sn <= 16);
+    CHECK(jps_pathfinder_copy_smoothed_path(pf, sxy, 16) == sn);
+    CHECK(sxy[0] == 1.5f && sxy[1] == 3.5f);
+    CHECK(sxy[(sn - 1) * 2] == 3.5f && sxy[(sn - 1) * 2 + 1] == 3.5f);
+
+    jps_pathfinder_destroy(pf);
+    jps_adapter_destroy(a);
+    return 0;
+}
+
 static int test_random_updates_against_reference(void)
 {
     enum { WIDTH = 16, HEIGHT = 13, IDS = 6 };
@@ -220,6 +257,7 @@ int jps_adapter_run_tests(void)
     if (test_static_padding_and_boundary() != 0) return 1;
     if (test_dynamic_move_overlap_and_remove() != 0) return 1;
     if (test_padding_rebuild_and_find() != 0) return 1;
+    if (test_nearest_refine_packed_path() != 0) return 1;
     if (test_random_updates_against_reference() != 0) return 1;
     printf("jps_adapter native tests: passed\n");
     return 0;
