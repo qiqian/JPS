@@ -13,7 +13,7 @@
 #include "rules.h"
 #include "system.h"
 
-static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g_dir slot must hold one smoothed point");
+static_assert(sizeof(jps_point_f) <= sizeof(uint64_t), "g storage slot must hold one smoothed point");
 
 /*
  * 一次“跳跃”跳到的目标格。跳跃函数返回 bool（是否跳到跳点/终点），
@@ -42,19 +42,23 @@ typedef struct
 } jps_path_result;
 
 /*
- * 逐节点搜索状态：按**访问频率**拆存（SoA），不按节点合并（AoS）——
- * mark 是被高频单独访问的（堆过期检查/邻居 closed 检查只碰它），保持独立密集数组：
- * uint16 一条 cache line 装 32 个节点的 mark；与冷字段合并会把最热数组稀释 3–4 倍（实测回退）。
+ * 稀疏逐节点搜索状态：
+ *   g_slot[id] == 0          → 本次查询未访问；
+ *   g_slot[id] == +(slot+1)  → open；
+ *   g_slot[id] == -(slot+1)  → closed。
+ * g_slot 同时承担 dense id→slot 映射与原 mark 的 seen/closed 状态；查询切换时只遍历
+ * slot_node[0..state_count) 把实际访问过的 slot 清 0，不再维护 2 B/格的 mark/epoch。
  *
- * g、steps、parent dx/dy 打包进同一个 uint64（g_dir），取代原先独立的 steps 数组：
+ * 只有访问到的节点才在 g_storage 中占一个 uint64；g、steps、parent dx/dy 打包布局为：
  *   位 [0,44)  = g 值：迷宫最优路径可途经 ~W×H 格，g 上限 ~1.5e12 < 2^41 ≪ 2^44，44 位足够；
  *   位 [44,60) = steps 到达该节点的跳跃步数（≤ max(W,H) ≤ 32767 < 2^16），父节点 = 当前 − dir×steps；
  *   位 [60,62) = parent dx 到达方向编码（dx+1，取值 0..2；3 为无父哨兵）。
  *   位 [62,64) = parent dy 到达方向编码（dy+1，取值 0..2；3 为无父哨兵）。
- *   · 展开读 g+方向、relax 写 g+steps+方向本来就要摸这条 line，steps 塞进同字等于免费搭车——
- *     独立 steps 数组整个消失，relax 少一次 store，逐节点搜索态 12→10 B/格；
+ * g_storage / slot_node 按同一 slot 并行索引并跨查询保留峰值容量；slot_node 低 31 位存
+ * packed_xy（最高位恒空），最高位兼作堆过期检查的 closed 位。堆直接存 slot，出堆无需
+ * g_slot→g_storage 的依赖寻址。典型内存为 4N + 12V（N=地图格数，V=峰值访问节点容量）。
  *   · 哨兵：无父存 dx_code=dy_code=3；实际方向只用 0..2（dx/dy = code-1）；
- *   · g_dir 自然 8 对齐、8 节点/line，无跨线、无非对齐访问。
+ *   · slot 从 0 递增，地图最大 N<2^30，故 ±(slot+1) 安全落在 int32_t 范围。
  */
 #define JPS__STEPS_SHIFT 44
 #define JPS__G_MASK      ((1ULL << JPS__STEPS_SHIFT) - 1)   /* g 的低 44 位 */
@@ -63,6 +67,8 @@ typedef struct
 #define JPS__DY_SHIFT    62
 
 #define JPS__NO_DCODE ((uint8_t)3u)   /* parent dx/dy 哨兵：无父（dx_code=dy_code=3） */
+#define JPS__SLOT_CLOSED 0x80000000u
+#define JPS__PACKED_XY_MASK 0x7FFFFFFFu
 
 static inline int64_t jps__gd_g(uint64_t gd) { return (int64_t)(gd & JPS__G_MASK); }
 
@@ -138,27 +144,18 @@ struct jps_pathfinder
 {
     /* ---- 按地图尺寸一次性分配、跨多次查询复用的缓冲区 ---- */
     int w, h, size;
-    uint64_t *g_dir;     /* 每节点：g + steps + 到达方向打包同字（见上方布局说明） */
-    /*
-     * 查询纪元（epoch）标记法——免清零地跨查询复用 mark 数组：
-     *   mark == 2·epoch → 本次查询已入 open；== 2·epoch+1 → 已 closed；< 2·epoch → 未访问。
-     *   epoch 每次 find_path 自增；mark 为 uint16 → 需 2·epoch+1 ≤ 65535，
-     *   故 epoch 在 1..32767 循环，回绕时 memset 整个 mark（每 ~3.3 万次查询一次，摊薄可忽略）。
-     *   0 是保留值：epoch 从 1 起、mark 写入值 ∈ 2..65535，mark==0（新 calloc/回绕后）恒为未访问。
-     *
-     * ⚠️ 与跳点缓存的行/列世代（jump_point_cache.h 的 row_gen/col_gen/gen 平面）是**两套独立机制**：
-     *   那套随「地图改动」推进、跨查询存活，判定缓存条目失效；
-     *   这套随「每次查询」推进、只属于本 pathfinder，判定节点访问状态。二者互不作用。
-     */
-    uint16_t *mark;      /* 访问状态（独立密集数组，32 节点/cache line） */
-    int epoch;           /* 查询纪元，1..32767 循环（见上） */
+    int32_t *g_slot;        /* 每格一个 slot tag：0 unseen，正 open，负 closed */
+    uint64_t *g_storage;    /* 只存本次实际访问节点的 packed g/steps/parent */
+    uint32_t *slot_node;    /* 与 g_storage 同 slot：低 31 位 packed_xy，最高位 closed */
+    int state_count;
+    int state_capacity;
     jps_min_heap open;
 
     jps_jump_point_cache *cache;   /* 当前查询绑定的共享跳点缓存 */
     jps_path_result result;        /* 最近一次寻路结果（供 copy/count 访问器读取） */
 
-    /* 平滑路径缓存：find_path 成功后复用 g_dir 内存窗口，copy_smoothed_path 直接拷。 */
-    jps_point_f *smoothed;            /* g_dir 的别名，不拥有内存；搜索结束后才可覆盖 */
+    /* 平滑路径缓存：find_path 成功后复用 g_storage 内存窗口，copy_smoothed_path 直接拷。 */
+    jps_point_f *smoothed;            /* g_storage 的别名，不拥有内存；搜索结束后才可覆盖 */
     int smoothed_count;
     int smoothed_capacity;
 };
@@ -203,6 +200,54 @@ static void jps__ensure_path_capacity(jps_path_result *r, int count)
     r->path_capacity = n;
 }
 
+static void jps__ensure_state_capacity(jps_pathfinder *pf, int count)
+{
+    int n;
+    if (count <= pf->state_capacity)
+        return;
+
+    n = pf->state_capacity < 64 ? 64 : pf->state_capacity * 2;
+    while (n < count)
+        n *= 2;
+    pf->g_storage = (uint64_t *)realloc(pf->g_storage, (size_t)n * sizeof(uint64_t));
+    pf->slot_node = (uint32_t *)realloc(pf->slot_node, (size_t)n * sizeof(uint32_t));
+    pf->state_capacity = n;
+}
+
+static void jps__reset_sparse_state(jps_pathfinder *pf)
+{
+    int i;
+    for (i = 0; i < pf->state_count; i++)
+    {
+        uint32_t packed = pf->slot_node[i] & JPS__PACKED_XY_MASK;
+        int id = (int)(packed >> 16) * pf->w + (int)(packed & 0xFFFFu);
+        pf->g_slot[id] = 0;
+    }
+    pf->state_count = 0;
+}
+
+static inline int jps__slot_from_tag(int32_t tag)
+{
+    return (tag < 0 ? -(int)tag : (int)tag) - 1;
+}
+
+static inline int jps__state_add(jps_pathfinder *pf, int id, uint32_t packed_xy, uint64_t gd)
+{
+    int slot = pf->state_count;
+    if (slot == pf->state_capacity)
+        jps__ensure_state_capacity(pf, slot + 1);
+    pf->state_count = slot + 1;
+    pf->slot_node[slot] = packed_xy;
+    pf->g_storage[slot] = gd;
+    pf->g_slot[id] = (int32_t)(slot + 1);
+    return slot;
+}
+
+static inline uint64_t jps__state_get(const jps_pathfinder *pf, int id)
+{
+    return pf->g_storage[jps__slot_from_tag(pf->g_slot[id])];
+}
+
 /* ---------------- 生命周期 ---------------- */
 
 jps_pathfinder *jps_pathfinder_create(void)
@@ -211,9 +256,11 @@ jps_pathfinder *jps_pathfinder_create(void)
     if (pf == NULL)
         return NULL;
     pf->w = pf->h = pf->size = 0;
-    pf->g_dir = NULL;
-    pf->mark = NULL;
-    pf->epoch = 0;
+    pf->g_slot = NULL;
+    pf->g_storage = NULL;
+    pf->slot_node = NULL;
+    pf->state_count = 0;
+    pf->state_capacity = 0;
     jps_min_heap_init(&pf->open, 64);
     pf->cache = NULL;
     jps__result_init(&pf->result);
@@ -227,8 +274,9 @@ void jps_pathfinder_destroy(jps_pathfinder *pf)
 {
     if (pf == NULL)
         return;
-    free(pf->g_dir);
-    free(pf->mark);
+    free(pf->g_slot);
+    free(pf->g_storage);
+    free(pf->slot_node);
     jps_min_heap_free(&pf->open);
     jps__result_free(&pf->result);
     free(pf);
@@ -242,10 +290,12 @@ uint64_t jps_pathfinder_memory_bytes(const jps_pathfinder *pf)
         return 0;
 
     bytes = (uint64_t)sizeof(*pf);
-    if (pf->g_dir != NULL)
-        bytes += (uint64_t)((size_t)pf->size * sizeof(uint64_t));
-    if (pf->mark != NULL)
-        bytes += (uint64_t)((size_t)pf->size * sizeof(uint16_t));
+    if (pf->g_slot != NULL)
+        bytes += (uint64_t)((size_t)pf->size * sizeof(int32_t));
+    if (pf->g_storage != NULL)
+        bytes += (uint64_t)((size_t)pf->state_capacity * sizeof(uint64_t));
+    if (pf->slot_node != NULL)
+        bytes += (uint64_t)((size_t)pf->state_capacity * sizeof(uint32_t));
     if (pf->open.elem != NULL)
         bytes += (uint64_t)((size_t)pf->open.capacity * sizeof(int));
     if (pf->open.prio != NULL)
@@ -263,34 +313,24 @@ static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
     pf->w = m->width;
     pf->h = m->height;
     pf->size = pf->w * pf->h;
-    free(pf->g_dir);
-    free(pf->mark);
+    free(pf->g_slot);
+    free(pf->g_storage);
+    free(pf->slot_node);
     pf->smoothed = NULL;
     pf->smoothed_count = 0;
     pf->smoothed_capacity = 0;
-    pf->g_dir = (uint64_t *)malloc((size_t)pf->size * sizeof(uint64_t));
-    /* mark 必须清零（calloc），使纪元标记方案（mark < 2·epoch 即未访问）对新缓冲成立；
-     * g_dir 仅在本纪元 mark 命中后才被读取，无需清零。 */
-    pf->mark = (uint16_t *)calloc((size_t)pf->size, sizeof(uint16_t));
-    pf->epoch = 0;
-}
-
-static void jps__next_epoch(jps_pathfinder *pf)
-{
-    pf->epoch++;
-    if (pf->epoch <= 32767)   /* mark 为 uint16：需 2·epoch+1 ≤ 65535 */
-        return;
-    /* 纪元回绕：清零 mark 即可——g_dir 仅在本纪元 mark 命中后才被读取。 */
-    memset(pf->mark, 0, (size_t)pf->size * sizeof(uint16_t));
-    pf->epoch = 1;
+    pf->g_slot = (int32_t *)calloc((size_t)pf->size, sizeof(int32_t));
+    pf->g_storage = NULL;
+    pf->slot_node = NULL;
+    pf->state_count = 0;
+    pf->state_capacity = 0;
 }
 
 static inline int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }
 
-/* 堆载荷用打包坐标 (y<<16)|x（边长 ≤ 32767 → x,y 各占 16 位，值 < 2^31 落在 int 正区间）。
- * 出队后用移位取回 (x,y)，免去 current%w / current/w 对运行期除数的真除法（div ≈ 20–40 周期，
- * 乘法还原 id 仅 ~3 周期）。堆只按 prio 排序、不比较载荷，故出队顺序与旧 id 编码逐位一致——
- * 不改变展开顺序，C≡C# 强一致不受影响。 */
+/* 坐标打包为 (y<<16)|x（边长 ≤32767，最高位恒为 0，可借给 slot_node 作 closed 位）。
+ * 主搜索堆载荷直接存 sparse slot；出堆从紧凑 slot_node 解坐标、从 g_storage 取状态。
+ * 堆只按 priority 排序、不比较载荷，因此载荷从坐标换成 slot 不改变展开顺序。 */
 static inline int jps__pack_xy(int x, int y) { return (y << 16) | x; }
 
 /* ---------------- 正交跳跃 ---------------- */
@@ -561,7 +601,7 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, in
             break;
 
         {
-            uint64_t gd = pf->g_dir[cy * pf->w + cx];     /* 一次乘法定位，同 load 取来向与步数 */
+            uint64_t gd = jps__state_get(pf, cy * pf->w + cx);
             int dx = jps__gd_dx(gd);                      /* 非起点必有父，dx/dy code 不会是哨兵 */
             int dy = jps__gd_dy(gd);
             int steps = jps__gd_steps(gd);
@@ -574,12 +614,13 @@ static void jps__reconstruct_path(jps_pathfinder *pf, int sx, int sy, int gx, in
     r->path_count = nodes_count;
 }
 
-/* 平滑缓存：find_path 成功后立即算一次。前提：pf->result.success（path_count≥1）。
- * 搜索已经结束，g_dir 不再需要保留 g/parent dx/dy，可作为 smoothed path 输出缓冲复用。 */
+/* 平滑缓存：find_path 成功后立即算一次。搜索已经结束，g_storage 不再需要保留搜索状态；
+ * 有效 compact path 的平滑输出点数不超过其输入点数，保证到 path_count 后即可原地复用。 */
 static void jps__ensure_smoothed(jps_pathfinder* pf, const jps_grid_map* map)
 {
-    pf->smoothed = (jps_point_f*)(void*)pf->g_dir;
-    pf->smoothed_capacity = pf->size;
+    jps__ensure_state_capacity(pf, pf->result.path_count);
+    pf->smoothed = (jps_point_f*)(void*)pf->g_storage;
+    pf->smoothed_capacity = pf->state_capacity;
     pf->smoothed_count = jps__smooth_path_into(map, pf->result.path, pf->result.path_count,
         pf->smoothed, pf->smoothed_capacity);
 }
@@ -627,8 +668,8 @@ static bool jps__snap_goal(const jps_grid_map *m, int sx, int sy, int gx, int gy
  * 跳点粒度补偿：从最近跳点 (bx,by) 做**有界 greedy-best-first flood**（按 octile-to-goal 排序），
  * 在连通可达域内找 octile 最小的可达格——GBFS 遇死胡同会回探其他分支，故不像纯贪心那样卡局部最小
  * （最近可达格常在需先"绕远"才能到的方向）。上限 K 格封顶开销；连通域近 goal 的最近格通常远在 K 内。
- * 复用 open 堆 + g_dir(存 BFS 父，主搜索数据已被 reconstruct 提走，可覆盖) + mark(fresh epoch 作 visited)。
- * 找到最近格后沿 g_dir 父链回溯，把 (bx,by) 之后到最近格的这段逐格追加进 path（平滑器后续拉直）。
+ * 复用 open 堆 + 稀疏 state（存 BFS 父；主搜索父链已经 reconstruct，可先清掉）。
+ * 找到最近格后沿 sparse state 父链回溯，把 (bx,by) 之后到最近格的这段逐格追加进 path。
  */
 static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
                                 int bx, int by, int gx, int gy, jps_path_result *r)
@@ -637,36 +678,43 @@ static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
     int start_packed = jps__pack_xy(bx, by);
     int best_packed = start_packed;
     int64_t best_h = jps_octile_heuristic(bx, by, gx, gy);
-    int visited = 0, cur, chain_begin, i;
+    int visited = 0, cur, chain_begin, i, start_slot;
     int64_t prio;
 
-    jps__next_epoch(pf);                         /* fresh epoch → 全新 visited 标记，不与主搜索冲突 */
-    int visited_mark = pf->epoch * 2;
-
+    jps__reset_sparse_state(pf);                 /* 主搜索父链已重建；同一 arena 复用为 refine BFS */
     jps_min_heap_clear(&pf->open);
-    pf->mark[jps__id(pf, bx, by)] = (uint16_t)visited_mark;
-    pf->g_dir[jps__id(pf, bx, by)] = (uint64_t)(uint32_t)start_packed;   /* 自指 = 无父哨兵 */
-    jps_min_heap_enqueue(&pf->open, start_packed, best_h);
+    start_slot = jps__state_add(pf, jps__id(pf, bx, by), (uint32_t)start_packed,
+                                (uint64_t)(uint32_t)start_packed);
+    jps_min_heap_enqueue(&pf->open, start_slot, best_h);
 
     while (visited < JPS__REFINE_CAP && jps_min_heap_try_dequeue(&pf->open, &cur, &prio))
     {
-        int cx = cur & 0xFFFF, cy = cur >> 16;
+        uint32_t node_state = pf->slot_node[cur];
+        int packed, cx, cy, id;
+        if ((node_state & JPS__SLOT_CLOSED) != 0)
+            continue;
+        packed = (int)(node_state & JPS__PACKED_XY_MASK);
+        pf->slot_node[cur] = node_state | JPS__SLOT_CLOSED;
+        cx = packed & 0xFFFF;
+        cy = packed >> 16;
+        id = jps__id(pf, cx, cy);
+        pf->g_slot[id] = -(int32_t)(cur + 1);
         visited++;
-        if (prio < best_h) { best_h = prio; best_packed = cur; }   /* prio 即该格 octile（入队即标记，无重复） */
+        if (prio < best_h) { best_h = prio; best_packed = packed; }
         for (i = 0; i < JPS_DIR_COUNT; i++)
         {
             int dx = jps__dirs[i].dx, dy = jps__dirs[i].dy;
-            int nx = cx + dx, ny = cy + dy, nid;
+            int nx = cx + dx, ny = cy + dy, nid, slot;
             bool ok = jps__dirs[i].diagonal ? jps_diagonal_allowed(m, cx, cy, dx, dy)
                                             : jps_grid_map_is_walkable(m, nx, ny);
             if (!ok)
                 continue;
             nid = jps__id(pf, nx, ny);
-            if (pf->mark[nid] == (uint16_t)visited_mark)
+            if (pf->g_slot[nid] != 0)
                 continue;
-            pf->mark[nid] = (uint16_t)visited_mark;
-            pf->g_dir[nid] = (uint64_t)(uint32_t)cur;                 /* BFS 父 = cur */
-            jps_min_heap_enqueue(&pf->open, jps__pack_xy(nx, ny), jps_octile_heuristic(nx, ny, gx, gy));
+            slot = jps__state_add(pf, nid, (uint32_t)jps__pack_xy(nx, ny),
+                                  (uint64_t)(uint32_t)packed);         /* BFS 父 = packed */
+            jps_min_heap_enqueue(&pf->open, slot, jps_octile_heuristic(nx, ny, gx, gy));
         }
     }
 
@@ -681,7 +729,7 @@ static void jps__nearest_refine(jps_pathfinder *pf, const jps_grid_map *m,
         if (r->path_count == r->path_capacity)
             jps__ensure_path_capacity(r, r->path_count + 1);
         r->path[r->path_count++] = (uint32_t)cur;
-        cur = (int)(uint32_t)pf->g_dir[jps__id(pf, cur & 0xFFFF, cur >> 16)];
+        cur = (int)(uint32_t)jps__state_get(pf, jps__id(pf, cur & 0xFFFF, cur >> 16));
     }
     jps__reverse_packed_path(r->path, chain_begin, r->path_count);
 }
@@ -694,9 +742,8 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
 {
     jps_grid_map *map;
     jps_path_result *out;
-    int open_mark, closed_mark;
-    int start_id, goal_packed;
-    int current;   /* 出队的打包坐标 (y<<16)|x */
+    int start_id, start_packed, start_slot, goal_packed;
+    int current;   /* 出队的 sparse slot */
     int64_t prio;
     int best_packed;   /* 离 goal 最近的已展开节点（打包坐标）；nearest 兜底用 */
     int64_t best_h;
@@ -707,6 +754,7 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
     map = system->map;
     out = &pf->result;
     jps__result_reset(out);
+    pf->smoothed_count = 0;
     pf->cache = system->cache;
 
     if (!jps_grid_map_in_bounds(map, sx, sy) || !jps_grid_map_in_bounds(map, gx, gy))
@@ -732,41 +780,39 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
     }
 
     jps__ensure_buffers(pf, map);
-    jps__next_epoch(pf);   /* 缓存同步由 jps_system_sync 负责（调用方在寻路前完成） */
-
-    open_mark = pf->epoch * 2;      /* 本纪元“已生成/在 open”标记 */
-    closed_mark = open_mark + 1;    /* 本纪元“已展开/closed”标记 */
+    jps__reset_sparse_state(pf);   /* 只清上一阶段实际访问过的 g_slot */
 
     start_id = jps__id(pf, sx, sy);
+    start_packed = jps__pack_xy(sx, sy);
     goal_packed = jps__pack_xy(gx, gy);
 
-    best_packed = jps__pack_xy(sx, sy);                    /* 起点必是首个展开点 → best 恒有效 */
+    best_packed = start_packed;                            /* 起点必是首个展开点 → best 恒有效 */
     best_h = jps_octile_heuristic(sx, sy, gx, gy);
 
     jps_min_heap_clear(&pf->open);
-    pf->g_dir[start_id] = jps__pack_gdir_root(0, 0);   /* g=0、steps=0，起点无来向 */
-    pf->mark[start_id] = (uint16_t)open_mark;
-    jps_min_heap_enqueue(&pf->open, jps__pack_xy(sx, sy), best_h);
+    start_slot = jps__state_add(pf, start_id, (uint32_t)start_packed, jps__pack_gdir_root(0, 0));
+    jps_min_heap_enqueue(&pf->open, start_slot, best_h);
 
     while (jps_min_heap_try_dequeue(&pf->open, &current, &prio))
     {
         uint64_t cur_gd;
+        uint32_t node_state;
         int64_t cur_g;
-        int cx, cy, id, dir_count, i;
+        int current_packed, cx, cy, id, dir_count, i;
 
-        /* 出队为打包坐标：移位取 (x,y)，一次乘法还原线性索引（免 current%w / current/w 真除法）。 */
-        cx = current & 0xFFFF;
-        cy = current >> 16;
-        id = jps__id(pf, cx, cy);
-
-        if (pf->mark[id] == closed_mark)
+        node_state = pf->slot_node[current];
+        if ((node_state & JPS__SLOT_CLOSED) != 0)
             continue;
-
-        pf->mark[id] = (uint16_t)closed_mark;
-        cur_gd = pf->g_dir[id];   /* 一次 load 同取 g 与来向；已 closed，g 不再变 */
+        pf->slot_node[current] = node_state | JPS__SLOT_CLOSED;
+        current_packed = (int)(node_state & JPS__PACKED_XY_MASK);
+        cx = current_packed & 0xFFFF;
+        cy = current_packed >> 16;
+        id = jps__id(pf, cx, cy);
+        pf->g_slot[id] = -(int32_t)(current + 1);
+        cur_gd = pf->g_storage[current];
         cur_g = jps__gd_g(cur_gd);
 
-        if (current == goal_packed)
+        if (current_packed == goal_packed)
         {
             jps__reconstruct_path(pf, sx, sy, gx, gy, out);
             out->success = true;
@@ -783,7 +829,7 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
             if (h < best_h)
             {
                 best_h = h;
-                best_packed = current;
+                best_packed = current_packed;
             }
         }
 
@@ -802,7 +848,8 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
                 ? jps__diagonal_jump(pf, map, cx, cy, dx, dy, d.hdir, d.vdir, gx, gy, &jump)
                 : jps__cardinal_jump(pf, map, cx, cy, dx, dy, d.dir, gx, gy, &jump);
 
-            int nb_id, nb_mark;
+            int nb_id, nb_slot;
+            int32_t nb_tag;
             int64_t move_cost, tentative;
             bool first_seen;
 
@@ -810,22 +857,28 @@ static int jps__find_path_core(jps_pathfinder *pf, jps_system *system,
                 continue;
 
             nb_id = jps__id(pf, jump.x, jump.y);
-            nb_mark = pf->mark[nb_id];   /* 读一次，closed 判定与 first_seen 共用 */
-            if (nb_mark == closed_mark)
+            nb_tag = pf->g_slot[nb_id];   /* 0 unseen，正 open，负 closed */
+            if (nb_tag < 0)
                 continue;
 
             move_cost = (int64_t)jump.steps * (d.diagonal ? JPS_DIAGONAL_COST : JPS_CARDINAL_COST);
             tentative = cur_g + move_cost;
 
-            first_seen = nb_mark < open_mark;
-            if (!first_seen && tentative >= jps__gd_g(pf->g_dir[nb_id]))
+            first_seen = nb_tag == 0;
+            if (!first_seen && tentative >= jps__gd_g(pf->g_storage[nb_tag - 1]))
                 continue;
 
-            /* g、steps、parent dx/dy 同字：一条 8 字节 store 同时写入三者（原独立 steps 数组已并入）。 */
-            pf->g_dir[nb_id] = jps__pack_gdir(tentative, jump.steps, dx, dy);
-            pf->mark[nb_id] = (uint16_t)open_mark;
+            /* 首见分配一个紧凑 slot；后续 decrease 只覆盖同一 slot。 */
+            if (first_seen)
+                nb_slot = jps__state_add(pf, nb_id, (uint32_t)jps__pack_xy(jump.x, jump.y),
+                                         jps__pack_gdir(tentative, jump.steps, dx, dy));
+            else
+            {
+                nb_slot = nb_tag - 1;
+                pf->g_storage[nb_tag - 1] = jps__pack_gdir(tentative, jump.steps, dx, dy);
+            }
 
-            jps_min_heap_enqueue(&pf->open, jps__pack_xy(jump.x, jump.y),
+            jps_min_heap_enqueue(&pf->open, nb_slot,
                                  tentative + jps_octile_heuristic(jump.x, jump.y, gx, gy));
         }
     }

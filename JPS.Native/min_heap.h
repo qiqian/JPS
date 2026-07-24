@@ -15,8 +15,8 @@ extern "C" {
 #endif
 
 /*
- * 二叉最小堆：元素为 int（节点 id），优先级为 int64（f 值）。
- * 行为与 C# MinHeap.cs 等价（同为二叉堆，O(log n) 入队/出队）。
+ * 四叉最小堆：元素为 int（由调用方解释；pathfinder 使用 sparse slot），优先级为 int64（f 值）。
+ * 与 C# MinHeap.cs 一样只按优先级排序；这里用四叉布局，入队/出队仍为 O(log n)。
  * 结构体公开以便被寻路器按值内嵌，但字段仅由下列函数维护。
  */
 typedef struct jps_min_heap

@@ -551,6 +551,8 @@ int main(int argc, char **argv)
            st.find_secs);
     printf("scen length: checked=%ld  bad=%ld  worst_dev=%.4f\n",
            st.len_checked, st.badlen, st.worst_len_dev);
+    printf("pathfinder memory: %.3f MiB\n",
+           (double)jps_pathfinder_memory_bytes(pf) / (1024.0 * 1024.0));
 
     int bad = (st.illegal != 0) || (st.nondet != 0) || (st.err != 0) || (st.badlen != 0);
     printf(bad ? "RESULT: FAIL (illegal/nondet/err/badlen 非零)\n" : "RESULT: PASS\n");

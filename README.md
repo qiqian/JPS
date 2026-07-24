@@ -20,8 +20,8 @@ _The project splits into three tiers with explicit roles: **A\*** is the accurac
   _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
 - **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用、近零 GC；**142.3 万条**官方 `.scen` 场景验证中，JPS 与 A\* 的整数代价 **处处相等（subopt=0）**、路径非法 **0**、漏解 **0**。与官方最优长度比对时，**142.3034 万条精确吻合**，3 条属于整数 `1414≈√2` 度量内的舍入容差，另 1 条仅与官方参考长度有 0.0315 格偏差。<br>
   _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse, near-zero GC. Across **1.423M** official `.scen` cases, JPS integer cost equals A\* **everywhere (subopt=0)**, with **0** illegal paths and **0** missed solutions. Against the official optimal lengths, **1.423034M** cases match exactly, 3 are normal integer-`1414≈√2` tolerance artifacts, and 1 differs only from the official reference length by 0.0315 cell._
-- **A\* / C# JPS / C JPS 三层分工**：**A\*** 只负责给准确性兜底；`JPS.Core` 是 C# 基础算法与可移植参考实现；`JPS.Native` 是跨平台 C 原生极致优化版本（C11 API / SSE2 或 NEON 128 位 SIMD 位图扫描 / 按方向 SoA 缓存 + SIMD 回写 / 行·列级惰性失效 / guard band 免边界分支 / 打包节点状态）。C 版与 C# 版在 **142.3 万条**官方场景中 compact path 与平滑路径**逐点强一致**（`mism=0`），冷缓存随机改图+还原后仍一致。性能（AMD Ryzen 7 5800X3D，6 map workers）：C 原生 hot 比 A\* 快 **44.1–51.8×**，cold 比 A\* 快 **28.1–30.8×**；相对 C# JPS，C hot 快 **1.40–1.51×**，cold 快 **2.02–2.51×**。<br>
-  _**A\* / C# JPS / C JPS split:** **A\*** is the accuracy ground truth; `JPS.Core` is the C# base algorithm and portable reference; `JPS.Native` is the aggressively optimized cross-platform C build (C11 API / SSE2 or NEON 128-bit SIMD bitmap scan / per-direction SoA cache + SIMD write-back / row·column-level lazy invalidation / guard band for branch-free bounds / packed node state). The C build returns the same compact path **and smoothed path, point for point,** as C# over **1.423M** official cases (`mism=0`), and stays identical after cold-cache random edit+restore checks. Performance (AMD Ryzen 7 5800X3D, 6 map workers): C native is **44.1–51.8×** faster than A\* on hot cache and **28.1–30.8×** on cold cache; compared with C# JPS, C is **1.40–1.51×** faster hot and **2.02–2.51×** faster cold._
+- **A\* / C# JPS / C JPS 三层分工**：**A\*** 只负责给准确性兜底；`JPS.Core` 是 C# 基础算法与可移植参考实现；`JPS.Native` 是跨平台 C 原生极致优化版本（C11 API / SSE2 或 NEON 128 位 SIMD 位图扫描 / 按方向 SoA 缓存 + SIMD 回写 / 行·列级惰性失效 / guard band 免边界分支 / 稀疏打包搜索状态）。C 版与 C# 版在 **142.3 万条**官方场景中 compact path 与平滑路径**逐点强一致**（`mism=0`），冷缓存随机改图+还原后仍一致。性能（AMD Ryzen 7 5800X3D，7 map workers）：C 原生 hot 比 A\* 快 **45.4–53.7×**，cold 比 A\* 快 **31.3–33.0×**；相对 C# JPS，C hot 快 **1.40–1.52×**，cold 快 **2.11–2.89×**。<br>
+  _**A\* / C# JPS / C JPS split:** **A\*** is the accuracy ground truth; `JPS.Core` is the C# base algorithm and portable reference; `JPS.Native` is the aggressively optimized cross-platform C build (C11 API / SSE2 or NEON 128-bit SIMD bitmap scan / per-direction SoA cache + SIMD write-back / row·column-level lazy invalidation / guard band for branch-free bounds / sparse packed search state). The C build returns the same compact path **and smoothed path, point for point,** as C# over **1.423M** official cases (`mism=0`), and stays identical after cold-cache random edit+restore checks. Performance (AMD Ryzen 7 5800X3D, 7 map workers): C native is **45.4–53.7×** faster than A\* on hot cache and **31.3–33.0×** on cold cache; compared with C# JPS, C is **1.40–1.52×** faster hot and **2.11–2.89×** faster cold._
 - **工程化分层、可移植、有测试背书**：拆分为 `JPS.Core`（纯算法）/ `JPS.Data`（地图 I/O）/ `JPS.Native`（跨平台 C native）/ `JPS.Playground`（界面）/ `JPS.Benchmark`（性能基准）/ `JPS.Accuracy`（正确性）六个工程；C# 核心锁定 `netstandard2.1` / C# 9、不依赖 WinForms，可整体拷入 Unity 2022；native 核心可按目标平台编译为 Windows/macOS/Linux/iOS/Android 插件。<br>
   _**Layered engineering, portable, test-backed:** split into `JPS.Core` (pure algorithm) / `JPS.Data` (map I/O) / `JPS.Native` (cross-platform C native) / `JPS.Playground` (UI) / `JPS.Benchmark` (perf) / `JPS.Accuracy` (correctness); the C# core targets `netstandard2.1` / C# 9 with no WinForms dependency and drops into Unity 2022 wholesale; the native core can be compiled as a Windows/macOS/Linux/iOS/Android plugin for the target platform._
 
@@ -273,7 +273,7 @@ flowchart TD
 - 某个区域只要被**任意一个**线程第一个走到，就被它一次性扫描洗白；此后**所有线程**再经过该区域全是 O(1) 命中。
 - 于是整段并行寻路里，每条线段的 O(L) 扫描代价**全局只付一次**，而不是"每线程各付一次"。线程越多、查询越密集、路径越重叠，复用率越高，**平均每次寻路反而越快**。
 
-换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第三章工程与性能要点](#三工程与性能要点)：C hot overall 仍比 C# hot 快 1.41×，且比 A\* 快 45.1×。）
+换句话说：多个 JPS finder 在共享缓存上**互相预热**——先跑的替后跑的把跳点铺好，把"建表"的成本摊薄到整个线程池上。（实测见[第三章工程与性能要点](#三工程与性能要点)：C hot overall 仍比 C# hot 快 1.41×，且比 A\* 快 46.4×。）
 
 > ⚠️ 前提：并行寻路**之前**必须由**单线程**调用一次 `JpsSystem.Sync()`（确定缓存版本），且并行期间**不得修改地图**。要改地图就先 join 掉所有寻路线程，改完再 Sync、再并行。
 
@@ -300,7 +300,8 @@ flowchart TD
 - **行 + 列双位图**：横向扫描走行位图，纵向扫描走转置后的列位图；两者都能复用同一套 128-bit SIMD 扫描逻辑，不再像 C# 参考实现那样只有横向按字加速。
 - **按方向 SoA 跳点缓存**：`dist` / `gen` 拆成连续平面，配合 SIMD 一次写回多个 16 位距离；行方向用 `row_gen`，列方向用 `col_gen`，只让受影响的行/列失效。
 - **高效地图同步**：整图初始化走 `jps_system_set_blocked_buffer`，局部动态改图走 `jps_system_set_blocked_batch`；`Sync` 根据 dirty rows / dirty cols 推进缓存世代，而不是每次全表清空。
-- **低分配搜索热路径**：搜索状态按访问频率拆成 SoA，堆采用 hole-sift，compact path 用单个 packed `uint32_t` 数组直接完成父链收集与原地翻转，并和开放堆一起跨查询复用，避免每次 find path 的 malloc/free 抖动。
+- **稀疏搜索状态**：每格只保留 4 B `g_slot`（0 unseen、正 open、负 closed）；64 位 g/steps/parent 与 packed 坐标只为实际访问节点分配，内存由固定 10N 降为 `4N+12C`（`C` 为跨查询保留的峰值 slot 容量）。
+- **低分配搜索热路径**：堆直接存 sparse slot，compact path 用单个 packed `uint32_t` 数组完成父链收集与原地翻转；arena、路径和开放堆都跨查询复用，避免每次 find path 的 malloc/free 抖动。
 
 这层优化解释了当前 benchmark 的形态：hot 路径 C 主要赢在更紧的数据布局和更少分支；cold 路径 C 赢得更多，因为重扫/回写/同步受 SIMD、dirty row/col 和批量改图接口的影响更大。
 
@@ -333,31 +334,26 @@ flowchart TD
 - **三层验证**：A\* 作最短路准确性基准；C# JPS 作基础算法参考；C JPS 作 native 优化实现，必须与 C# compact path 一致。
 - **整数寻路**：代价、启发、g/f 全用整数（`long`），A\* 与 JPS 在同一度量下比较，避免浮点误差污染判定。
 - **扁平数组替代哈希**：`g / parent / closed / 跳点缓存` 等逐节点数据按 `id = y·W + x` 索引，避免元组哈希开销。
-- **世代戳免清零**：每次查询自增世代号判断"是否本次访问过"，无需每次清零数组。
+- **查询状态免全表清零**：C# 用世代戳判断"是否本次访问过"；C native 只清上一阶段实际 touched 的 `g_slot`，两者都不逐查询清整张地图。
 - **共享惰性跳点缓存**：正交跳点距离按地图共享，多个 C# pathfinder 可并发预热同一缓存。
 - **跨平台 C native 数据布局**：SSE2/NEON 128-bit SIMD、guard-banded 位图消除边界分支，按方向 SoA 缓存提升连续访问，行/列 dirty 结构让局部改图只同步受影响区域。
-- **低分配搜索热路径**：堆采用 hole-sift，compact path 以 packed `uint32_t` 单缓冲重建，剪枝方向和搜索状态等缓冲跨查询复用。
+- **低分配搜索热路径**：堆采用 hole-sift 并直接存 sparse slot，compact path 以 packed `uint32_t` 单缓冲重建，arena 与搜索缓冲跨查询复用。
 - **基准与准确性验证**：benchmark 按地图分组多线程执行并按分发顺序输出；accuracy 对 142.3 万条官方 `.scen` 做 A\*/C#/C 交叉验证。
 
 ### 1. 内存开销对比
 
-两者的逐节点状态都是"按地图尺寸一次性分配、跨查询复用"的扁平数组（`N = 宽 × 高`）。逐格字节数精确如下：
+令 `N = 宽 × 高`，`C = C native 跨查询保留的峰值 sparse slot 容量`。C# 参考实现仍使用固定扁平数组；C native 只给实际访问节点保存完整状态：
 
-| 数据 | 字段 | A\* | JPS | 归属 |
-|---|---|---|---|---|
-| g / 步数 / 父 | A\*: g `long` + 来向 `sbyte`（两数组）；JPS: g+步数+来向索引打包进一个 `ulong`（单数组，位[0,44)=g、[44,60)=steps、[60,64)=来向+1） | 9 | 8 | 每实例（线程私有） |
-| 访问状态 | `2·gen` / `2·gen+1` 合并 seen/closed；A\*: `int`，JPS: `ushort`（gen 循环 1..32767） | 4 | 2 | 每实例（线程私有） |
-| **搜索态小计** | | **13 B/格** | **10 B/格** | 每实例 |
-| 跳点缓存 | `Dist` 4×`short` + `Gen` 4×`byte`（C# 为 AoS、gen/dist 同缓存行；C native 为按方向 SoA，字节数相同） | — | 12 | **每地图共享**（[`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)） |
-| **合计** | | **13 B/格** | **22 B/格** | |
+| 数据 | A\* | C# JPS | C native JPS | 归属 |
+|---|---:|---:|---:|---|
+| dense 搜索状态 | `13N` | `10N` | `4N`（`g_slot` 同时编码 unseen/open/closed） | 每实例 |
+| sparse g/steps/parent + 节点坐标 | — | — | `12C`（8 B `g_storage` + 4 B `slot_node`） | 每实例 |
+| **搜索态小计** | **`13N`** | **`10N`** | **`4N+12C`** | 每实例 |
+| 正交跳点缓存 | — | `12N` | `12N` | **每地图共享** |
 
-- **单实例**：JPS 约为 A\* 的 **~1.7×**。注意 JPS 的搜索态（10 B/格）其实比 A\*（13 B/格）更省——多出来的全在那张 12 B/格的正交跳点缓存（用空间换"跳跃 O(1)"的核心代价），净多约 9 B/格。C# 与 C native 现在搜索态布局一致（同为打包 `ulong` + `ushort`），仅缓存 AoS/SoA 之别，字节数相同。
-- **多线程共享**：跳点缓存按地图只存一份、被所有线程共享，只有 10 B/格的搜索态随线程数线性增长。因 JPS 每实例搜索态比 A\* 更小，**线程数 ≥4 时 JPS 总内存反而低于 A\***。`T` 线程在 200×200（4 万格）地图上：
-
-  | 线程数 | A\* | JPS |
-  |---|---|---|
-  | 1 | 0.52 MB | 0.88 MB（0.40 MB 搜索态 + 0.48 MB 共享缓存） |
-  | 8 | 4.16 MB | 3.68 MB（3.20 MB 搜索态 + 0.48 MB 共享缓存） |
+- **C native 的盈亏点**：`C < N/2` 时比原固定 10N 搜索态更省；`C=5%N` 时为 `4.6N`，约省 54%。JPS 通常只生成很少的跳点节点，实际 `C` 远小于格数。
+- **实测示例**：512×512 的 `AR0011SR` 完成 1000 组随机查询、冷改图与热查询并保留历史峰值容量后，整个 native pathfinder 为 **1.013 MiB**；旧固定 `g_dir+mark` 仅两张搜索数组就需要 **2.5 MiB**（均不含每地图共享缓存）。
+- **多线程共享**：12N 跳点缓存按地图只存一份，只有搜索态随 finder 数量增长。200×200（N=4 万）时，1 个 native finder 约为 `0.64 MB + 12C` 字节，8 个约为 `1.76 MB + 96C` 字节；每个工作线程复用一个 finder 即可。
 
 - 地图本身（[`GridMap._blocked`](JPS.Core/Models/GridMap.cs)）**按行对齐**位压缩（~1 bit/格，行尾 padding 可忽略，≈0.125 B/格；行对齐是为了水平按字扫描），两者共享，可忽略。
 - 开放列表（[`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)）是动态结构、非 O(N) 固定：A\* 入队的节点数远多于 JPS（见下），其堆峰值内存也明显更大。
@@ -365,7 +361,7 @@ flowchart TD
 
 ### 2. 性能表现（最新实测）
 
-当前性能口径与准确性口径分开：**A\*** 主要用来证明最优性，不再作为性能目标；**C# JPS** 是基础 JPS 算法的可移植参考；**C JPS** 是 native 优化目标。最新结果来自 `benchmark-results/combo-all-q1000-t6-20260705-034636.txt`，这是 Windows x64 / MSVC native 构建下的实测：**AMD Ryzen 7 5800X3D**（16 逻辑核，6 个 map worker）、.NET 10、`corner-cutting=off`、`concurrent-cache=on`、全部 7 个 MovingAI 地图集 **562 张图**。同一套 `JPS.Native` 源码也可面向 iOS/Android 构建，移动端绝对耗时需以目标设备重测。
+当前性能口径与准确性口径分开：**A\*** 主要用来证明最优性，不再作为性能目标；**C# JPS** 是基础 JPS 算法的可移植参考；**C JPS** 是 native 优化目标。最新结果来自 `benchmark-results/combo-all-q1000-t7-20260725-002611.txt`，这是 Windows x64 / MSVC native 构建下的实测：**AMD Ryzen 7 5800X3D**（16 逻辑核，7 个 map worker，绑核到 `[1,3,5,7,9,11,13]`）、.NET 10.0.10、`corner-cutting=off`、`concurrent-cache=on`、全部 7 个 MovingAI 地图集 **562 张图**。同一套 `JPS.Native` 源码也可面向 iOS/Android 构建，移动端绝对耗时需以目标设备重测。
 
 两种测试口径：**rand** 每图 1000 组随机可解起终点，共 **56.2 万组**；**scen** 为官方 `.scen` 去重后的 **141.5 万组**，通常更长、更接近真实 benchmark。
 
@@ -373,23 +369,24 @@ flowchart TD
 
 | 范围 | pairs | A\*/JPS 节点比 | C# cold | C cold | C# hot | C hot | A\*/C cold | A\*/C hot | C#/C cold | C#/C hot |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| rand | 562,000 | 55.6× | 85.35 us | 33.98 us | 27.77 us | 18.42 us | 28.1× | 51.8× | 2.51× | 1.51× |
-| scen | 1,414,808 | 40.6× | 151.71 us | 75.20 us | 73.49 us | 52.55 us | 30.8× | 44.1× | 2.02× | 1.40× |
-| overall | 1,976,808 | 42.1× | 132.84 us | 63.48 us | 60.49 us | 42.84 us | 30.4× | 45.1× | 2.09× | 1.41× |
+| rand | 562,000 | 55.8× | 81.94 us | 28.32 us | 25.13 us | 16.49 us | 31.3× | 53.7× | 2.89× | 1.52× |
+| scen | 1,414,808 | 40.7× | 141.34 us | 67.05 us | 67.98 us | 48.73 us | 33.0× | 45.4× | 2.11× | 1.40× |
+| overall | 1,976,808 | 42.2× | 124.45 us | 56.04 us | 55.80 us | 39.56 us | 32.8× | 46.4× | 2.22× | 1.41× |
 
-总耗时摘要：
+累计测量查询时间（各 worker 计时求和，不是并行 benchmark 的墙钟时间）：
 
 | 口径 | A\* | C# cold / hot | C cold / hot |
 |---|---:|---:|---:|
-| rand | 536.4 s | 48.0 s / 15.6 s | 19.1 s / 10.4 s |
-| scen | 3279.9 s | 214.6 s / 104.0 s | 106.4 s / 74.3 s |
+| rand | 498.0 s | 46.1 s / 14.1 s | 15.9 s / 9.3 s |
+| scen | 3133.2 s | 200.0 s / 96.2 s | 94.9 s / 68.9 s |
 
 解读要点：
 
-- **JPS 的算法收益很稳定**：overall 下 A\* 平均展开 `16,383` 个节点，JPS 平均展开 `389` 个节点，节点量约 **42.1×**。这是机器无关的核心收益。
-- **C native 的定位成立**：C 相对 C# 在 cold 路径快 **2.09×**，hot 路径快 **1.41×**；cold 更赚，说明 guard band、row/col dirty sync、SIMD 位图扫描、SoA 回写和持久缓冲复用主要吃到了动态改图/缓存重扫场景。
-- **A\* 适合作准确性基准，不适合作性能目标**：C hot overall 比 A\* 快 **45.1×**，C cold 也快 **30.4×**。A\* 的朴素性让它很适合兜底验证，但在大图上会被展开节点数拖垮。
+- **JPS 的算法收益很稳定**：overall 下 A\* 平均展开 `16,418` 个节点，JPS 平均展开 `389` 个节点，节点量约 **42.2×**。这是机器无关的核心收益。
+- **C native 的定位成立且不是少数地图拉高平均值**：C 相对 C# 在 cold 路径快 **2.22×**，hot 路径快 **1.41×**；最新结果的 1124 个“地图 × 口径”行中，C cold 与 C hot 都是 **1124/1124** 逐行领先。overall 的 cold/hot 耗时比，C 仅为 **1.42×**，C# 则为 **2.23×**，说明 guard band、row/col dirty sync、SIMD 位图扫描、SoA 回写和持久缓冲复用有效压低了动态改图/缓存重扫的额外成本。
+- **A\* 适合作准确性基准，不适合作性能目标**：C hot overall 比 A\* 快 **46.4×**，C cold 也快 **32.8×**。A\* 的朴素性让它很适合兜底验证，但在大图上会被展开节点数拖垮。
 - **地图形态决定上限**：开阔大图如 `bg512-map`、`wc3maps512-map` 的 A\*/C hot 可超过 **100×**；小图、短路径或随机散点中固定开销占比更高，倍率会收窄。
+- **同配置历史对比仍在改善**：相对 2026-07-08 的 7-worker 全量结果，C 的 rand cold/hot 总耗时下降 **3.3% / 0.5%**，scen cold/hot 下降 **2.4% / 1.1%**。这是整套代码与运行环境的端到端差异（运行时也从 .NET 10.0.9 更新到 10.0.10），不能单独归因于某一项优化。
 - **严格顺序输出的 benchmark 是并发吞吐测试**：当前按地图分组多线程执行，结果持续回传主线程，并按分发顺序输出；因此最终表格稳定可比，同时每 50 行重打表头。若排在前面的地图很慢，后面已完成的结果会等待轮到自己再打印。
 
 正确性基准来自 `accuracy-results/scen-all-20260704-224247.txt`：有效非平凡用例 **1,423,038**；JPS vs A\* 失败 `0`、路径非法 `0`、C vs C# 的 compact path 与平滑路径逐点不一致 `0`、冷缓存随机改图+还原抽测 94,706 例不一致 `0`。仅 `1` 条与官方 reference length 有小偏差（0.0315 格），但 A\* / C# JPS / C JPS 内部一致，因此不影响 native 性能结论。
@@ -632,7 +629,7 @@ JPS.slnx                         # 解决方案
 │   ├── jump_point_cache.c/.h    # 按方向 SoA 跳点缓存、SIMD 扫描/回写、dirty 行列同步
 │   ├── pathfinder.c/.h          # native JPS 搜索、持久化搜索缓冲、路径重建
 │   ├── smoother.c/.h            # 平滑路径的 C 移植（supercover 视线 + 前向增量拉直，与 C# 逐点一致）
-│   ├── min_heap.c/.h            # hole-sift 二叉最小堆
+│   ├── min_heap.c/.h            # hole-sift 四叉最小堆
 │   ├── rules.h / directions.h   # no-corner-cutting 跳点/强迫邻居规则；方向与整数代价
 │   ├── jps_simd.h / jps_atomic.h # SSE2/NEON 128 位 SIMD 与原子/内存序的平台抽象
 │   ├── JPS.Native.vcxproj       # Windows x64 便捷工程，输出 JPS.Native.dll
@@ -1016,7 +1013,7 @@ Field references use a static `ref` method on the struct (`Dir4Byte.Slot`) plus 
 - A region scanned first by **any** thread is whitened once; afterward **all threads** hit it in O(1).
 - So across the whole parallel run, each strip's O(L) scan is **paid globally once**, not "once per thread". The more threads, the denser the queries, the more the paths overlap — the higher the reuse, and the **lower the average time per search**.
 
-In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter III](#iii-engineering-and-performance): C hot overall is still 1.41× faster than C# hot and 45.1× faster than A\*.)
+In other words: multiple JPS finders **warm the shared cache for each other** — early runs lay out jump points for later ones, amortizing the "table-building" cost across the whole thread pool. (See the [performance note in chapter III](#iii-engineering-and-performance): C hot overall is still 1.41× faster than C# hot and 46.4× faster than A\*.)
 
 > ⚠️ Prerequisite: **before** parallel pathfinding, a **single thread** must call `JpsSystem.Sync()` once (to fix the cache version), and the map **must not change** during parallel runs. To edit the map, join all pathfinding threads first, then Sync, then go parallel again.
 
@@ -1033,7 +1030,7 @@ At the source level it exposes a narrow C11-style API with opaque handles. On mo
 The structure mirrors C#:
 
 - `jps_system` corresponds to `JpsSystem`: it owns `grid_map` + `jump_point_cache`, and acts as the reusable map/cache container across queries.
-- `jps_pathfinder` corresponds to `JpsPathfinder`: it owns only thread-private search state, the open heap, path result, and path-rebuild buffer, all retained across queries.
+- `jps_pathfinder` corresponds to `JpsPathfinder`: it owns only thread-private sparse search state, the open heap, and packed path result, all retained across queries.
 - C# calls it through P/Invoke / native plugins: `jps_system_create`, `jps_system_set_blocked_buffer`, `jps_system_set_blocked_batch`, `jps_system_sync`, `jps_pathfinder_find_path`, `jps_pathfinder_copy_path`, and `jps_pathfinder_copy_smoothed_path`. Public APIs expose compact path and smoothed path only; expanded per-cell paths are intentionally not exposed. Benchmark and accuracy run C# and C over the same cases.
 
 Main optimizations:
@@ -1043,7 +1040,8 @@ Main optimizations:
 - **Row + column bitmaps:** horizontal scans use the row bitmap, vertical scans use a transposed column bitmap; both reuse the same 128-bit SIMD scan code, whereas the C# reference only has word-at-a-time acceleration horizontally.
 - **Per-direction SoA jump cache:** `dist` / `gen` are stored as contiguous planes, enabling SIMD write-back of multiple 16-bit distances; row directions use `row_gen`, column directions use `col_gen`, invalidating only affected rows/columns.
 - **Efficient map sync:** initial full loads use `jps_system_set_blocked_buffer`, sparse dynamic edits use `jps_system_set_blocked_batch`, and `Sync` advances cache generations from dirty rows / dirty columns instead of clearing the whole table.
-- **Low-allocation search hot path:** search state is split by access frequency, the heap uses hole-sift, and a single packed-`uint32_t` compact-path buffer collects and reverses the parent chain in place; it and the open heap are reused across calls.
+- **Sparse search state:** each cell keeps only a 4-byte `g_slot` (0 unseen, positive open, negative closed); 64-bit g/steps/parent data and packed coordinates are allocated only for visited nodes, reducing fixed 10N storage to `4N+12C`, where `C` is the retained peak slot capacity.
+- **Low-allocation search hot path:** the heap directly stores sparse slots, while a single packed-`uint32_t` compact-path buffer collects and reverses the parent chain in place; the arena, path, and heap are all reused across calls.
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
 
@@ -1074,31 +1072,26 @@ Under this contract, Windows x64 SSE2 builds and iOS / Android / Linux NEON or S
 - **Three-tier validation:** A\* is the shortest-path accuracy baseline; C# JPS is the base algorithm reference; C JPS is the optimized native build and must match C# compact path.
 - **Integer pathfinding:** cost, heuristic, g/f are all integer (`long`), so A\* and JPS are compared under the same metric with no floating-point noise.
 - **Flat arrays instead of hashing:** per-node data (`g / parent / closed / jump cache`) is indexed by `id = y·W + x`, avoiding tuple-hash overhead.
-- **Generation stamps avoid clearing:** each query increments a generation number to test "visited this run?", with no per-query array clear.
+- **No full-map query-state clearing:** C# uses generation stamps; C native clears only the `g_slot` entries actually touched by the previous phase.
 - **Shared lazy jump cache:** cardinal jump distances are shared per map, so multiple C# pathfinders can warm the same cache concurrently.
 - **Cross-platform C native layout:** SSE2/NEON 128-bit SIMD, guard-banded bitmaps remove bounds branches, per-direction SoA cache improves sequential access, and row/column dirty structures sync only the locally affected areas after edits.
-- **Low-allocation hot path:** the heap uses hole-sift, while path-rebuild nodes, pruning directions, and search state buffers are retained per map size.
+- **Low-allocation hot path:** the heap uses hole-sift and stores sparse slots directly; packed path, arena, pruning directions, and search buffers are reused across queries.
 - **Benchmark and accuracy harnesses:** benchmarks run map-grouped workers and emit rows in dispatch order; accuracy cross-checks A\*/C#/C over 1.423M official `.scen` cases.
 
 ### 1. Memory Footprint
 
-Both keep per-node state as flat arrays "allocated once per map size, reused across queries" (`N = width × height`). Exact bytes per cell:
+Let `N = width × height` and `C = the peak sparse-slot capacity retained by a C native finder`. The C# reference still uses fixed flat arrays; C native stores full state only for nodes actually reached:
 
-| Data | Field | A\* | JPS | Owner |
-|---|---|---|---|---|
-| g / steps / parent | A\*: g `long` + came-dir `sbyte` (two arrays); JPS: g+steps+came-dir index packed into one `ulong` (single array; bits[0,44)=g, [44,60)=steps, [60,64)=dir+1) | 9 | 8 | per instance (thread-private) |
-| visit state | `2·gen` / `2·gen+1` merged seen/closed; A\*: `int`, JPS: `ushort` (gen cycles 1..32767) | 4 | 2 | per instance (thread-private) |
-| **search-state subtotal** | | **13 B/cell** | **10 B/cell** | per instance |
-| jump cache | `Dist` 4×`short` + `Gen` 4×`byte` (C#: AoS, gen/dist on same cache line; C native: per-direction SoA, same byte count) | — | 12 | **shared per map** ([`JpsSystem`](JPS.Core/Pathfinding/JpsSystem.cs)) |
-| **total** | | **13 B/cell** | **22 B/cell** | |
+| Data | A\* | C# JPS | C native JPS | Owner |
+|---|---:|---:|---:|---|
+| dense search state | `13N` | `10N` | `4N` (`g_slot` also encodes unseen/open/closed) | per instance |
+| sparse g/steps/parent + node coordinate | — | — | `12C` (8-byte `g_storage` + 4-byte `slot_node`) | per instance |
+| **search-state subtotal** | **`13N`** | **`10N`** | **`4N+12C`** | per instance |
+| cardinal jump cache | — | `12N` | `12N` | **shared per map** |
 
-- **Single instance:** JPS is about **~1.7×** A\*. Note JPS's search state (10 B/cell) is actually smaller than A\*'s (13 B/cell); the entire extra is the 12 B/cell cardinal jump cache (the space-for-"O(1) jump" trade-off), a net +9 B/cell. C# and C native now share the same search-state layout (packed `ulong` + `ushort`), differing only in AoS vs SoA cache layout at identical byte count.
-- **Multithread sharing:** the jump cache is stored once per map and shared by all threads; only the 10 B/cell search state grows linearly with thread count. Since JPS's per-instance search state is smaller than A\*'s, **at ≥4 threads JPS total memory drops below A\***. For `T` threads on a 200×200 (40k-cell) map:
-
-  | Threads | A\* | JPS |
-  |---|---|---|
-  | 1 | 0.52 MB | 0.88 MB (0.40 MB search state + 0.48 MB shared cache) |
-  | 8 | 4.16 MB | 3.68 MB (3.20 MB search state + 0.48 MB shared cache) |
+- **C native break-even:** it uses less than the old fixed 10N search state whenever `C < N/2`; at `C=5%N`, it uses `4.6N`, about 54% less. JPS normally generates only a small number of jump-point nodes, so `C` is far below the cell count.
+- **Measured example:** after 1,000 random queries plus cold edits and hot reruns on the 512×512 `AR0011SR` map, retaining historical peak capacity, the entire native pathfinder occupies **1.013 MiB**. The old fixed `g_dir+mark` arrays alone required **2.5 MiB** (both figures exclude the cache shared per map).
+- **Multithread sharing:** the 12N jump cache is stored once per map; only finder state scales with worker count. On a 200×200 map (N=40k), one native finder is about `0.64 MB + 12C` bytes and eight are about `1.76 MB + 96C` bytes. Reuse one finder per worker thread.
 
 - The map itself ([`GridMap._blocked`](JPS.Core/Models/GridMap.cs)) is **row-aligned** bit-packed (~1 bit/cell, trailing padding negligible, ≈0.125 B/cell; row alignment enables the word-at-a-time horizontal scan), shared by both, negligible.
 - The open list ([`MinHeap`](JPS.Core/Pathfinding/MinHeap.cs)) is dynamic, not fixed O(N): A\* enqueues far more nodes than JPS (see below), so its heap peak memory is clearly larger too.
@@ -1106,7 +1099,7 @@ Both keep per-node state as flat arrays "allocated once per map size, reused acr
 
 ### 2. Performance (latest measured)
 
-Performance and correctness now have separate roles: **A\*** primarily proves optimality and is no longer the performance target; **C# JPS** is the portable reference for the base JPS algorithm; **C JPS** is the native optimization target. The latest run is `benchmark-results/combo-all-q1000-t6-20260705-034636.txt`, measured with the Windows x64 / MSVC native build on **AMD Ryzen 7 5800X3D** (16 logical cores, 6 map workers), .NET 10, `corner-cutting=off`, `concurrent-cache=on`, across all 7 MovingAI map sets (**562 maps**). The same `JPS.Native` source can also be built for iOS/Android; absolute mobile timings should be measured on the target device.
+Performance and correctness now have separate roles: **A\*** primarily proves optimality and is no longer the performance target; **C# JPS** is the portable reference for the base JPS algorithm; **C JPS** is the native optimization target. The latest run is `benchmark-results/combo-all-q1000-t7-20260725-002611.txt`, measured with the Windows x64 / MSVC native build on **AMD Ryzen 7 5800X3D** (16 logical cores, 7 map workers pinned to `[1,3,5,7,9,11,13]`), .NET 10.0.10, `corner-cutting=off`, `concurrent-cache=on`, across all 7 MovingAI map sets (**562 maps**). The same `JPS.Native` source can also be built for iOS/Android; absolute mobile timings should be measured on the target device.
 
 Two regimes are measured: **rand** uses 1000 random solvable start/goal pairs per map (**562k pairs**); **scen** uses the deduplicated official `.scen` workload (**1.415M pairs**), which is usually longer and closer to real benchmark queries.
 
@@ -1114,23 +1107,24 @@ Weighted average time per query:
 
 | Scope | pairs | A\*/JPS nodes | C# cold | C cold | C# hot | C hot | A\*/C cold | A\*/C hot | C#/C cold | C#/C hot |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| rand | 562,000 | 55.6× | 85.35 us | 33.98 us | 27.77 us | 18.42 us | 28.1× | 51.8× | 2.51× | 1.51× |
-| scen | 1,414,808 | 40.6× | 151.71 us | 75.20 us | 73.49 us | 52.55 us | 30.8× | 44.1× | 2.02× | 1.40× |
-| overall | 1,976,808 | 42.1× | 132.84 us | 63.48 us | 60.49 us | 42.84 us | 30.4× | 45.1× | 2.09× | 1.41× |
+| rand | 562,000 | 55.8× | 81.94 us | 28.32 us | 25.13 us | 16.49 us | 31.3× | 53.7× | 2.89× | 1.52× |
+| scen | 1,414,808 | 40.7× | 141.34 us | 67.05 us | 67.98 us | 48.73 us | 33.0× | 45.4× | 2.11× | 1.40× |
+| overall | 1,976,808 | 42.2× | 124.45 us | 56.04 us | 55.80 us | 39.56 us | 32.8× | 46.4× | 2.22× | 1.41× |
 
-Total wall time:
+Accumulated measured query time (summed across workers, not benchmark wall-clock time):
 
 | Regime | A\* | C# cold / hot | C cold / hot |
 |---|---:|---:|---:|
-| rand | 536.4 s | 48.0 s / 15.6 s | 19.1 s / 10.4 s |
-| scen | 3279.9 s | 214.6 s / 104.0 s | 106.4 s / 74.3 s |
+| rand | 498.0 s | 46.1 s / 14.1 s | 15.9 s / 9.3 s |
+| scen | 3133.2 s | 200.0 s / 96.2 s | 94.9 s / 68.9 s |
 
 Interpretation:
 
-- **The algorithmic win is stable:** overall, A\* expands `16,383` nodes per query on average, while JPS expands `389`, a **42.1×** node-count reduction. This is the hardware-independent core win.
-- **The C native role is justified:** C is **2.09×** faster than C# on the cold path and **1.41×** faster hot. The cold path benefits more, showing that guard bands, row/column dirty sync, SIMD bitmap scan, SoA write-back, and retained buffers mainly pay off when edits invalidate cache and force rescans.
-- **A\* is a good accuracy baseline, not the performance target:** C hot is **45.1×** faster than A\* overall, and C cold is still **30.4×** faster. A\*'s simplicity makes it ideal for validation, but expanded-node count dominates on large maps.
+- **The algorithmic win is stable:** overall, A\* expands `16,418` nodes per query on average, while JPS expands `389`, a **42.2×** node-count reduction. This is the hardware-independent core win.
+- **The C native role is justified across the full dataset, not by a few outliers:** C is **2.22×** faster than C# on the cold path and **1.41×** faster hot. Across all 1,124 map/regime rows in the latest run, C cold and C hot each lead C# in **1,124/1,124** rows. The overall cold/hot time ratio is only **1.42×** for C versus **2.23×** for C#, showing that guard bands, row/column dirty sync, SIMD bitmap scan, SoA write-back, and retained buffers substantially reduce the extra cost of edits, invalidation, and rescans.
+- **A\* is a good accuracy baseline, not the performance target:** C hot is **46.4×** faster than A\* overall, and C cold is still **32.8×** faster. A\*'s simplicity makes it ideal for validation, but expanded-node count dominates on large maps.
 - **Map shape sets the ceiling:** open large maps such as `bg512-map` and `wc3maps512-map` can exceed **100×** A\*/C hot speedup; small maps, short paths, or random scatter have higher fixed-overhead share, so the ratio narrows.
+- **The same-configuration trend is still improving:** versus the 2026-07-08 full run with 7 workers, C total time fell by **3.3% / 0.5%** for rand cold/hot and **2.4% / 1.1%** for scen cold/hot. This is an end-to-end difference across the code and runtime environment (the runtime also moved from .NET 10.0.9 to 10.0.10), so it should not be attributed to any single optimization.
 - **The ordered benchmark is a concurrent throughput test:** work is grouped by map, results stream back to the main thread, and rows are printed in dispatch order with the header repeated every 50 rows. If an early map is slow, later completed rows wait until their turn before printing.
 
 The accuracy baseline is `accuracy-results/scen-all-20260704-224247.txt`: **1,423,038** valid non-trivial cases; JPS vs A\* failures `0`, illegal paths `0`, C vs C# mismatches on compact or smoothed paths `0`, cold-cache edit+restore mismatches `0` across 94,706 sampled cases. Only `1` case differs from the official reference length by a tiny amount (0.0315 cell), while A\* / C# JPS / C JPS agree internally, so it does not affect the native performance conclusion.
@@ -1373,7 +1367,7 @@ JPS.slnx                         # solution
 │   ├── jump_point_cache.c/.h    # per-direction SoA jump cache, SIMD scan/write-back, dirty row/column sync
 │   ├── pathfinder.c/.h          # native JPS search, retained search buffers, path reconstruction
 │   ├── smoother.c/.h            # C port of path smoothing (supercover LOS + forward-incremental pulling, point-identical to C#)
-│   ├── min_heap.c/.h            # hole-sift binary min-heap
+│   ├── min_heap.c/.h            # hole-sift 4-ary min-heap
 │   ├── rules.h / directions.h   # no-corner-cutting jump-point / forced-neighbor rules; directions and integer costs
 │   ├── jps_simd.h / jps_atomic.h # platform abstraction for SSE2/NEON 128-bit SIMD and atomics/memory order
 │   ├── JPS.Native.vcxproj       # Windows x64 convenience project, outputs JPS.Native.dll
