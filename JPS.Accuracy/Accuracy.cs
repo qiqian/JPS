@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using JPS.Data;
 using JPS.Models;
+using JPS.Native;
 using JPS.Pathfinding;
 
 namespace JPS.Accuracy
@@ -145,7 +146,7 @@ namespace JPS.Accuracy
             int threadCount = JpsBuildInfo.ConcurrentCache ? Math.Max(1, Environment.ProcessorCount / 2) : 1;
 
             // 原生 C 库（JPS.Native.dll）：可用则对每条用例额外做“C 版 JPS 路径 == C# 版 JPS 路径”强一致校验。
-            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+            bool nativeEnabled = NativeJps.TryInitialize(out string nativeInfo);
 
             Console.WriteLine($"# JPS / A* · MovingAI .scen 正确性报告   {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             Console.WriteLine($"构建配置（JPS.Core）：斜穿角={(JpsBuildInfo.CornerCutting ? "允许" : "禁止")}");
@@ -212,7 +213,9 @@ namespace JPS.Accuracy
 
                     // 原生侧与 C# 侧严格同构：单线程为这张图建一个原生 jps_system（灌阻挡 + Sync），
                     // 各线程的 NativePathfinder 共享它并行寻路；这张图测完即销毁（异常路径也销毁）。
-                    NativeSystem? nsys = nativeEnabled ? new NativeSystem(loaded.map) : null;
+                    NativeSystem? nsys = nativeEnabled
+                        ? new NativeSystem(loaded.map.Width, loaded.map.Height, loaded.map.IsBlocked)
+                        : null;
                     var partial = new Stats[threadCount];
                     Stats coldStats = default;
                     try

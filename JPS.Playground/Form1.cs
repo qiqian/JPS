@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using JPS.Controls;
 using JPS.Data;
 using JPS.Models;
+using JPS.Native;
 using JPS.Pathfinding;
 
 namespace JPS
@@ -42,11 +43,15 @@ namespace JPS
         // 按系统语言设置工具栏按钮、提示、标题与状态栏文案（中/英）。
         private void ApplyLocalization()
         {
+            bool nativeAvailable = NativeJps.TryInitialize(out _);
             // 标题注明构建配置（斜穿角 / 多线程，由 JPS.Core 编译期常量决定）
             Text = Loc.Zh
                 ? $"JPS / A* 寻路测试 — 斜穿角:{(JpsBuildInfo.CornerCutting ? "允许" : "禁止")} | 多线程:{(JpsBuildInfo.ConcurrentCache ? "开" : "关")}"
                 : $"JPS / A* Pathfinding Test — corner-cutting:{(JpsBuildInfo.CornerCutting ? "on" : "off")} | multithread:{(JpsBuildInfo.ConcurrentCache ? "on" : "off")}";
 
+            Text += Loc.T(
+                $" | 原生:{(nativeAvailable ? "开" : "关")}",
+                $" | native:{(nativeAvailable ? "on" : "off")}");
             btnBrush.Text = Loc.T("刷阻挡", "Wall");
             btnBrush.ToolTipText = Loc.T("点空地刷 2×2 阻挡，点阻挡清除 1 格",
                 "Click empty to paint a 2×2 wall; click a wall to erase 1 cell");

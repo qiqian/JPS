@@ -16,9 +16,11 @@
   <ItemGroup>
     <ProjectReference Include="..\JPS.Core\JPS.Core.csproj" />
     <ProjectReference Include="..\JPS.Data\JPS.Data.csproj" />
+    <ProjectReference Include="..\JPS.Native.CSharp\JPS.Native.CSharp.csproj" />
     <!-- 原生库仅 Windows 用 MSBuild 构建 vcxproj；非 Windows 由 build-linux.sh 用 cc 编出 .so，
          托管侧只在运行期 P/Invoke，无编译期依赖，故此引用按平台条件化。 -->
-    <ProjectReference Include="..\JPS.Native\JPS.Native.vcxproj" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+    <ProjectReference Include="..\JPS.Native\JPS.Native.vcxproj"
+                      Condition="$([MSBuild]::IsOSPlatform('Windows')) and '$(JpsSkipNativeBuild)' != 'true'" />
   </ItemGroup>
 
 </Project>

@@ -24,7 +24,7 @@ The project keeps correctness and performance independently auditable: A\* is th
 | **Verified correctness** | **1,423,038** valid official scenarios: 0 missed solutions, 0 illegal paths, and 0 compact/smoothed-path mismatches between C# and native. |
 | **Game-ready adapter** | Matching C# and native adapters handle large-agent padding, ID-tracked moving rectangles, overlaps, and frame-batched synchronization. |
 | **Parallel cache sharing** | Multiple pathfinders share and warm one lock-free lazy cache using acquire/release publication. |
-| **Portable integration** | `netstandard2.1` / C# 9 for Unity 2022; native builds for Windows, Linux, Android, iOS, and macOS with SSE2 or NEON. |
+| **Portable integration** | `netstandard2.1` / C# 9 for Unity 2022, including managed native bindings; native builds for Windows, Linux, Android, iOS, and macOS with SSE2 or NEON. |
 | **Deterministic lockstep** | Integer search costs and fixed tie behavior make the pathfinder suitable for deterministic frame-synchronized games under the documented contract. |
 
 ## Choose Your Path
@@ -33,7 +33,7 @@ The project keeps correctness and performance independently auditable: A\* is th
 |---|---|
 | Understand JPS and no-corner-cutting rules | [Core Principles of JPS](#i-core-principles-of-jps) |
 | Integrate the managed C# / Unity implementation | [C# API Usage](#1-api-usage) |
-| Integrate or optimize the native runtime | [`JPS.Native` public API](JPS.Native/jps.h) · [Native optimization layer](#5-c-native-optimization-layer) |
+| Integrate or optimize the native runtime | [`JPS.Native.CSharp` Unity binding](JPS.Native.CSharp/JPS.Native.CSharp.csproj) · [`JPS.Native` C API](JPS.Native/jps.h) · [Native optimization layer](#5-c-native-optimization-layer) |
 | Support changing obstacles | [Lazy jump table](#1-jump-table-lazy-update) · [Unified obstacle model](#2-unified-obstacle-model) |
 | Handle large agents and moving obstacles | [Game Adapter](#6-game-adapter-padding-and-dynamic-rectangles) · [C# / C API examples](#1-api-usage) |
 | Use deterministic frame synchronization | [Deterministic Lockstep](#7-deterministic-lockstep) |
@@ -350,7 +350,7 @@ The structure mirrors C#:
 - `jps_system` corresponds to `JpsSystem`: it owns `grid_map` + `jump_point_cache`, and acts as the reusable map/cache container across queries.
 - `jps_adapter` corresponds to `JpsAdapter`: it snapshots the static map, composes padding with ID-tracked dynamic rectangles, and owns the system shared by multiple finders.
 - `jps_pathfinder` corresponds to `JpsPathfinder`: it owns only thread-private sparse search state, the open heap, and packed path result, all retained across queries.
-- C# calls it through P/Invoke / native plugins: `jps_system_create`, `jps_system_set_blocked_buffer`, `jps_system_set_blocked_batch`, `jps_system_sync`, `jps_pathfinder_find_path`, `jps_pathfinder_copy_path`, and `jps_pathfinder_copy_smoothed_path`. Public APIs expose compact path and smoothed path only; expanded per-cell paths are intentionally not exposed. Benchmark and accuracy run C# and C over the same cases.
+- [`JPS.Native.CSharp`](JPS.Native.CSharp/JPS.Native.CSharp.csproj) provides the shared managed API used by Unity, Playground, Benchmark, and Accuracy. `NativeSystem`, `NativeAdapter`, and `NativePathfinder` own the corresponding opaque handles; raw `FindRaw` avoids result allocations in hot loops, while `Find` / `CopyPath` / `CopySmoothedPath` provide managed results. Public APIs expose compact and smoothed paths only; expanded per-cell paths are intentionally not exposed.
 
 Main optimizations:
 
@@ -532,6 +532,33 @@ adapter.Sync();
 // Give each thread its own JpsPathfinder and share adapter.System.
 ```
 
+#### Native C# / Unity API
+
+[`JPS.Native.CSharp`](JPS.Native.CSharp/JPS.Native.CSharp.csproj) is the independent managed binding for the native runtime. It targets `netstandard2.1` / C# 9 for Unity 2022 and `net10.0` for desktop tools, and has no dependency on `JPS.Core`. Import its `netstandard2.1` DLL (or source files) into Unity together with the platform native plugin: `JPS.Native.dll` on Windows, `libJPS.Native.so` on Android/Linux, a dylib/bundle on macOS, or a statically linked library on iOS. Unity source builds select iOS `__Internal` automatically; for a precompiled iOS binding DLL, build with `-p:JpsNativeIos=true`.
+
+```csharp
+using JPS.Native;
+
+byte[] cells = new byte[64 * 64];              // row-major: 0 walkable, nonzero blocked
+cells[10 * 64 + 10] = 1;
+
+using (var system = new NativeSystem(64, 64, cells))
+using (var finder = new NativePathfinder())     // reusable; one finder per worker thread
+{
+    int count = finder.FindRaw(system, 2, 3, 60, 55);
+    if (count >= 0)
+    {
+        var compact = finder.CopyPath();
+        var smoothed = finder.CopySmoothedPath();
+    }
+
+    system.SetBlocked(30, 30, true);
+    system.Sync();                              // finish edits before workers resume
+}
+```
+
+`NativeAdapter` exposes obstacle padding and ID-tracked dynamic rectangles. A synchronized `NativeSystem` or `NativeAdapter` may be shared by multiple threads, but each thread must own its own `NativePathfinder`; do not edit or sync the shared map while searches are running.
+
 #### C API
 
 Same lifecycle as C#; include only `jps.h` and link `JPS.Native.dll` / `libJPS.Native.so`.
@@ -663,16 +690,17 @@ jps_system_destroy(system);
 
 ### 2. Project Structure
 
-The `JPS.slnx` solution splits into **six clearly-scoped projects**:
+The `JPS.slnx` solution contains **seven primary projects**, plus the Core and native test projects:
 
 | Project | Type / TFM | Responsibility |
 |---|---|---|
 | **JPS.Core** | class library · `netstandard2.1` / C# 9 | pure algorithm core, UI-agnostic, drops straight into **Unity 2022** |
 | **JPS.Data** | class library · `netstandard2.1` / C# 9 | map data I/O: JSON save + MovingAI `.map` parsing, references Core |
 | **JPS.Native** | C11 native library · cross-platform | high-performance native JPS: SSE2/NEON SIMD bitmap scan, guard bands, SoA jump cache, native pathfinder; buildable for Windows/macOS/Linux/iOS/Android |
-| **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core/Data |
-| **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core/Data and calls `JPS.Native` via P/Invoke |
-| **JPS.Accuracy** | console · `net10.0` | MovingAI `.scen` batch correctness test (validates C# JPS and C native with A* / official optima), references Core/Data and calls `JPS.Native` via P/Invoke |
+| **JPS.Native.CSharp** | class library · `netstandard2.1;net10.0` / C# 9 | independent Unity-compatible managed bindings for all native system/adapter/pathfinder APIs |
+| **JPS.Playground** | WinForms app · `net10.0-windows` | the visual demo UI, references Core/Data and probes the shared native binding |
+| **JPS.Benchmark** | console · `net10.0` | performance benchmark / concurrency stress CLI, references Core/Data and `JPS.Native.CSharp` |
+| **JPS.Accuracy** | console · `net10.0` | MovingAI `.scen` batch correctness test, references Core/Data and `JPS.Native.CSharp` |
 
 ```
 JPS.slnx                         # solution
@@ -708,7 +736,13 @@ JPS.slnx                         # solution
 │   ├── JPS.Native.vcxproj       # Windows x64 convenience project, outputs JPS.Native.dll
 │   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK build scripts, output libJPS.Native.so (see "Build the Android Native Library")
 │
-├── JPS.Playground/              # ④ WinForms demo UI (references Core/Data)
+├── JPS.Native.CSharp/           # ④ shared managed native bindings (netstandard2.1 for Unity 2022; net10.0 desktop resolver)
+│   ├── NativeSystem.cs          # map/cache ownership, map edits, batch updates and Sync
+│   ├── NativeAdapter.cs         # padding + ID-tracked dynamic rectangles
+│   ├── NativePathfinder.cs      # raw/allocation-free find plus managed compact/smoothed result copying
+│   └── NativeMap.cs             # convenient system + pathfinder facade used by Benchmark
+│
+├── JPS.Playground/              # ⑤ WinForms demo UI (references Core/Data/Native.CSharp)
 │   ├── Controls/
 │   │   ├── GridControl.cs       # Grid drawing, interaction, start/goal, visualization (incl. jump dirty/clean dots)
 │   │   ├── SearchOverlay.cs     # Search visualization overlay: implements ISearchObserver as the collector (view state)
@@ -717,14 +751,14 @@ JPS.slnx                         # solution
 │   ├── Form1.cs / Form1.Designer.cs   # Toolbar, legend, save/load dialogs
 │   └── Program.cs               # WinForms entry
 │
-├── JPS.Benchmark/               # ⑤ CLI benchmark / stress test (references Core/Data, calls native via P/Invoke)
+├── JPS.Benchmark/               # ⑥ CLI benchmark / stress test (references Core/Data/Native.CSharp)
 │   └── Benchmark.cs             # `combo [q] [subdir|workers] [workers]`: map-grouped parallel random + .scen combined benchmark, printed by dispatch order
 │
-└── JPS.Accuracy/                # ⑥ MovingAI .scen batch correctness test (references Core/Data, calls native via P/Invoke)
+└── JPS.Accuracy/                # ⑦ MovingAI .scen batch correctness test (references Core/Data/Native.CSharp)
     └── Accuracy.cs              # `[subdir] [maxPerScen]`: validate JPS/C native with A* + official optima; per map, CPU/2 threads share one JpsSystem in parallel (also a thread-safety test)
 ```
 
-> **Portability:** **JPS.Core** and **JPS.Data** are both pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022) and only use `System` / `System.Collections.Generic` / `System.IO` / the smoothing layer's conditionally-compiled `Vector2` — any net-only API or C#10+ syntax is caught at compile time here, so they drop into Unity wholesale. **JPS.Native** is a cross-platform C native core: Windows can use the bundled MSVC x64 project, while iOS/Android can build it as native plugins (iOS static library/framework, Android `.so` — Android has ready-made one-command NDK scripts, see [Build the Android Native Library](#5-build-the-android-native-library-ndk)). Playground / Benchmark are the desktop/CLI hosts and stay out of Unity.
+> **Portability:** **JPS.Core**, **JPS.Data**, and the Unity-facing target of **JPS.Native.CSharp** are pinned to `netstandard2.1` + C# 9 (aligned with Unity 2022). `JPS.Native.CSharp` has no Core/Data dependency and uses Unity's normal native-plugin resolution under `netstandard2.1`; its `net10.0` target additionally probes repository build outputs for desktop tools. **JPS.Native** is the cross-platform C core: Windows can use the bundled MSVC x64 project, while iOS/Android can build it as native plugins (iOS static library/framework, Android `.so` — Android has ready-made one-command NDK scripts, see [Build the Android Native Library](#5-build-the-android-native-library-ndk)).
 >
 > **Concurrency:** [lock-free multithreading](#4-lock-free-multithreading) is **on by default** (`JPS.Core` defines `JPS_CONCURRENT_CACHE`), so multiple `JpsPathfinder`s can share one `JpsSystem` in parallel; remove the symbol to fall back to single-thread max-speed mode.
 
@@ -1114,7 +1148,7 @@ flowchart TD
 - `jps_system` 对应 `JpsSystem`：拥有 `grid_map` + `jump_point_cache`，作为多次查询复用的地图/缓存容器。
 - `jps_adapter` 对应 `JpsAdapter`：快照静态地图，合成阔边与按 id 跟踪的动态矩形，并拥有供多个 finder 共享的 system。
 - `jps_pathfinder` 对应 `JpsPathfinder`：只拥有线程私有搜索态、开放堆、路径结果和路径重建缓冲，可跨查询持久复用。
-- C# 侧通过 P/Invoke / native plugin 调 `jps_system_create` / `jps_system_set_blocked_buffer` / `jps_system_set_blocked_batch` / `jps_system_sync` / `jps_pathfinder_find_path` / `jps_pathfinder_copy_path` / `jps_pathfinder_copy_smoothed_path`；对外只暴露 compact path 与平滑路径，不暴露 expanded path。benchmark 与 accuracy 在同一批用例上比较 C# 与 C。
+- [`JPS.Native.CSharp`](JPS.Native.CSharp/JPS.Native.CSharp.csproj) 是 Unity、Playground、Benchmark、Accuracy 共用的托管 API。`NativeSystem`、`NativeAdapter`、`NativePathfinder` 分别持有对应的不透明句柄；热循环可用 `FindRaw` 避免结果分配，需要托管结果时再用 `Find` / `CopyPath` / `CopySmoothedPath`。对外只暴露 compact path 与平滑路径，不暴露 expanded path。
 
 主要优化点：
 
@@ -1299,6 +1333,33 @@ adapter.Sync();
 // 每个线程用自己的 JpsPathfinder，共享 adapter.System。
 ```
 
+#### Native C# / Unity API
+
+[`JPS.Native.CSharp`](JPS.Native.CSharp/JPS.Native.CSharp.csproj) 是 native runtime 的独立托管封装，不依赖 `JPS.Core`；面向 Unity 2022 提供 `netstandard2.1` / C# 9 目标，同时为桌面工具提供带原生库自动探测的 `net10.0` 目标。Unity 中导入其 `netstandard2.1` DLL（或源码）以及对应平台插件：Windows 用 `JPS.Native.dll`，Android/Linux 用 `libJPS.Native.so`，macOS 用 dylib/bundle，iOS 使用静态链接库。Unity 源码构建会自动选择 iOS 的 `__Internal`；预编译 iOS 封装 DLL 时传入 `-p:JpsNativeIos=true`。
+
+```csharp
+using JPS.Native;
+
+byte[] cells = new byte[64 * 64];              // 行主序：0 可走，非 0 阻挡
+cells[10 * 64 + 10] = 1;
+
+using (var system = new NativeSystem(64, 64, cells))
+using (var finder = new NativePathfinder())     // 可复用；每个工作线程一个
+{
+    int count = finder.FindRaw(system, 2, 3, 60, 55);
+    if (count >= 0)
+    {
+        var compact = finder.CopyPath();
+        var smoothed = finder.CopySmoothedPath();
+    }
+
+    system.SetBlocked(30, 30, true);
+    system.Sync();                              // 工作线程恢复前完成改图与同步
+}
+```
+
+`NativeAdapter` 提供阻挡阔边和按 id 跟踪的动态矩形。完成 `Sync` 的 `NativeSystem` / `NativeAdapter` 可以被多线程共享，但每个线程必须持有自己的 `NativePathfinder`；搜索进行时不得改图或同步。
+
 #### C API
 
 与 C# 相同的生命周期；头文件只需 `jps.h`，链接 `JPS.Native.dll` / `libJPS.Native.so`。
@@ -1429,16 +1490,17 @@ jps_system_destroy(system);
 
 ### 2. 项目结构
 
-解决方案 `JPS.slnx` 拆成**六个职责清晰的工程**：
+解决方案 `JPS.slnx` 包含**七个主工程**，另有 Core 与 native 测试工程：
 
 | 工程 | 类型 / 目标框架 | 职责 |
 |---|---|---|
 | **JPS.Core** | 类库 · `netstandard2.1` / C# 9 | 纯算法核心，UI 无关、可直接拷入 **Unity 2022** |
 | **JPS.Data** | 类库 · `netstandard2.1` / C# 9 | 地图数据 I/O：JSON 存档 + MovingAI `.map` 解析，引用 Core |
 | **JPS.Native** | C11 native 库 · 跨平台 | C 原生高性能 JPS，实现 SSE2/NEON SIMD 位图扫描、guard band、SoA 跳点缓存、native pathfinder；可面向 Windows/macOS/Linux/iOS/Android 构建 |
-| **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core/Data |
-| **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core/Data，并通过 P/Invoke 调用 `JPS.Native` |
-| **JPS.Accuracy** | 控制台 · `net10.0` | MovingAI `.scen` 批量正确性测试（用 A* / 官方最优解校验 C# JPS 与 C native），引用 Core/Data，并通过 P/Invoke 调用 `JPS.Native` |
+| **JPS.Native.CSharp** | 类库 · `netstandard2.1;net10.0` / C# 9 | 独立、兼容 Unity 的 native system/adapter/pathfinder 全量托管封装 |
+| **JPS.Playground** | WinForms 应用 · `net10.0-windows` | 可视化演示界面，引用 Core/Data 并探测共享 native 封装 |
+| **JPS.Benchmark** | 控制台 · `net10.0` | 性能基准 / 并发压测命令行，引用 Core/Data/Native.CSharp |
+| **JPS.Accuracy** | 控制台 · `net10.0` | MovingAI `.scen` 批量正确性测试，引用 Core/Data/Native.CSharp |
 
 ```
 JPS.slnx                         # 解决方案
@@ -1474,7 +1536,13 @@ JPS.slnx                         # 解决方案
 │   ├── JPS.Native.vcxproj       # Windows x64 便捷工程，输出 JPS.Native.dll
 │   └── CMakeLists.txt + ndkbuild.bat/.sh   # Android NDK 构建脚本，输出 libJPS.Native.so（见「构建 Android 原生库」）
 │
-├── JPS.Playground/              # ④ WinForms 演示界面（引用 Core/Data）
+├── JPS.Native.CSharp/           # ④ 共享 native 托管封装（netstandard2.1 支持 Unity 2022；net10.0 带桌面 resolver）
+│   ├── NativeSystem.cs          # 地图/缓存所有权、改图、批量更新与 Sync
+│   ├── NativeAdapter.cs         # 阔边 + 按 id 跟踪的动态矩形
+│   ├── NativePathfinder.cs      # 无分配 raw find + compact/smoothed 托管结果复制
+│   └── NativeMap.cs             # Benchmark 使用的 system + pathfinder 便捷门面
+│
+├── JPS.Playground/              # ⑤ WinForms 演示界面（引用 Core/Data/Native.CSharp）
 │   ├── Controls/
 │   │   ├── GridControl.cs       # 网格绘制、交互、起终点、可视化（含跳点 dirty/clean 点）
 │   │   ├── SearchOverlay.cs     # 寻路可视化叠加：实现 ISearchObserver 作为采集器（视图状态）
@@ -1483,14 +1551,14 @@ JPS.slnx                         # 解决方案
 │   ├── Form1.cs / Form1.Designer.cs   # 工具栏、图例、存档对话框
 │   └── Program.cs               # WinForms 入口
 │
-├── JPS.Benchmark/               # ⑤ 命令行基准 / 压测（引用 Core/Data，通过 P/Invoke 调 native）
+├── JPS.Benchmark/               # ⑥ 命令行基准 / 压测（引用 Core/Data/Native.CSharp）
 │   └── Benchmark.cs             # `combo [q] [子目录|workers] [workers]`：按地图分组并行跑随机投点 + .scen 合并基准，主线程按分发顺序输出
 │
-└── JPS.Accuracy/                # ⑥ MovingAI .scen 批量正确性测试（引用 Core/Data，通过 P/Invoke 调 native）
+└── JPS.Accuracy/                # ⑦ MovingAI .scen 批量正确性测试（引用 Core/Data/Native.CSharp）
     └── Accuracy.cs              # `[子目录] [每scen最多用例数]`：用 A* + 官方最优解校验 JPS/C native；每图 CPU/2 线程共享 JpsSystem 并行（兼测多线程安全）
 ```
 
-> **可移植性**：**JPS.Core** 与 **JPS.Data** 均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐），仅依赖 `System` / `System.Collections.Generic` / `System.IO` / 平滑层条件编译的 `Vector2`——任何 net-only API 或 C#10+ 语法都会在此被编译期拦截，可整体拷入 Unity。**JPS.Native** 是跨平台 C native 核心，Windows 可用随仓库的 MSVC x64 工程，iOS/Android 可按平台编成 native plugin（iOS 静态库/framework，Android `.so`——Android 有现成的一键 NDK 脚本，见[构建 Android 原生库](#5-构建-android-原生库ndk)）。Playground / Benchmark 是桌面/命令行宿主，不进 Unity。
+> **可移植性**：**JPS.Core**、**JPS.Data** 与 **JPS.Native.CSharp** 的 Unity 目标均锁定 `netstandard2.1` + C# 9（与 Unity 2022 对齐）。`JPS.Native.CSharp` 不依赖 Core/Data，在 `netstandard2.1` 下走 Unity 标准 native plugin 解析，在 `net10.0` 下额外探测仓库构建产物供桌面工具使用。**JPS.Native** 是跨平台 C 核心，Windows 可用随仓库的 MSVC x64 工程，iOS/Android 可按平台编成 native plugin（iOS 静态库/framework，Android `.so`——Android 有现成的一键 NDK 脚本，见[构建 Android 原生库](#5-构建-android-原生库ndk)）。
 >
 > **并发**：[无锁多线程模式](#4-无锁多线程共享惰性缓存的并行寻路)**默认开启**（`JPS.Core` 已定义 `JPS_CONCURRENT_CACHE`），多个 `JpsPathfinder` 可共享同一 `JpsSystem` 并行寻路；移除该符号则退回单线程极速模式。
 

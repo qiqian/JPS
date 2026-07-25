@@ -10,6 +10,7 @@ using System.Text;
 using System.Collections.Concurrent;
 using JPS.Data;
 using JPS.Models;
+using JPS.Native;
 using JPS.Pathfinding;
 
 namespace JPS.Benchmark
@@ -756,7 +757,7 @@ namespace JPS.Benchmark
                     progress.Clear();
             }
 
-            bool nativeEnabled = NativeJps.TryInit(out string nativeInfo);
+            bool nativeEnabled = NativeJps.TryInitialize(out string nativeInfo);
             bool useColor = !Console.IsOutputRedirected;
             if (useColor && OperatingSystem.IsWindows())
                 EnableVirtualTerminal();
@@ -1081,7 +1082,9 @@ namespace JPS.Benchmark
                 _system.Sync();
                 _jps = new JpsPathfinder();
                 _astar = new AStarPathfinder();
-                _nat = _nativeEnabled ? new NativeMap(_map) : null;
+                _nat = _nativeEnabled
+                    ? new NativeMap(_map.Width, _map.Height, _map.IsBlocked)
+                    : null;
 
                 _coldWindow = Math.Min(16, Math.Min(_map.Width, _map.Height));
                 _coldEditCount = Math.Min(24, Math.Max(1, _coldWindow * _coldWindow / 4));

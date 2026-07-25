@@ -9,6 +9,7 @@
   <Project Path="JPS.Core/JPS.Core.csproj" />
   <Project Path="JPS.Core.Tests/JPS.Core.Tests.csproj" />
   <Project Path="JPS.Data/JPS.Data.csproj" />
+  <Project Path="JPS.Native.CSharp/JPS.Native.CSharp.csproj" />
   <Project Path="JPS.Native/JPS.Native.vcxproj" Id="94245d1a-9560-4b6d-a46c-1ef616a247cd" />
   <Project Path="JPS.Playground/JPS.Playground.csproj" />
   <Project Path="JPS.Stress/JPS.Stress.vcxproj" Id="9b9e61c1-7861-4c51-b2dd-cf7f23ce8773" />

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net10.0</TargetFrameworks>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>JPS.Native</RootNamespace>
+    <AssemblyName>JPS.Native.CSharp</AssemblyName>
+    <Description>Unity-compatible C# bindings for the JPS native library.</Description>
+  </PropertyGroup>
+
+  <!-- Unity 2022 consumes netstandard2.1. Desktop .NET gets repository-aware DLL probing. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <DefineConstants>$(DefineConstants);JPS_NATIVE_DLLIMPORT_RESOLVER</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Set JpsNativeIos=true when producing a precompiled Unity iOS binding DLL. -->
+  <PropertyGroup Condition="'$(JpsNativeIos)' == 'true'">
+    <DefineConstants>$(DefineConstants);JPS_NATIVE_IOS</DefineConstants>
+  </PropertyGroup>
+
+</Project>
