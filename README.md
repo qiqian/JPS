@@ -13,7 +13,7 @@ The project keeps correctness and performance independently auditable: A\* is th
 
 [English documentation](#english-documentation) · [Quick start](#quick-start) · [Benchmarks](#2-performance-latest-measured) · [中文文档](#中文文档)
 
-![JPS Playground showing search, jump-cache updates, compact path, and smoothed path](intro.png)
+![JPS Playground showing a padded obstacle moving while agents re-path in parallel](intro.gif)
 
 ## Why This Project
 
