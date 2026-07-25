@@ -69,6 +69,8 @@ typedef struct
 #define JPS__NO_DCODE ((uint8_t)3u)   /* parent dx/dy 哨兵：无父（dx_code=dy_code=3） */
 #define JPS__SLOT_CLOSED 0x80000000u
 #define JPS__PACKED_XY_MASK 0x7FFFFFFFu
+#define JPS__INITIAL_STATE_DIVISOR 64
+#define JPS__INITIAL_STATE_MAX 16384
 
 static inline int64_t jps__gd_g(uint64_t gd) { return (int64_t)(gd & JPS__G_MASK); }
 
@@ -206,12 +208,39 @@ static void jps__ensure_state_capacity(jps_pathfinder *pf, int count)
     if (count <= pf->state_capacity)
         return;
 
-    n = pf->state_capacity < 64 ? 64 : pf->state_capacity * 2;
+    n = pf->state_capacity;
+    if (n < 1)
+        n = 1;
     while (n < count)
-        n *= 2;
+    {
+        int growth = n >> 1;
+        if (growth < 1)
+            growth = 1;
+        if (n > pf->size - growth)
+        {
+            n = pf->size;
+            break;
+        }
+        n += growth;
+    }
     pf->g_storage = (uint64_t *)realloc(pf->g_storage, (size_t)n * sizeof(uint64_t));
     pf->slot_node = (uint32_t *)realloc(pf->slot_node, (size_t)n * sizeof(uint32_t));
     pf->state_capacity = n;
+}
+
+static int jps__initial_state_capacity(int size)
+{
+    /* MovingAI 全量 benchmark 的平均/P95 展开率约 0.23%/0.64%；slot 还要容纳 open
+     * frontier，因此按 1/64 (1.5625%) 预留。小图至少 64，大图最多先留 16K，
+     * 避免超大稀疏地图仅因绑定 pathfinder 就分配过多。 */
+    int n = (size + JPS__INITIAL_STATE_DIVISOR - 1) / JPS__INITIAL_STATE_DIVISOR;
+    if (n < 64)
+        n = 64;
+    if (n > JPS__INITIAL_STATE_MAX)
+        n = JPS__INITIAL_STATE_MAX;
+    if (n > size)
+        n = size;
+    return n;
 }
 
 static void jps__reset_sparse_state(jps_pathfinder *pf)
@@ -307,6 +336,8 @@ uint64_t jps_pathfinder_memory_bytes(const jps_pathfinder *pf)
 
 static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
 {
+    int initial_capacity;
+
     if (pf->w == m->width && pf->size == m->width * m->height)
         return;
 
@@ -319,11 +350,12 @@ static void jps__ensure_buffers(jps_pathfinder *pf, const jps_grid_map *m)
     pf->smoothed = NULL;
     pf->smoothed_count = 0;
     pf->smoothed_capacity = 0;
+    initial_capacity = jps__initial_state_capacity(pf->size);
     pf->g_slot = (int32_t *)calloc((size_t)pf->size, sizeof(int32_t));
-    pf->g_storage = NULL;
-    pf->slot_node = NULL;
+    pf->g_storage = (uint64_t *)malloc((size_t)initial_capacity * sizeof(uint64_t));
+    pf->slot_node = (uint32_t *)malloc((size_t)initial_capacity * sizeof(uint32_t));
     pf->state_count = 0;
-    pf->state_capacity = 0;
+    pf->state_capacity = initial_capacity;
 }
 
 static inline int jps__id(const jps_pathfinder *pf, int x, int y) { return y * pf->w + x; }

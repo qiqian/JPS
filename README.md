@@ -359,7 +359,7 @@ Main optimizations:
 - **Row + column bitmaps:** horizontal scans use the row bitmap, vertical scans use a transposed column bitmap; both reuse the same 128-bit SIMD scan code, whereas the C# reference only has word-at-a-time acceleration horizontally.
 - **Per-direction SoA jump cache:** `dist` / `gen` are stored as contiguous planes, enabling SIMD write-back of multiple 16-bit distances; row directions use `row_gen`, column directions use `col_gen`, invalidating only affected rows/columns.
 - **Efficient map sync:** initial full loads use `jps_system_set_blocked_buffer`, sparse dynamic edits use `jps_system_set_blocked_batch`, and `Sync` advances cache generations from dirty rows / dirty columns instead of clearing the whole table.
-- **Sparse search state:** each cell keeps only a 4-byte `g_slot` (0 unseen, positive open, negative closed); 64-bit g/steps/parent data and packed coordinates are allocated only for visited nodes, reducing fixed 10N storage to `4N+12C`, where `C` is the retained peak slot capacity.
+- **Sparse search state:** each cell keeps only a 4-byte `g_slot` (0 unseen, positive open, negative closed); 64-bit g/steps/parent data and packed coordinates are allocated only for visited nodes, reducing fixed 10N storage to `4N+12C`. The initial slot reserve is map-aware (`N/64`, clamped to 64–16K and never above N) and grows by 50% instead of doubling, limiting both startup reallocations and retained peak slack.
 - **Low-allocation search hot path:** the heap directly stores sparse slots, while a single packed-`uint32_t` compact-path buffer collects and reverses the parent chain in place; the arena, path, and heap are all reused across calls.
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
@@ -1157,7 +1157,7 @@ flowchart TD
 - **行 + 列双位图**：横向扫描走行位图，纵向扫描走转置后的列位图；两者都能复用同一套 128-bit SIMD 扫描逻辑，不再像 C# 参考实现那样只有横向按字加速。
 - **按方向 SoA 跳点缓存**：`dist` / `gen` 拆成连续平面，配合 SIMD 一次写回多个 16 位距离；行方向用 `row_gen`，列方向用 `col_gen`，只让受影响的行/列失效。
 - **高效地图同步**：整图初始化走 `jps_system_set_blocked_buffer`，局部动态改图走 `jps_system_set_blocked_batch`；`Sync` 根据 dirty rows / dirty cols 推进缓存世代，而不是每次全表清空。
-- **稀疏搜索状态**：每格只保留 4 B `g_slot`（0 unseen、正 open、负 closed）；64 位 g/steps/parent 与 packed 坐标只为实际访问节点分配，内存由固定 10N 降为 `4N+12C`（`C` 为跨查询保留的峰值 slot 容量）。
+- **稀疏搜索状态**：每格只保留 4 B `g_slot`（0 unseen、正 open、负 closed）；64 位 g/steps/parent 与 packed 坐标只为实际访问节点分配，内存由固定 10N 降为 `4N+12C`。slot 初始容量按地图 `N/64` 估算（限制在 64–16K 且不超过 N），不足时只增长 50%，兼顾首次查询的 realloc 次数和峰值冗余。
 - **低分配搜索热路径**：堆直接存 sparse slot，compact path 用单个 packed `uint32_t` 数组完成父链收集与原地翻转；arena、路径和开放堆都跨查询复用，避免每次 find path 的 malloc/free 抖动。
 
 这层优化解释了当前 benchmark 的形态：hot 路径 C 主要赢在更紧的数据布局和更少分支；cold 路径 C 赢得更多，因为重扫/回写/同步受 SIMD、dirty row/col 和批量改图接口的影响更大。
