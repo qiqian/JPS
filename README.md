@@ -1,66 +1,105 @@
-# JPS Pathfinding + Playground Visualization
+<a id="top"></a>
+# JPS: High-Performance Jump Point Search for C#, Native C/C++, and Unity
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![C# 9](https://img.shields.io/badge/C%23-9.0-512BD4.svg)](#1-api-usage)
+[![Native C/C++](https://img.shields.io/badge/native-C11%20%2F%20C%2B%2B-00599C.svg)](#5-c-native-optimization-layer)
+[![Unity 2022](https://img.shields.io/badge/Unity-2022%2B-black.svg)](#1-api-usage)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android%20%7C%20iOS-blue.svg)](#iv-usage-guide)
 
-![Demo](intro.png)
+A production-ready, deterministic **Jump Point Search (JPS)** implementation for 8-connected grids. It combines a portable C# reference, an aggressively optimized native C/C++ runtime, zero-rebuild dynamic obstacles, a game-ready large-agent adapter, lock-free shared caching, path smoothing, and Unity-ready APIs.
 
-一个**工程化、可直接复用的 Jump Point Search 寻路实现**，严格遵循 Harabor & Grastien (SoCS'12) 的**禁止斜穿角**规则。算法核心是 UI 无关的可移植库（`netstandard2.1` / C# 9），可整体拷入 **Unity 2022**。<br>
-_A **production-ready, reusable Jump Point Search implementation** that strictly follows the no-corner-cutting rules of Harabor & Grastien (SoCS'12). The core is a UI-agnostic, portable library (`netstandard2.1` / C# 9) that drops into **Unity 2022** wholesale._
+The project keeps correctness and performance independently auditable: A\* is the shortest-path baseline, `JPS.Core` is the readable C# reference, and `JPS.Native` is the SIMD-accelerated cross-platform implementation. All three are validated across every MovingAI map set in the repository.
 
-工程分三层，各司其职：**A\*** 是准确性基准；**C# JPS** 是基础 JPS 算法的可移植参考实现；**C JPS（`JPS.Native`）** 是极致优化的跨平台 native 版本（桌面 / iOS / Android，可按平台构建为动态库或静态库）。三者在全部 7 个 [MovingAI](https://movingai.com/benchmarks/) 地图集上做百万级逐条验证与基准测试。仓库同时附带一个 Windows Forms **Playground**，把"跳点表更新过程"实时可视化，方便理解算法内部机理。<br>
-_The project splits into three tiers with explicit roles: **A\*** is the accuracy baseline; **C# JPS** is the portable reference implementation of the base JPS algorithm; **C JPS (`JPS.Native`)** is the aggressively optimized cross-platform native build (desktop / iOS / Android, built as a dynamic or static library per platform). All three are validated and benchmarked at million-case scale across all 7 [MovingAI](https://movingai.com/benchmarks/) map sets. The repo also ships a Windows Forms **Playground** that visualizes the jump-table update process in real time._
+[English documentation](#english-documentation) · [Quick start](#quick-start) · [Benchmarks](#2-performance-latest-measured) · [中文文档](#中文文档)
 
-**核心技术亮点 · Core Highlights**
+![JPS Playground showing search, jump-cache updates, compact path, and smoothed path](intro.png)
 
-- **惰性跳点表（本项目核心）**：不做任何预计算，跳点距离"用到哪格才算哪格"；单格障碍变化只标记受影响的行/列，`Sync` 时推进对应行/列世代，不重建全表，并跨查询持续复用已洗白的跳点，越跑越快。<br>
-  _**Lazy jump table (the core idea):** no precomputation — jump distances are filled on demand; a single obstacle edit only marks affected rows/columns, `Sync` advances the corresponding row/column generations, and whitened jump points are reused across queries, with no table rebuild._
-- **动态障碍零重建**：因惰性表把"重建代价"消解为零，静态/动态障碍统一为一种，改任意障碍都不触发重建。<br>
-  _**Zero-rebuild dynamic obstacles:** since the lazy table reduces "rebuild cost" to zero, static and dynamic obstacles unify into one — editing any obstacle never triggers a rebuild._
-- **无锁多线程共享缓存（默认开启）**：多个寻路器共享同一份缓存并**互相预热**，用 `Volatile` 对世代戳做 acquire/release 发布保证可见性与次序，免锁并行（x86 上额外开销可忽略；可移除 `JPS_CONCURRENT_CACHE` 退回单线程极速）。<br>
-  _**Lock-free shared cache across threads (on by default):** many pathfinders share one cache and **warm it for each other**, publishing generation stamps with `Volatile` acquire/release for visibility and ordering — parallel without locks (negligible cost on x86; remove `JPS_CONCURRENT_CACHE` for single-thread max speed)._
-- **全整数 + 零分配的高性能内核**：整数代价/启发、扁平数组、世代戳免清零、缓冲复用、近零 GC；**142.3 万条**官方 `.scen` 场景验证中，JPS 与 A\* 的整数代价 **处处相等（subopt=0）**、路径非法 **0**、漏解 **0**。与官方最优长度比对时，**142.3034 万条精确吻合**，3 条属于整数 `1414≈√2` 度量内的舍入容差，另 1 条仅与官方参考长度有 0.0315 格偏差。<br>
-  _**All-integer, zero-allocation core:** integer cost/heuristic, flat arrays, generation stamps (no clearing), buffer reuse, near-zero GC. Across **1.423M** official `.scen` cases, JPS integer cost equals A\* **everywhere (subopt=0)**, with **0** illegal paths and **0** missed solutions. Against the official optimal lengths, **1.423034M** cases match exactly, 3 are normal integer-`1414≈√2` tolerance artifacts, and 1 differs only from the official reference length by 0.0315 cell._
-- **A\* / C# JPS / C JPS 三层分工**：**A\*** 只负责给准确性兜底；`JPS.Core` 是 C# 基础算法与可移植参考实现；`JPS.Native` 是跨平台 C 原生极致优化版本（C11 API / SSE2 或 NEON 128 位 SIMD 位图扫描 / 按方向 SoA 缓存 + SIMD 回写 / 行·列级惰性失效 / guard band 免边界分支 / 稀疏打包搜索状态）。C 版与 C# 版在 **142.3 万条**官方场景中 compact path 与平滑路径**逐点强一致**（`mism=0`），冷缓存随机改图+还原后仍一致。性能（AMD Ryzen 7 5800X3D，7 map workers）：C 原生 hot 比 A\* 快 **45.4–53.7×**，cold 比 A\* 快 **31.3–33.0×**；相对 C# JPS，C hot 快 **1.40–1.52×**，cold 快 **2.11–2.89×**。<br>
-  _**A\* / C# JPS / C JPS split:** **A\*** is the accuracy ground truth; `JPS.Core` is the C# base algorithm and portable reference; `JPS.Native` is the aggressively optimized cross-platform C build (C11 API / SSE2 or NEON 128-bit SIMD bitmap scan / per-direction SoA cache + SIMD write-back / row·column-level lazy invalidation / guard band for branch-free bounds / sparse packed search state). The C build returns the same compact path **and smoothed path, point for point,** as C# over **1.423M** official cases (`mism=0`), and stays identical after cold-cache random edit+restore checks. Performance (AMD Ryzen 7 5800X3D, 7 map workers): C native is **45.4–53.7×** faster than A\* on hot cache and **31.3–33.0×** on cold cache; compared with C# JPS, C is **1.40–1.52×** faster hot and **2.11–2.89×** faster cold._
-- **工程化分层、可移植、有测试背书**：拆分为 `JPS.Core`（纯算法）/ `JPS.Data`（地图 I/O）/ `JPS.Native`（跨平台 C native）/ `JPS.Playground`（界面）/ `JPS.Benchmark`（性能基准）/ `JPS.Accuracy`（正确性）六个工程；C# 核心锁定 `netstandard2.1` / C# 9、不依赖 WinForms，可整体拷入 Unity 2022；native 核心可按目标平台编译为 Windows/macOS/Linux/iOS/Android 插件。<br>
-  _**Layered engineering, portable, test-backed:** split into `JPS.Core` (pure algorithm) / `JPS.Data` (map I/O) / `JPS.Native` (cross-platform C native) / `JPS.Playground` (UI) / `JPS.Benchmark` (perf) / `JPS.Accuracy` (correctness); the C# core targets `netstandard2.1` / C# 9 with no WinForms dependency and drops into Unity 2022 wholesale; the native core can be compiled as a Windows/macOS/Linux/iOS/Android plugin for the target platform._
+## Why This Project
 
-> Playground 用法：刷阻挡 → 设起点/终点 → `JPS寻路` / `A*寻路`，即可看到搜索过程、最终路径、平滑路径，以及每个格子各方向跳点缓存的更新状态。<br>
-> _In the Playground: brush obstacles → set start/goal → `JPS寻路` / `A*寻路` to watch the search process, final path, smoothed path, and each cell's per-direction jump-cache update state._
+| Capability | What it provides |
+|---|---|
+| **Dynamic grids without rebuilds** | A lazy cardinal jump table fills distances on demand; obstacle edits invalidate only affected rows and columns, with no O(N) table rebuild. |
+| **Native speed** | On the full 1.98M-query benchmark, native hot paths are **45.4–53.7× faster than A\*** and **1.40–1.52× faster than C# JPS**. |
+| **Verified correctness** | **1,423,038** valid official scenarios: 0 missed solutions, 0 illegal paths, and 0 compact/smoothed-path mismatches between C# and native. |
+| **Game-ready adapter** | Matching C# and native adapters handle large-agent padding, ID-tracked moving rectangles, overlaps, and frame-batched synchronization. |
+| **Parallel cache sharing** | Multiple pathfinders share and warm one lock-free lazy cache using acquire/release publication. |
+| **Portable integration** | `netstandard2.1` / C# 9 for Unity 2022; native builds for Windows, Linux, Android, iOS, and macOS with SSE2 or NEON. |
+| **Deterministic lockstep** | Integer search costs and fixed tie behavior make the pathfinder suitable for deterministic frame-synchronized games under the documented contract. |
 
-> 中文正文在前，**English translation of the full body is appended after the Chinese sections** (see the right-hand links in the table of contents).
+## Choose Your Path
+
+| Goal | Start here |
+|---|---|
+| Understand JPS and no-corner-cutting rules | [Core Principles of JPS](#i-core-principles-of-jps) |
+| Integrate the managed C# / Unity implementation | [C# API Usage](#1-api-usage) |
+| Integrate or optimize the native runtime | [`JPS.Native` public API](JPS.Native/jps.h) · [Native optimization layer](#5-c-native-optimization-layer) |
+| Support changing obstacles | [Lazy jump table](#1-jump-table-lazy-update) · [Unified obstacle model](#2-unified-obstacle-model) |
+| Handle large agents and moving obstacles | [Game Adapter](#6-game-adapter-padding-and-dynamic-rectangles) · [C# / C API examples](#1-api-usage) |
+| Use deterministic frame synchronization | [Deterministic Lockstep](#7-deterministic-lockstep) |
+| Review measurements and methodology | [Performance](#2-performance-latest-measured) · [Memory footprint](#1-memory-footprint) |
+| Build native artifacts | [Android NDK](#5-build-the-android-native-library-ndk) · [Linux](#6-build-and-test-on-linux) |
+| Read the Chinese documentation | [中文完整文档](#中文文档) |
+
+<a id="quick-start"></a>
+## Quick Start
+
+Explore the algorithm and cache visualization:
+
+```powershell
+git clone https://github.com/qiqian/JPS.git
+cd JPS
+dotnet run --project JPS.Playground
+```
+
+The Playground lets you paint obstacles, set start/goal cells, compare JPS with A\*, inspect the compact and smoothed paths, and watch each direction of the lazy jump cache become clean. Native-backed accuracy and performance tools require `JPS.Native` to be built first; see [Run Tests](#3-run-tests), [Android NDK](#5-build-the-android-native-library-ndk), or [Linux](#6-build-and-test-on-linux).
+
+## 中文概览
+
+这是一个面向实际工程的 **Jump Point Search 寻路库**：C# 参考实现可直接用于 Unity 2022，native C/C++ 版本通过 SSE2/NEON、惰性跳点缓存和稀疏搜索状态追求极限性能。它支持动态障碍、大体积单位适配、无锁多线程共享缓存、路径平滑和确定性帧同步。
+
+- 官方场景有效用例 **142.3038 万条**：漏解 0、非法路径 0、C# 与 native 路径不一致 0。
+- 动态障碍只失效受影响的行/列，不重建整张跳点表。
+- C# `JpsAdapter` 与 native `jps_adapter` 统一处理阔边、按 ID 移动矩形、重叠覆盖和逐帧批量同步。
+- 完整 benchmark 下，native hot 相对 A\* 快 **45.4–53.7×**，相对 C# JPS 快 **1.40–1.52×**。
+
+[中文完整文档](#中文文档) · [游戏适配器](#6-游戏适配器阔边与动态矩形) · [中文 API 用法](#1-api-用法) · [性能实测](#2-性能表现最新实测) · [确定性与帧同步](#7-确定性与帧同步deterministic-lockstep)
 
 ---
 
-## 目录 · Table of Contents
+## Documentation
 
-> 每条左侧为中文锚点，右侧 `·` 后为英文锚点。 _Left link → Chinese section, right link (after `·`) → English section._
+> English links come first. Every major section has a matching Chinese entry.
 
-- [一、JPS 算法核心原理](#一jps-算法核心原理) · [Core Principles of JPS](#i-core-principles-of-jps)
-  - [1. 网格与移动规则](#1-网格与移动规则) · [Grid and Movement Rules](#1-grid-and-movement-rules)
-  - [2. 剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居) · [Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors)
-  - [3. 强迫邻居判定规则](#3-强迫邻居判定规则forced-neighbor) · [Forced-Neighbor Rules](#3-forced-neighbor-rules)
-  - [4. 走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则) · [Straight and Diagonal Scanning](#4-straight-and-diagonal-scanning)
-  - [5. 为什么比 A\* 快](#5-为什么比-a-快) · [Why It's Faster Than A\*](#5-why-its-faster-than-a)
-- [二、本项目的核心实现](#二本项目的核心实现) · [Implementation Highlights](#ii-implementation-highlights)
-  - [1. 惰性跳点表](#1-jump-table-lazy-update惰性跳点表) · [Jump Table Lazy Update](#1-jump-table-lazy-update)
-  - [2. 静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计) · [Unified Obstacle Model](#2-unified-obstacle-model)
-  - [3. 平滑方案的选择](#3-平滑方案的选择) · [Path Smoothing](#3-path-smoothing)
-  - [4. 无锁多线程：共享惰性缓存的并行寻路](#4-无锁多线程共享惰性缓存的并行寻路) · [Lock-Free Multithreading](#4-lock-free-multithreading)
-  - [5. C Native 极致优化层](#5-c-native-极致优化层) · [C Native Optimization Layer](#5-c-native-optimization-layer)
-  - [6. 确定性与帧同步](#6-确定性与帧同步deterministic-lockstep) · [Deterministic Lockstep](#6-deterministic-lockstep)
-- [三、工程与性能要点](#三工程与性能要点) · [Engineering and Performance](#iii-engineering-and-performance)
-  - [1. 内存开销对比](#1-内存开销对比) · [Memory Footprint](#1-memory-footprint)
-  - [2. 性能表现（最新实测）](#2-性能表现最新实测) · [Performance](#2-performance-latest-measured)
-- [四、使用说明](#四使用说明) · [Usage Guide](#iv-usage-guide)
-  - [1. API 用法](#1-api-用法) · [API Usage](#1-api-usage)
-  - [2. 项目结构](#2-项目结构) · [Project Structure](#2-project-structure)
-  - [3. 运行测试](#3-运行测试) · [Run Tests](#3-run-tests)
-  - [4. 运行 Playground](#4-运行-playground) · [Run Playground](#4-run-playground)
-  - [5. 构建 Android 原生库](#5-构建-android-原生库ndk) · [Build the Android Native Library](#5-build-the-android-native-library-ndk)
-  - [6. 在 Linux 上构建与测试](#6-在-linux-上构建与测试) · [Build and Test on Linux](#6-build-and-test-on-linux)
+- [Core Principles of JPS](#i-core-principles-of-jps) · [一、JPS 算法核心原理](#一jps-算法核心原理)
+  - [Grid and Movement Rules](#1-grid-and-movement-rules) · [网格与移动规则](#1-网格与移动规则)
+  - [Pruning: Natural vs Forced Neighbors](#2-pruning-natural-vs-forced-neighbors) · [剪枝思想：自然邻居与强迫邻居](#2-剪枝思想自然邻居与强迫邻居)
+  - [Forced-Neighbor Rules](#3-forced-neighbor-rules) · [强迫邻居判定规则](#3-强迫邻居判定规则forced-neighbor)
+  - [Straight and Diagonal Scanning](#4-straight-and-diagonal-scanning) · [走直线与走斜线的扫描规则](#4-走直线与走斜线的扫描规则)
+  - [Why It Is Faster Than A\*](#5-why-its-faster-than-a) · [为什么比 A\* 快](#5-为什么比-a-快)
+- [Implementation Highlights](#ii-implementation-highlights) · [二、本项目的核心实现](#二本项目的核心实现)
+  - [Jump Table Lazy Update](#1-jump-table-lazy-update) · [惰性跳点表](#1-jump-table-lazy-update惰性跳点表)
+  - [Unified Obstacle Model](#2-unified-obstacle-model) · [静态 / 动态障碍的兼容设计](#2-静态--动态障碍的兼容设计)
+  - [Path Smoothing](#3-path-smoothing) · [平滑方案的选择](#3-平滑方案的选择)
+  - [Lock-Free Multithreading](#4-lock-free-multithreading) · [无锁多线程：共享惰性缓存](#4-无锁多线程共享惰性缓存的并行寻路)
+  - [C Native Optimization Layer](#5-c-native-optimization-layer) · [C Native 极致优化层](#5-c-native-极致优化层)
+  - [Game Adapter](#6-game-adapter-padding-and-dynamic-rectangles) · [游戏适配器：阔边与动态矩形](#6-游戏适配器阔边与动态矩形)
+  - [Deterministic Lockstep](#7-deterministic-lockstep) · [确定性与帧同步](#7-确定性与帧同步deterministic-lockstep)
+- [Engineering and Performance](#iii-engineering-and-performance) · [三、工程与性能要点](#三工程与性能要点)
+  - [Memory Footprint](#1-memory-footprint) · [内存开销对比](#1-内存开销对比)
+  - [Performance](#2-performance-latest-measured) · [性能表现（最新实测）](#2-性能表现最新实测)
+- [Usage Guide](#iv-usage-guide) · [四、使用说明](#四使用说明)
+  - [API Usage](#1-api-usage) · [API 用法](#1-api-用法)
+  - [Project Structure](#2-project-structure) · [项目结构](#2-项目结构)
+  - [Run Tests](#3-run-tests) · [运行测试](#3-运行测试)
+  - [Run Playground](#4-run-playground) · [运行 Playground](#4-运行-playground)
+  - [Build the Android Native Library](#5-build-the-android-native-library-ndk) · [构建 Android 原生库](#5-构建-android-原生库ndk)
+  - [Build and Test on Linux](#6-build-and-test-on-linux) · [在 Linux 上构建与测试](#6-在-linux-上构建与测试)
 
 ---
+
+<a id="中文文档"></a>
+[Back to top](#top) · [English documentation](#english-documentation)
 
 ## 一、JPS 算法核心原理
 
@@ -290,6 +329,7 @@ flowchart TD
 核心结构仍然对应 C#：
 
 - `jps_system` 对应 `JpsSystem`：拥有 `grid_map` + `jump_point_cache`，作为多次查询复用的地图/缓存容器。
+- `jps_adapter` 对应 `JpsAdapter`：快照静态地图，合成阔边与按 id 跟踪的动态矩形，并拥有供多个 finder 共享的 system。
 - `jps_pathfinder` 对应 `JpsPathfinder`：只拥有线程私有搜索态、开放堆、路径结果和路径重建缓冲，可跨查询持久复用。
 - C# 侧通过 P/Invoke / native plugin 调 `jps_system_create` / `jps_system_set_blocked_buffer` / `jps_system_set_blocked_batch` / `jps_system_sync` / `jps_pathfinder_find_path` / `jps_pathfinder_copy_path` / `jps_pathfinder_copy_smoothed_path`；对外只暴露 compact path 与平滑路径，不暴露 expanded path。benchmark 与 accuracy 在同一批用例上比较 C# 与 C。
 
@@ -305,7 +345,23 @@ flowchart TD
 
 这层优化解释了当前 benchmark 的形态：hot 路径 C 主要赢在更紧的数据布局和更少分支；cold 路径 C 赢得更多，因为重扫/回写/同步受 SIMD、dirty row/col 和批量改图接口的影响更大。
 
-### 6. 确定性与帧同步（Deterministic Lockstep）
+### 6. 游戏适配器：阔边与动态矩形
+
+JPS 内核只需要回答“格子能不能走”，但游戏逻辑通常面对的是**有体积的单位**和**持续移动的矩形障碍**。C# [`JpsAdapter`](JPS.Core/Pathfinding/JpsAdapter.cs) 与 native [`jps_adapter`](JPS.Native/adapter.c) 在寻路内核之上提供相同的适配模型，把这些工程细节集中在一层处理，而不让 pathfinder 热路径承担对象管理和形状判断。
+
+| 游戏侧问题 | Adapter 的处理 |
+|---|---|
+| 单位不是一个点 | `obstaclePadding=p` 将静态阻挡、动态矩形和地图边界统一向外扩张 `p` 格；仍用单位中心点寻路，就能为大体积单位保留安全间距。 |
+| 障碍跨帧移动 | 动态矩形按整数 `id` 跟踪；同一接口完成新增、移动和删除，调用方不需要自己擦除旧 footprint。 |
+| 多个障碍发生重叠 | 只为实际覆盖的格子保存稀疏 `ushort` 引用计数；移除一个矩形不会错误清掉仍被其他动态矩形或静态阔边占用的格子。 |
+| 移动前后 footprint 相交 | 旧矩形、新矩形与当前覆盖表按格索引一次归并，只修改真正离开或进入的格子，避免交集产生临时 `1→0→1` 抖动和多余缓存失效。 |
+| 一帧有多次地图变化 | adapter 持有共享 `JpsSystem` / `jps_system`，但不持有 pathfinder；主线程批量更新后只 `Sync` 一次，再让各工作线程用自己的 pathfinder 共享该 system。 |
+
+静态原图和阔边结果各用 **1 bit/格** 保存；动态状态只保留按格索引排序的实际覆盖项与紧凑矩形记录，因此在“大地图、少量移动物体”的常见场景下无需再复制一张逐格对象地图。C# 与 native API 具有对应的生命周期和行为，并分别由 [`JpsAdapterTests`](JPS.Core.Tests/JpsAdapterTests.cs) 与 [`adapter_tests.c`](JPS.Stress/adapter_tests.c) 覆盖静态快照、边界阔边、移动、重叠、删除、重建和随机状态对照。
+
+这层的定位很明确：**adapter 负责把游戏世界整理成有效阻挡图，system 负责地图与共享跳点缓存，pathfinder 负责一次线程私有搜索**。具体调用方式见[使用说明 · API 用法](#1-api-用法)中的 C# `JpsAdapter` 与 native `jps_adapter` 示例。
+
+### 7. 确定性与帧同步（Deterministic Lockstep）
 
 **`JPS.Native` 的寻路结果是确定性的，可以用于帧同步游戏。** 给定完全相同的地图状态、起点、终点、移动规则和调用边界，各客户端会得到相同的 compact path 与平滑路径；缓存冷热状态、线程调度和 SIMD 后端只影响执行时间，不改变寻路结果。
 
@@ -798,11 +854,13 @@ dotnet JPS.Benchmark/bin/Release/net10.0/JPS.Benchmark.dll combo 1000
 本项目以 **MIT License** 开源——可自由用于个人或**商业**用途：使用、复制、修改、合并、发布、分发、再授权、出售均不受限，只需在副本中保留版权与许可声明。详见 [LICENSE](LICENSE)。
 
 ---
----
 
-# English Translation
+<a id="english-documentation"></a>
+[Back to top](#top) · [中文文档](#中文文档)
 
-> Full English translation of the body above. Use the right-hand links in the [table of contents](#目录--table-of-contents) to jump here. ([↑ back to top](#jps-pathfinding--playground-visualization))
+# English Documentation
+
+> Full English documentation. Use the English-first [documentation index](#documentation) to jump directly to a topic.
 
 ## I. Core Principles of JPS
 
@@ -1030,6 +1088,7 @@ At the source level it exposes a narrow C11-style API with opaque handles. On mo
 The structure mirrors C#:
 
 - `jps_system` corresponds to `JpsSystem`: it owns `grid_map` + `jump_point_cache`, and acts as the reusable map/cache container across queries.
+- `jps_adapter` corresponds to `JpsAdapter`: it snapshots the static map, composes padding with ID-tracked dynamic rectangles, and owns the system shared by multiple finders.
 - `jps_pathfinder` corresponds to `JpsPathfinder`: it owns only thread-private sparse search state, the open heap, and packed path result, all retained across queries.
 - C# calls it through P/Invoke / native plugins: `jps_system_create`, `jps_system_set_blocked_buffer`, `jps_system_set_blocked_batch`, `jps_system_sync`, `jps_pathfinder_find_path`, `jps_pathfinder_copy_path`, and `jps_pathfinder_copy_smoothed_path`. Public APIs expose compact path and smoothed path only; expanded per-cell paths are intentionally not exposed. Benchmark and accuracy run C# and C over the same cases.
 
@@ -1045,7 +1104,23 @@ Main optimizations:
 
 This explains the current benchmark shape: on hot cache, C mostly wins from tighter layout and fewer branches; on cold cache, C wins more because rescanning, write-back, and sync benefit directly from SIMD, dirty row/column tracking, and batched edit APIs.
 
-### 6. Deterministic Lockstep
+### 6. Game Adapter: Padding and Dynamic Rectangles
+
+The JPS core only needs to answer whether a cell is walkable, while game code usually deals with **agents that have physical size** and **rectangular obstacles that move every frame**. The C# [`JpsAdapter`](JPS.Core/Pathfinding/JpsAdapter.cs) and native [`jps_adapter`](JPS.Native/adapter.c) expose the same adaptation model above the pathfinding core, keeping object tracking and shape handling out of the pathfinder's hot loop.
+
+| Game-side problem | Adapter behavior |
+|---|---|
+| An agent is larger than one point | `obstaclePadding=p` expands static obstacles, dynamic rectangles, and the map boundary by `p` cells. Pathfinding can still use the agent center while preserving clearance. |
+| Obstacles move between frames | Dynamic rectangles are tracked by integer `id`; the same API adds, moves, and removes them, so callers never need to erase an old footprint manually. |
+| Several obstacles overlap | Sparse per-cell `ushort` reference counts retain only covered cells. Removing one rectangle cannot clear a cell still covered by another dynamic rectangle or static padding. |
+| Old and new footprints intersect | The old rectangle, new rectangle, and current coverage table are merged once in cell-index order. Only cells that truly enter or leave change, avoiding transient `1→0→1` churn and needless cache invalidation. |
+| A frame contains many map edits | The adapter owns the shared `JpsSystem` / `jps_system`, but no pathfinder. The main thread batches edits and calls `Sync` once, then worker-local pathfinders share that system. |
+
+The immutable static bitmap and its padded result each cost **1 bit per cell**. Dynamic state stores only sorted covered-cell entries and compact rectangle records, avoiding another dense per-cell object map in the common “large map, few moving objects” case. The C# and native APIs share matching lifecycles and behavior; [`JpsAdapterTests`](JPS.Core.Tests/JpsAdapterTests.cs) and [`adapter_tests.c`](JPS.Stress/adapter_tests.c) cover immutable snapshots, boundary padding, movement, overlap, removal, rebuilds, and randomized reference comparisons.
+
+The ownership model stays deliberately simple: **the adapter turns game-world objects into an effective blocked map, the system owns that map and its shared jump cache, and each pathfinder owns one thread's search state**. See the C# `JpsAdapter` and native `jps_adapter` examples under [Usage Guide · API Usage](#1-api-usage).
+
+### 7. Deterministic Lockstep
 
 **`JPS.Native` produces deterministic pathfinding results and can be used in deterministic lockstep games.** Given the same map state, start, goal, movement rules, and call boundaries, every client obtains the same compact and smoothed paths. Cache temperature, thread scheduling, and the SIMD backend affect execution time only, not the result.
 
